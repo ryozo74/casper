@@ -116,6 +116,116 @@ def calendar_digest(query):
     return "\n\n## Calendar 左脳（最新ライブ・" + today + "）\n" + "\n".join(parts)
 
 
+def _parse_hint(hint):
+    """『c5のチェックQT』等の一言ヒントから cut/工程/用途/形式 を推定。"""
+    h = hint or ""
+    cut = None
+    m = re.search(r"[cC][\s_\-]?0*(\d{1,3})(?!\d)", h) or re.search(r"(?:cut|カット)\s*0*(\d{1,3})(?!\d)", h, re.I)
+    if m:
+        cut = int(m.group(1))
+    proc = None
+    for k, v in (("レイアウト", "lay"), ("lay", "lay"), ("アニメ", "anim"), ("anim", "anim"),
+                 ("fx", "fx"), ("エフェクト", "fx"), ("ライティング", "lighting"), ("light", "lighting"),
+                 ("コンポ", "comp"), ("comp", "comp"), ("合成", "comp"), ("モデル", "model"), ("model", "model")):
+        if k.lower() in h.lower():
+            proc = v
+            break
+    intent = "qc" if re.search(r"チェック|qc|レビュー|review|提出|check", h, re.I) else None
+    fmt = ("video" if re.search(r"qt|mov|mp4|動画|ムービー", h, re.I)
+           else ("image" if re.search(r"png|jpe?g|画像|静止画", h, re.I) else None))
+    return {"cut": cut, "proc": proc, "intent": intent, "fmt": fmt}
+
+
+def uploader_resolve(hint, vision_desc="", uid=None, max_c=6):
+    """投入物のヒント×vision×本人タスクから、提出先候補タスクを確度順に返す(読取のみ)。"""
+    if not casper_tools:
+        return {"parsed": {}, "candidates": []}
+    p = _parse_hint(hint)
+    vd = (vision_desc or "").lower()
+    _get = casper_tools._get
+    tasks = []
+    for off in (0, 500, 1000):
+        page = _get(f"/tasks?limit=500&offset={off}").get("items", [])
+        tasks += page
+        if len(page) < 500:
+            break
+    pm = {str(x["id"]): x.get("name") for x in _get("/projects?limit=200").get("items", [])}
+
+    def active(s):
+        return (s or "").lower().replace("_", "-") in ("todo", "in-progress", "review", "retake", "delayed")
+    scored = []
+    for t in tasks:
+        if not active(t.get("status")):
+            continue
+        if uid and str(t.get("assigned_to")) != str(uid):
+            continue
+        name = (t.get("name") or "")
+        shotid = str(t.get("shotID") or "")
+        sc, why = 0, []
+        if p["cut"] is not None:
+            cands_cut = (f"c{p['cut']:03d}", f"c{p['cut']:02d}", f"c{p['cut']}")
+            sl = shotid.lower(); nl = name.lower()
+            if any(c in sl for c in cands_cut) or any(c in nl for c in cands_cut):
+                sc += 3
+                why.append(f"cut{p['cut']}")
+        if p["proc"]:
+            if p["proc"] in name.lower() or p["proc"] == (t.get("type") or "").lower():
+                sc += 2
+                why.append(p["proc"])
+            if p["proc"] in vd:                       # vision で推定した工程とも一致
+                sc += 1
+        if str(t.get("due_date") or "").startswith(datetime.date.today().isoformat()):
+            sc += 1
+            why.append("本日締切")
+        scored.append((sc, t, why))
+    scored.sort(key=lambda x: (-x[0], str(x[1].get("due_date") or "")))
+    out = [{"id": t.get("id"), "name": t.get("name"), "status": t.get("status"),
+            "project": pm.get(str(t.get("project_id")), t.get("project_id")),
+            "due": str(t.get("due_date") or "")[:10], "shotID": t.get("shotID"),
+            "score": sc, "why": why} for sc, t, why in scored[:max_c]]
+    return {"parsed": p, "candidates": out}
+
+
+def uploader_crosscheck(task_id, hint="", uid=None):
+    """選択タスクの仕様(shot)＋決定(decisions)から、画像照合の基準と確認質問を返す(読取のみ)。"""
+    if not casper_tools or not task_id:
+        return {"questions": [], "spec": "", "decisions": []}
+    _get = casper_tools._get
+    task = None
+    for off in (0, 500, 1000):
+        page = _get(f"/tasks?limit=500&offset={off}").get("items", [])
+        for t in page:
+            if str(t.get("id")) == str(task_id):
+                task = t
+                break
+        if task or len(page) < 500:
+            break
+    if not task:
+        return {"questions": ["仕様/指示どおりに作成しましたか?"], "spec": "(task not found)", "decisions": []}
+    pid, shotid = task.get("project_id"), str(task.get("shotID") or "")
+    spec = []
+    try:
+        for s in _get("/shots?limit=500").get("items", []):
+            if shotid and (str(s.get("shot_code")) == shotid or str(s.get("id")) == shotid):
+                for k in ("action", "note"):
+                    if s.get(k):
+                        spec.append(f"{k}: {s.get(k)}")
+                if s.get("check_items"):
+                    spec.append(f"check_items: {s.get('check_items')}")
+                break
+    except Exception:
+        pass
+    decs = []
+    try:
+        for d in _get("/decisions?limit=200").get("items", []):
+            if str(d.get("project_id")) == str(pid) and not d.get("superseded"):
+                decs.append(str(d.get("content")))
+    except Exception:
+        pass
+    questions = [f"決定『{d[:50]}』は反映済?" for d in decs[:4]] or ["仕様/指示どおりに作成しましたか?"]
+    return {"task": task.get("name"), "spec": " / ".join(spec)[:600], "decisions": decs[:6], "questions": questions}
+
+
 def meeting_digest(query):
     """会議/議事録/決定 クエリ時に最新会議の要約を先読み注入(generic/時系列クエリの取りこぼし対策)。"""
     if not casper_tools:
@@ -700,6 +810,42 @@ class H(BaseHTTPRequestHandler):
                     out = feed_save(req.get("saved_as", ""), req.get("description", ""),
                                     req.get("summary", ""), req.get("qa", []), req.get("filename", ""))
                 self._json(out)
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if self.path in ("/api/uploader/resolve", "/api/uploader/crosscheck", "/api/uploader/submit"):
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            uid = who["uid"] or req.get("uid") or None
+            try:
+                if self.path.endswith("resolve"):
+                    import base64
+                    vdesc = ""
+                    fn = req.get("filename", "upload")
+                    b64 = req.get("data_b64", "")
+                    ext = os.path.splitext(fn)[1].lower()
+                    if b64:
+                        os.makedirs(ASSETS_DIR, exist_ok=True)
+                        sp = os.path.join(ASSETS_DIR, "upl_" + who["sid"] + ext)
+                        with open(sp, "wb") as f:
+                            f.write(base64.b64decode(b64))
+                        if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                            vdesc = strip_think(claude_cli_vision(
+                                sp, "この成果物に何が写っているか、及び制作工程(レイアウト/アニメ/FX/ライティング/コンポ/モデル等)を1〜2文で。"))
+                    out = uploader_resolve(req.get("hint", ""), vdesc, uid)
+                    out["recognized"] = vdesc
+                    self._json(out)
+                elif self.path.endswith("crosscheck"):
+                    self._json(uploader_crosscheck(req.get("task_id"), req.get("hint", ""), uid))
+                else:  # submit — 安全フェーズ: 書込はせず確認記録のみ
+                    rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                           "uid": uid or "", "task_id": req.get("task_id"), "intent": req.get("intent", "qc"),
+                           "filename": req.get("filename"), "note": req.get("note", ""), "status": "confirmed_no_write"}
+                    with open(os.path.join(HERE, "uploader_intent_log.jsonl"), "a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    self._json({"ok": True, "written": False,
+                                "message": "確認のみ記録(書込権限は未取得。ニブ/エルヴィス殿の許可後に実提出を接続)"})
             except Exception as e:
                 self._json({"error": str(e)})
             return
