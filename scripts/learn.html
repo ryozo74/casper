@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casper — 逆インタビュー</title>
+<link rel="icon" type="image/jpeg" href="/icon">
+<link rel="apple-touch-icon" href="/icon">
+<style>
+  :root{ --bg:#0b0f17; --panel:#121826; --panel2:#0e1420; --line:#1f2937;
+         --txt:#e5e7eb; --mut:#94a3b8; --accent:#38bdf8; }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:radial-gradient(1200px 600px at 70% -10%,#10233a 0,var(--bg) 55%);
+       color:var(--txt);font:17px/1.8 -apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif;
+       display:flex;flex-direction:column;align-items:center;padding:38px 18px 80px}
+  body::before{content:"";position:fixed;inset:-25%;z-index:-1;pointer-events:none;
+    background:
+     radial-gradient(44% 44% at 24% 26%,rgba(56,189,248,.38),transparent 60%),
+     radial-gradient(40% 40% at 80% 20%,rgba(34,211,238,.26),transparent 62%),
+     radial-gradient(46% 46% at 60% 86%,rgba(99,102,241,.22),transparent 62%),
+     radial-gradient(34% 34% at 86% 74%,rgba(56,189,248,.24),transparent 62%);
+    filter:blur(55px);animation:drift 32s ease-in-out infinite alternate}
+  @keyframes drift{0%{transform:translate(-3%,-2%) scale(1) rotate(0deg)}
+    50%{transform:translate(4%,3%) scale(1.13) rotate(8deg)}
+    100%{transform:translate(-2%,4%) scale(1.06) rotate(-6deg)}}
+  .head{display:flex;align-items:center;gap:12px}
+  .logo{width:34px;height:34px;border-radius:10px;object-fit:cover}
+  h1{font-size:23px;margin:0;font-weight:760}
+  .sub{color:var(--mut);font-size:12.5px;margin:4px 0 22px}
+  .box{width:100%;max-width:680px}
+  .qcard{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 24px;
+         box-shadow:0 10px 34px rgba(0,0,0,.32)}
+  .tag{display:inline-block;font-size:11.5px;color:var(--accent);background:#0b1b2c;border:1px solid #1d3a52;
+       border-radius:999px;padding:3px 11px;margin-bottom:12px}
+  .q{font-size:21px;font-weight:680;line-height:1.55;margin-bottom:18px}
+  .choice{display:flex;align-items:center;gap:11px;background:var(--panel2);
+          border:1px solid var(--line);border-radius:12px;padding:13px 16px;margin:8px 0;cursor:pointer;transition:.12s}
+  .choice:hover{border-color:var(--accent)}
+  .choice .cbox{width:19px;height:19px;border:1.5px solid var(--line);border-radius:6px;flex:none;
+          display:grid;place-items:center;font-size:13px;font-weight:800;color:#06121f}
+  .choice .ctxt{flex:1}
+  .choice.sel{border-color:var(--accent);background:#13243a}
+  .choice.sel .cbox{background:var(--accent);border-color:var(--accent)}
+  .choice.sel .cbox::after{content:"✓"}
+  .other{display:flex;gap:8px;margin-top:12px}
+  .other input{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:11px;
+               color:var(--txt);padding:11px 14px;font:inherit;outline:none}
+  .other input:focus{border-color:var(--accent)}
+  .other button,.skip{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f;border:0;
+          border-radius:11px;padding:0 18px;height:44px;font-weight:680;cursor:pointer}
+  .bar{display:flex;justify-content:space-between;align-items:center;margin-top:16px;color:var(--mut);font-size:12.5px}
+  .skip{background:none;border:1px solid var(--line);color:var(--mut);height:34px;padding:0 14px;font-weight:600}
+  .toast{color:#34d399;font-size:13px;height:18px;margin-top:6px}
+  .load{color:var(--mut);font-size:14px;padding:10px 0}
+  .load::after{content:"▍";color:var(--accent);animation:bl 1s steps(2) infinite}@keyframes bl{50%{opacity:0}}
+  .back{position:fixed;top:16px;left:18px;z-index:5;font-size:14px;color:var(--mut);text-decoration:none;
+        border:1px solid var(--line);border-radius:999px;padding:8px 15px;background:rgba(18,24,38,.65);
+        backdrop-filter:blur(6px);transition:.12s}
+  .back:hover{border-color:var(--accent);color:var(--txt)}
+</style>
+</head>
+<body>
+  <a href="/" class="back">← インデックスに戻る</a>
+  <div class="head"><h1>Casper があなたに質問します</h1></div>
+  <div class="sub">逆インタビュー — 選ぶだけ（<b>複数選択可</b>）。答えは Casper が覚え、社内知識の解像度が上がります。
+    　<a href="/" style="color:var(--accent)">チャット</a> · <a href="/qa" style="color:var(--accent)">質問する</a></div>
+  <div class="box">
+    <div class="qcard">
+      <span class="tag">Casper の質問</span>
+      <div class="q" id="q"><span class="load">質問を準備中</span></div>
+      <div id="choices"></div>
+      <div class="other"><input id="free" placeholder="その他・自由に答える…"><button id="send">記録</button></div>
+      <div class="toast" id="toast"></div>
+    </div>
+    <div class="bar"><span id="count">学習 0 件</span><button class="skip" id="skip">別の質問にする →</button></div>
+  </div>
+<script>
+const qEl=document.getElementById('q'),ch=document.getElementById('choices'),free=document.getElementById('free'),
+  send=document.getElementById('send'),toast=document.getElementById('toast'),count=document.getElementById('count'),
+  skip=document.getElementById('skip');
+let cur="",asked=[],learned=0,busy=false,selected=new Set();
+function updateSend(){const n=selected.size+(free.value.trim()?1:0);send.textContent=n?('記録 ('+n+')'):'記録';}
+
+async function next(answer){
+  busy=true;ch.innerHTML='';free.value='';selected=new Set();updateSend();
+  qEl.innerHTML='<span class="load">考え中</span>';
+  const ep=answer?'/api/iv/answer':'/api/iv/next';
+  try{
+    const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:cur,answer:answer||'',asked})});
+    const d=await r.json();
+    if(answer){learned++;count.textContent='学習 '+learned+' 件';
+      toast.textContent='✓ 覚えました';setTimeout(()=>toast.textContent='',2200);}
+    cur=d.question||'(質問を作れませんでした)';
+    if(cur&&!asked.includes(cur))asked.push(cur);
+    qEl.textContent=cur;
+    (d.choices||[]).forEach(c=>{const e=document.createElement('div');e.className='choice';
+      e.innerHTML='<span class="cbox"></span><span class="ctxt">'+c.replace(/</g,'&lt;')+'</span>';
+      e.onclick=()=>{if(busy)return;
+        if(c==='その他'){free.focus();return;}
+        if(selected.has(c)){selected.delete(c);e.classList.remove('sel');}
+        else{selected.add(c);e.classList.add('sel');}
+        updateSend();};
+      ch.appendChild(e);});
+  }catch(e){qEl.textContent='通信エラー: '+e.message;}
+  busy=false;
+}
+function submit(){
+  const parts=[...selected];const v=free.value.trim();if(v)parts.push(v);
+  if(!parts.length||busy)return;
+  next(parts.join('、'));
+}
+send.onclick=submit;
+free.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();submit();}});
+free.addEventListener('input',updateSend);
+skip.onclick=()=>{if(!busy)next();};
+next();
+</script>
+</body>
+</html>

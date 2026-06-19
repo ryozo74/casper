@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casperをのぞく (3D)</title>
+<link rel="icon" type="image/jpeg" href="/icon">
+<style>
+  :root{--bg:#0b0f17;--line:#1f2937;--txt:#e5e7eb;--mut:#94a3b8;--accent:#38bdf8}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:#070a10;color:var(--txt);
+    font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif}
+  #cv{display:block;position:fixed;inset:0;cursor:grab}
+  .back{position:fixed;top:14px;left:16px;z-index:5;font-size:14px;color:var(--mut);text-decoration:none;
+    border:1px solid var(--line);border-radius:999px;padding:8px 15px;background:rgba(18,24,38,.7);backdrop-filter:blur(6px)}
+  .back:hover{border-color:var(--accent);color:var(--txt)}
+  .title{position:fixed;top:14px;left:0;right:0;text-align:center;z-index:4;pointer-events:none}
+  .title h1{margin:0;font-size:18px;font-weight:760}
+  .title .sub{font-size:12px;color:var(--mut)}
+  .legend{position:fixed;bottom:14px;left:16px;z-index:5;background:rgba(18,24,38,.7);backdrop-filter:blur(6px);
+    border:1px solid var(--line);border-radius:12px;padding:10px 13px;font-size:12px}
+  .legend div{display:flex;align-items:center;gap:7px;margin:3px 0}
+  .legend i{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .ctrl{position:fixed;bottom:14px;right:16px;z-index:5;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+  .ctrl button{background:rgba(18,24,38,.7);backdrop-filter:blur(6px);border:1px solid var(--line);color:var(--mut);
+    border-radius:999px;padding:7px 13px;font:inherit;cursor:pointer}
+  .ctrl button:hover{border-color:var(--accent);color:var(--txt)}
+  .ctrl .hint{color:var(--mut);font-size:11px}
+</style>
+</head>
+<body>
+  <a href="/" class="back">← 戻る</a>
+  <div class="title"><h1>🔮 Casperをのぞく <span style="color:var(--accent)">3D</span></h1><div class="sub" id="stat">読み込み中…</div></div>
+  <canvas id="cv"></canvas>
+  <div class="legend" id="legend"></div>
+  <div class="ctrl"><button id="spin">⏸ 自動回転を止める</button><div class="hint">ドラッグで回転 / ホイールで拡大</div></div>
+<script>
+const COL={people:'#34d399',project:'#38bdf8',legacy:'#f59e0b',comms:'#ec4899',
+  company:'#a855f7',asset:'#22d3ee',learned:'#fbbf24',other:'#64748b'};
+const LBL={people:'人物',project:'PJ',legacy:'旧スコア',comms:'対話',company:'会社',asset:'資料',learned:'学習',other:'他'};
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),stat=document.getElementById('stat');
+const DPR=Math.min(devicePixelRatio||1,2);
+let W,H,nodes=[],links=[],yaw=0.6,pitch=0.35,zoom=1,FOCAL=1100,auto=true,
+    drag=false,lx=0,ly=0,hover=null,mx=0,my=0,alpha=1;
+function resize(){W=cv.width=innerWidth*DPR;H=cv.height=innerHeight*DPR;cv.style.width=innerWidth+'px';cv.style.height=innerHeight+'px';}
+addEventListener('resize',resize);resize();
+
+fetch('/api/graph').then(r=>r.json()).then(d=>{
+  const by={};
+  nodes=(d.nodes||[]).map(n=>{const o={...n,
+    x:(Math.random()-.5)*500,y:(Math.random()-.5)*500,z:(Math.random()-.5)*500,vx:0,vy:0,vz:0,deg:0};by[n.id]=o;return o;});
+  links=(d.links||[]).map(l=>({s:by[l.source],t:by[l.target]})).filter(l=>l.s&&l.t);
+  links.forEach(l=>{l.s.deg++;l.t.deg++;});
+  stat.textContent=nodes.length+' ノード / '+links.length+' リンク (3D)';
+  const lg=document.getElementById('legend');const used=[...new Set(nodes.map(n=>n.group))];
+  lg.innerHTML=used.map(g=>`<div><i style="background:${COL[g]||COL.other}"></i>${LBL[g]||g}</div>`).join('');
+  loop();
+});
+
+function sim(){
+  const k=2600,spring=.02,rest=80,grav=.013,cap=40;
+  for(let i=0;i<nodes.length;i++){const a=nodes[i];
+    for(let j=i+1;j<nodes.length;j++){const b=nodes[j];
+      let dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z,d2=dx*dx+dy*dy+dz*dz+.01,d=Math.sqrt(d2),f=k/d2;
+      const fx=dx/d*f,fy=dy/d*f,fz=dz/d*f;a.vx+=fx;a.vy+=fy;a.vz+=fz;b.vx-=fx;b.vy-=fy;b.vz-=fz;}
+    a.vx-=a.x*grav;a.vy-=a.y*grav;a.vz-=a.z*grav;}
+  links.forEach(l=>{let dx=l.t.x-l.s.x,dy=l.t.y-l.s.y,dz=l.t.z-l.s.z,d=Math.sqrt(dx*dx+dy*dy+dz*dz)+.01,f=spring*(d-rest);
+    const fx=dx/d*f,fy=dy/d*f,fz=dz/d*f;l.s.vx+=fx;l.s.vy+=fy;l.s.vz+=fz;l.t.vx-=fx;l.t.vy-=fy;l.t.vz-=fz;});
+  nodes.forEach(n=>{n.vx*=.8;n.vy*=.8;n.vz*=.8;
+    const sp=Math.hypot(n.vx,n.vy,n.vz);if(sp>cap){n.vx*=cap/sp;n.vy*=cap/sp;n.vz*=cap/sp;}
+    n.x+=n.vx*alpha;n.y+=n.vy*alpha;n.z+=n.vz*alpha;});
+}
+function proj(n){
+  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+  let x1=n.x*cy-n.z*sy, z1=n.x*sy+n.z*cy;
+  let y2=n.y*cp-z1*sp, z2=n.y*sp+z1*cp;          // z2 = depth
+  const s=FOCAL/(FOCAL+z2)*zoom;
+  return {sx:W/2+x1*s*DPR, sy:H/2+y2*s*DPR, s, depth:z2};
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  const P=nodes.map(n=>({n,p:proj(n)}));
+  // edges
+  ctx.lineWidth=.7*DPR;
+  links.forEach(l=>{const a=proj(l.s),b=proj(l.t);const hot=hover&&(l.s===hover||l.t===hover);
+    ctx.strokeStyle=hot?'rgba(56,189,248,.6)':'rgba(148,163,184,.10)';
+    ctx.beginPath();ctx.moveTo(a.sx,a.sy);ctx.lineTo(b.sx,b.sy);ctx.stroke();});
+  // nodes far->near
+  P.sort((u,v)=>v.p.depth-u.p.depth);
+  P.forEach(({n,p})=>{
+    const fog=Math.max(.25,Math.min(1,FOCAL/(FOCAL+p.depth)));      // 遠いほど暗く小さく
+    const r=(3.5+Math.min(n.deg,12)*1.0)*p.s*DPR;
+    ctx.globalAlpha=(hover&&hover!==n&&!links.some(l=>(l.s===hover&&l.t===n)||(l.t===hover&&l.s===n)))?.25*fog:fog;
+    ctx.beginPath();ctx.arc(p.sx,p.sy,Math.max(1,r),0,7);ctx.fillStyle=COL[n.group]||COL.other;ctx.fill();
+    ctx.globalAlpha=1;
+    if((n.deg>=4&&fog>.5)||n===hover){ctx.fillStyle=n===hover?'#fff':'rgba(229,231,235,'+(0.55*fog+0.2)+')';
+      ctx.font=(n===hover?13:11)*DPR+'px sans-serif';ctx.textAlign='center';ctx.fillText(n.label,p.sx,p.sy-r-4*DPR);}});
+}
+function loop(){
+  if(alpha>0.02){sim();alpha*=0.99;}
+  if(auto&&!drag)yaw+=0.0008;
+  if(hover&&!drag){const p=proj(hover);}  // keep hover
+  draw();requestAnimationFrame(loop);
+}
+function pick(px,py){let best=null,bd=20*DPR;
+  for(const n of nodes){const p=proj(n);const d=Math.hypot(p.sx-px,p.sy-py);if(d<bd){bd=d;best=n;}}
+  return best;}
+cv.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY;cv.style.cursor='grabbing';});
+addEventListener('mousemove',e=>{mx=e.clientX*DPR;my=e.clientY*DPR;
+  if(drag){yaw+=(e.clientX-lx)*0.006;pitch+=(e.clientY-ly)*0.006;
+    pitch=Math.max(-1.4,Math.min(1.4,pitch));lx=e.clientX;ly=e.clientY;}
+  else{hover=pick(mx,my);cv.style.cursor=hover?'pointer':'grab';}});
+addEventListener('mouseup',()=>{drag=false;cv.style.cursor=hover?'pointer':'grab';});
+cv.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.3,Math.min(3.5,zoom*(e.deltaY<0?1.1:.91)));},{passive:false});
+const spin=document.getElementById('spin');
+spin.onclick=()=>{auto=!auto;spin.textContent=auto?'⏸ 自動回転を止める':'▶ 自動回転する';};
+</script>
+</body>
+</html>

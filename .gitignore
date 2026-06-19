@@ -1,0 +1,18 @@
+# === データ / PII（絶対に公開しない） ===
+vault/
+docs/
+scripts/casper_context.md
+scripts/casper_rag_index.json
+scripts/*.jsonl
+scripts/assets/
+scripts/diagrams/
+# === 秘密情報 ===
+.env
+*.env
+*.token
+*token*.txt
+# === python / 一時 ===
+__pycache__/
+*.pyc
+.venv/
+*.log

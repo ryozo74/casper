@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casper — 質問</title>
+<link rel="icon" type="image/jpeg" href="/icon">
+<link rel="apple-touch-icon" href="/icon">
+<style>
+  :root{ --bg:#0b0f17; --panel:#121826; --panel2:#0e1420; --line:#1f2937;
+         --txt:#e5e7eb; --mut:#94a3b8; --accent:#38bdf8; }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:radial-gradient(1200px 600px at 70% -10%,#10233a 0,var(--bg) 55%);
+       color:var(--txt);font:17px/1.8 -apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif;
+       display:flex;flex-direction:column;align-items:center;padding:40px 18px 80px}
+  body::before{content:"";position:fixed;inset:-25%;z-index:-1;pointer-events:none;
+    background:
+     radial-gradient(44% 44% at 24% 26%,rgba(56,189,248,.38),transparent 60%),
+     radial-gradient(40% 40% at 80% 20%,rgba(34,211,238,.26),transparent 62%),
+     radial-gradient(46% 46% at 60% 86%,rgba(99,102,241,.22),transparent 62%),
+     radial-gradient(34% 34% at 86% 74%,rgba(56,189,248,.24),transparent 62%);
+    filter:blur(55px);animation:drift 32s ease-in-out infinite alternate}
+  @keyframes drift{0%{transform:translate(-3%,-2%) scale(1) rotate(0deg)}
+    50%{transform:translate(4%,3%) scale(1.13) rotate(8deg)}
+    100%{transform:translate(-2%,4%) scale(1.06) rotate(-6deg)}}
+  .head{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;
+        background:linear-gradient(135deg,var(--accent),#6366f1);font-size:19px;object-fit:cover}
+  h1{font-size:25px;margin:0;font-weight:760}
+  .sub{color:var(--mut);font-size:12.5px;margin-bottom:22px}
+  .box{width:100%;max-width:760px}
+  .ask{display:flex;gap:10px;align-items:flex-end;background:var(--panel);border:1px solid var(--line);
+       border-radius:16px;padding:10px 10px 10px 16px;box-shadow:0 8px 30px rgba(0,0,0,.3)}
+  textarea{flex:1;resize:none;background:transparent;color:var(--txt);border:0;outline:none;font:inherit;
+           max-height:180px;padding:6px 0}
+  button{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f;border:0;border-radius:12px;
+         padding:0 20px;height:46px;font-weight:680;cursor:pointer;white-space:nowrap}
+  button:disabled{opacity:.5;cursor:default}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .chip{font-size:12.5px;color:var(--mut);background:var(--panel2);border:1px solid var(--line);
+        border-radius:999px;padding:6px 13px;cursor:pointer}
+  .chip:hover{border-color:var(--accent);color:var(--txt)}
+  .card{width:100%;max-width:760px;margin-top:26px;background:var(--panel);border:1px solid var(--line);
+        border-radius:16px;padding:8px 24px 22px;display:none}
+  .qline{color:var(--accent);font-weight:680;font-size:17px;border-bottom:1px solid var(--line);
+         padding:16px 0 12px;margin-bottom:8px}
+  .ans h3{font-size:17.5px;margin:18px 0 6px;color:#bfe6ff}
+  .ans h4{font-size:16px;margin:14px 0 4px;color:#bfe6ff}
+  .ans ul{margin:6px 0;padding-left:22px}.ans li{margin:3px 0}
+  .ans strong{color:#fff}
+  .ans code{background:#0b1220;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:13px}
+  .ans p{margin:8px 0}
+  .stat{color:var(--mut);font-size:13px;padding:8px 0}
+  .stat::after{content:"▍";color:var(--accent);animation:bl 1s steps(2) infinite}
+  @keyframes bl{50%{opacity:0}}
+  .choice{display:flex;justify-content:space-between;align-items:center;gap:10px;
+        background:var(--panel2);border:1px solid var(--line);border-radius:11px;
+        padding:11px 15px;margin:7px 0;cursor:pointer;font-size:14.5px;transition:.12s}
+  .choice:hover{border-color:var(--accent);background:#13243a;transform:translateX(2px)}
+  .again{margin-top:16px;background:none;border:1px solid var(--line);color:var(--mut);height:38px;font-weight:600}
+  .back{position:fixed;top:16px;left:18px;z-index:5;font-size:14px;color:var(--mut);text-decoration:none;
+        border:1px solid var(--line);border-radius:999px;padding:8px 15px;background:rgba(18,24,38,.65);
+        backdrop-filter:blur(6px);transition:.12s}
+  .back:hover{border-color:var(--accent);color:var(--txt)}
+</style>
+</head>
+<body>
+  <a href="/" class="back">← インデックスに戻る</a>
+  <div class="head"><h1>Casper に質問</h1></div>
+  <div class="sub">1問1答 — 社内の記録(左脳Calendar＋右脳vault)を踏まえて答えます
+    　<a href="/" style="color:var(--accent)">チャット</a> · <a href="/learn" style="color:var(--accent)">Casperに教える</a></div>
+  <div class="box">
+    <div class="ask">
+      <textarea id="q" rows="1" placeholder="質問を入力（例: TVCMのc14で何が問題だった?）"></textarea>
+      <button id="go">質問する</button>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+  <div class="card" id="card">
+    <div class="qline" id="qline"></div>
+    <div class="ans" id="ans"></div>
+    <div id="fuwrap" style="display:none"><div class="sub" style="margin:16px 0 8px">リストから選択（クリックで深掘り）:</div>
+      <div id="fu"></div></div>
+    <button class="again" id="again">新しい質問</button>
+  </div>
+<script>
+const q=document.getElementById('q'),go=document.getElementById('go'),card=document.getElementById('card'),
+  qline=document.getElementById('qline'),ans=document.getElementById('ans'),again=document.getElementById('again');
+const EX=["今 進行中のプロジェクトは?","ライティングが得意なメンバーは誰?","TVCMのc14で何が問題だった?",
+  "旧スコアでフィードバックが多かったPJは?","うちの会社の代表作は?"];
+const chips=document.getElementById('chips');
+EX.forEach(t=>{const c=document.createElement('div');c.className='chip';c.textContent=t;
+  c.onclick=()=>{q.value=t;ask();};chips.appendChild(c);});
+
+function md(s){ // 最小 markdown → html
+  s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  s=s.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  const out=[];let inul=false;
+  for(let ln of s.split('\n')){
+    let m;
+    if(/^###\s+/.test(ln)){if(inul){out.push('</ul>');inul=false;}out.push('<h4>'+ln.replace(/^###\s+/,'')+'</h4>');}
+    else if(/^##\s+/.test(ln)){if(inul){out.push('</ul>');inul=false;}out.push('<h3>'+ln.replace(/^##\s+/,'')+'</h3>');}
+    else if(/^\s*[-*]\s+/.test(ln)){if(!inul){out.push('<ul>');inul=true;}out.push('<li>'+ln.replace(/^\s*[-*]\s+/,'')+'</li>');}
+    else if(ln.trim()===''){if(inul){out.push('</ul>');inul=false;}}
+    else{if(inul){out.push('</ul>');inul=false;}out.push('<p>'+ln+'</p>');}
+  }
+  if(inul)out.push('</ul>');
+  return out.join('');
+}
+const fu=document.getElementById('fu'),fuwrap=document.getElementById('fuwrap');
+function clean(s){return s.replace(/CHOICES:.*$/ms,'').trim();}
+function renderFU(s){
+  const m=s.match(/CHOICES:\s*(.+)$/m);
+  fu.innerHTML='';
+  if(!m){fuwrap.style.display='none';return;}
+  const qs=m[1].split('|').map(x=>x.trim()).filter(x=>x.length>0).slice(0,10);
+  if(!qs.length){fuwrap.style.display='none';return;}
+  qs.forEach(t=>{const c=document.createElement('div');c.className='choice';
+    c.innerHTML='<span>'+t.replace(/</g,'&lt;')+'</span><span style="color:var(--accent)">›</span>';
+    c.onclick=()=>{q.value=t;ask();};fu.appendChild(c);});
+  fuwrap.style.display='block';
+}
+async function ask(){
+  const text=q.value.trim();if(!text)return;
+  go.disabled=true;card.style.display='block';qline.textContent='Q. '+text;
+  ans.innerHTML='<div class="stat">社内記録を検索して考えています…</div>';
+  fuwrap.style.display='none';q.value='';q.style.height='auto';
+  window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
+  let acc='';
+  try{
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messages:[{role:'user',content:text}],suggest:true})});
+    const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
+    while(true){const {value,done}=await rd.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});let nl;
+      while((nl=buf.indexOf('\n'))>=0){const line=buf.slice(0,nl).trim();buf=buf.slice(nl+1);
+        if(!line)continue;let j;try{j=JSON.parse(line);}catch(e){continue;}
+        if(j.message&&j.message.content){acc+=j.message.content;ans.innerHTML=md(clean(acc));}
+      }
+    }
+    renderFU(acc);
+  }catch(e){ans.innerHTML='<p class="stat">通信に失敗しました: '+e.message+'</p>';}
+  go.disabled=false;
+}
+go.onclick=ask;
+q.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask();}});
+q.addEventListener('input',()=>{q.style.height='auto';q.style.height=Math.min(q.scrollHeight,180)+'px';});
+again.onclick=()=>{card.style.display='none';q.focus();};
+q.focus();
+</script>
+</body>
+</html>

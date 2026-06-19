@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casperと遊ぶ</title>
+<link rel="icon" type="image/jpeg" href="/icon">
+<link rel="apple-touch-icon" href="/icon">
+<style>
+  :root{ --bg:#0b0f17; --panel:#121826; --panel2:#0e1420; --line:#1f2937;
+         --txt:#e5e7eb; --mut:#94a3b8; --accent:#38bdf8; }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;background:#0b0f17;color:var(--txt);
+       font:17px/1.8 -apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif;
+       display:flex;flex-direction:column;align-items:center;padding:40px 18px 90px}
+  body::before{content:"";position:fixed;inset:-25%;z-index:-1;pointer-events:none;
+    background:
+     radial-gradient(44% 44% at 24% 26%,rgba(56,189,248,.38),transparent 60%),
+     radial-gradient(40% 40% at 80% 20%,rgba(34,211,238,.26),transparent 62%),
+     radial-gradient(46% 46% at 60% 86%,rgba(99,102,241,.22),transparent 62%),
+     radial-gradient(34% 34% at 86% 74%,rgba(56,189,248,.24),transparent 62%);
+    filter:blur(55px);animation:drift 32s ease-in-out infinite alternate}
+  @keyframes drift{0%{transform:translate(-3%,-2%) scale(1) rotate(0)}
+    50%{transform:translate(4%,3%) scale(1.13) rotate(8deg)}100%{transform:translate(-2%,4%) scale(1.06) rotate(-6deg)}}
+  .back{position:fixed;top:16px;left:18px;z-index:5;font-size:14px;color:var(--mut);text-decoration:none;
+    border:1px solid var(--line);border-radius:999px;padding:8px 15px;background:rgba(18,24,38,.65);backdrop-filter:blur(6px)}
+  .back:hover{border-color:var(--accent);color:var(--txt)}
+  h1{font-size:24px;margin:0;font-weight:760}
+  .sub{color:var(--mut);font-size:13px;margin:6px 0 22px}
+  .box{width:100%;max-width:720px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px 22px;margin-bottom:16px;
+    box-shadow:0 10px 30px rgba(0,0,0,.3)}
+  label{display:block;font-size:13px;color:var(--mut);margin:0 0 6px}
+  textarea,input[type=file]{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:11px;
+    color:var(--txt);padding:11px 14px;font:inherit;outline:none}
+  textarea{resize:vertical;min-height:64px}
+  input[type=file]{padding:10px}
+  textarea:focus{border-color:var(--accent)}
+  .drop{border:2px dashed var(--line);border-radius:14px;padding:30px 16px;text-align:center;color:var(--mut);
+    cursor:pointer;transition:.15s;background:var(--panel2);line-height:1.7}
+  .drop:hover{border-color:var(--accent);color:var(--txt)}
+  .drop.over{border-color:var(--accent);background:#13243a;color:var(--txt);transform:scale(1.01)}
+  .drop .big{font-size:30px;display:block;margin-bottom:6px}
+  button{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f;border:0;border-radius:12px;
+    padding:0 20px;height:46px;font-weight:700;cursor:pointer;margin-top:14px}
+  button:disabled{opacity:.5;cursor:default}
+  .tag{display:inline-block;font-size:11.5px;color:var(--accent);background:#0b1b2c;border:1px solid #1d3a52;
+    border-radius:999px;padding:3px 11px;margin-bottom:10px}
+  .qitem{margin:14px 0}
+  .qitem .qt{font-weight:650;margin-bottom:6px}
+  .stat{color:var(--mut);font-size:14px}
+  .stat::after{content:"▍";color:var(--accent);animation:bl 1s steps(2) infinite}@keyframes bl{50%{opacity:0}}
+  .ok{color:#34d399;font-weight:700}
+  .file{font-size:12.5px;color:var(--mut);margin-top:6px}
+</style>
+</head>
+<body>
+  <a href="/" class="back">← インデックスに戻る</a>
+  <h1>🎲 Casperと遊ぶ</h1>
+  <div class="sub">資料（スケジュール / 画像 / PDF / Excel 等）を渡すと、Casper が読んで質問し、理解できたら知識にします。</div>
+  <div class="box">
+    <div class="card" id="up">
+      <label>① 資料の説明（これは何の資料？）</label>
+      <textarea id="desc" placeholder="例: ○○さんの今月のスケジュール表。色付きが確定、グレーは仮。"></textarea>
+      <label style="margin-top:14px">② 資料ファイル</label>
+      <div class="drop" id="drop"><input type="file" id="file" hidden>
+        <span class="big">📎</span>ここに資料をドラッグ＆ドロップ<br>またはクリックして選択</div>
+      <div class="file" id="fname"></div>
+      <button id="send">Casper に渡す</button>
+    </div>
+    <div class="card" id="result" style="display:none">
+      <span class="tag">Casper の理解</span>
+      <div id="summary"></div>
+      <div id="questions"></div>
+      <button id="save" style="display:none">この内容で知識化する</button>
+      <div id="done"></div>
+    </div>
+  </div>
+<script>
+const desc=document.getElementById('desc'),file=document.getElementById('file'),fname=document.getElementById('fname'),
+  send=document.getElementById('send'),result=document.getElementById('result'),summary=document.getElementById('summary'),
+  questions=document.getElementById('questions'),save=document.getElementById('save'),done=document.getElementById('done');
+let ctx={},selectedFile=null;
+const drop=document.getElementById('drop');
+function setFile(f){selectedFile=f;fname.textContent=f?('選択: '+f.name+' ('+Math.round(f.size/1024)+'KB)'):'';}
+drop.onclick=()=>file.click();
+file.onchange=()=>setFile(file.files[0]);
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','dragend'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('over');if(e.dataTransfer.files&&e.dataTransfer.files[0])setFile(e.dataTransfer.files[0]);});
+// ページ全体へのドロップも受ける
+window.addEventListener('dragover',e=>e.preventDefault());
+window.addEventListener('drop',e=>{e.preventDefault();if(e.dataTransfer.files&&e.dataTransfer.files[0])setFile(e.dataTransfer.files[0]);});
+
+function readFile(f){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(f);});}
+
+send.onclick=async()=>{
+  const f=selectedFile;
+  if(!f&&!desc.value.trim()){alert('説明か資料を入れてください');return;}
+  send.disabled=true;result.style.display='block';done.innerHTML='';save.style.display='none';questions.innerHTML='';
+  summary.innerHTML='<div class="stat">資料を読んで考えています…</div>';
+  let b64='';if(f)b64=await readFile(f);
+  try{
+    const r=await fetch('/api/feed/ingest',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:f?f.name:'',description:desc.value,data_b64:b64})});
+    const d=await r.json();
+    if(d.error){summary.innerHTML='エラー: '+d.error;send.disabled=false;return;}
+    ctx={saved_as:d.saved_as,filename:f?f.name:d.saved_as,summary:d.summary};
+    summary.innerHTML='<p>'+(d.summary||'').replace(/</g,'&lt;').replace(/\n/g,'<br>')+'</p>';
+    (d.questions||[]).forEach((q,i)=>{const w=document.createElement('div');w.className='qitem';
+      w.innerHTML='<div class="qt">Q'+(i+1)+'. '+q.replace(/</g,'&lt;')+'</div>';
+      const ta=document.createElement('textarea');ta.placeholder='答え（任意・選択でも自由でも）';ta.dataset.q=q;
+      w.appendChild(ta);questions.appendChild(w);});
+    save.style.display='inline-block';
+  }catch(e){summary.innerHTML='通信エラー: '+e.message;}
+  send.disabled=false;
+};
+
+save.onclick=async()=>{
+  save.disabled=true;
+  const qa=[...questions.querySelectorAll('textarea')].map(t=>({q:t.dataset.q,a:t.value.trim()})).filter(x=>x.a);
+  try{
+    const r=await fetch('/api/feed/save',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({saved_as:ctx.saved_as,filename:ctx.filename,description:desc.value,summary:ctx.summary,qa})});
+    const d=await r.json();
+    done.innerHTML=d.ok?'<p class="ok">✓ 知識化しました（'+d.note+'）。Casper が今後この資料を踏まえて答えます。</p>':'保存エラー: '+(d.error||'');
+  }catch(e){done.innerHTML='通信エラー: '+e.message;}
+  save.disabled=false;
+};
+</script>
+</body>
+</html>
