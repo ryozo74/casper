@@ -84,6 +84,21 @@
   .fbbtn{background:rgba(255,255,255,.05);border:1px solid #243049;color:var(--mut);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
   .fbbtn:hover{background:rgba(125,211,252,.14);color:#cfe8ff;border-color:#3a4a66}
   .fbthx{color:var(--mut);font-size:12px}
+  #plus{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cfe8ff;border-radius:10px;width:42px;font-size:20px;cursor:pointer}
+  #plus:hover{background:rgba(125,211,252,.15)}
+  .toolmenu{position:absolute;bottom:64px;left:14px;background:#11182a;border:1px solid #243049;border-radius:12px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:9}
+  .tmitem{padding:8px 12px;border-radius:8px;cursor:pointer;font-size:14px}
+  .tmitem:hover{background:rgba(125,211,252,.15)}
+  #tools .toolchip{display:inline-flex;align-items:center;gap:6px;background:rgba(125,211,252,.14);border:1px solid #3a4a66;color:#cfe8ff;border-radius:999px;padding:3px 10px;font-size:12px;margin:0 0 6px 4px}
+  #tools .toolchip b{cursor:pointer}
+  #attach .filechip{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.05);border:1px solid #243049;border-radius:10px;padding:5px 10px;font-size:12px;margin:0 0 6px 4px}
+  #attach .filechip img{width:40px;height:30px;object-fit:cover;border-radius:5px}
+  .ulcard{background:rgba(14,20,32,.6);border:1px solid #1f2937;border-radius:12px;padding:12px;margin:8px 0}
+  .ulopt{display:block;width:100%;text-align:left;background:rgba(255,255,255,.04);border:1px solid #243049;color:#dbe4ee;border-radius:9px;padding:8px 11px;margin:4px 0;cursor:pointer;font-size:13px}
+  .ulopt:hover{background:rgba(125,211,252,.13);border-color:#3a4a66}
+  .ulopt.sel{background:rgba(125,211,252,.2);border-color:var(--accent)}
+  .ulsubmit{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f;border:0;border-radius:10px;padding:9px 16px;font-weight:700;cursor:pointer;margin-top:8px}
+  .dragover{outline:2px dashed var(--accent);outline-offset:-6px}
   @keyframes bl{50%{opacity:0}}
 </style>
 <script type="module">
@@ -105,10 +120,17 @@
   <div class="msg bot"><div class="av"><img src="/icon" alt="C" style="width:100%;height:100%;object-fit:cover;border-radius:8px"></div><div class="bubble">Casper です。社内の予定・人・過去の記録を踏まえてお答えします。何でも聞いてください。</div></div>
 </div></div>
 <footer>
+  <div id="tools"></div>
+  <div id="attach"></div>
   <div class="ic">
-    <textarea id="inp" rows="1" placeholder="メッセージを入力（Enterで送信 / Shift+Enterで改行）"></textarea>
+    <button id="plus" title="ツールを追加">＋</button>
+    <textarea id="inp" rows="1" placeholder="メッセージを入力（Ctrl+Enterで改行・送信ボタンで送信）"></textarea>
     <button id="send">送信</button>
   </div>
+  <div id="toolmenu" class="toolmenu" style="display:none">
+    <div class="tmitem" data-tool="score_uploader">🎬 Score Uploader（成果物を投げる）</div>
+  </div>
+  <input type="file" id="fileinp" accept="image/*,video/*" style="display:none">
   <div class="hint">応答に数秒〜十数秒かかることがあります。</div>
 </footer>
 <script>
@@ -280,7 +302,75 @@ async function ask(){
   history.push({role:'assistant',content:acc});
   send.disabled=false; inp.focus();
 }
-send.onclick=ask;
+// ===== Score Uploader ツール =====
+const plus=document.getElementById('plus'), toolmenu=document.getElementById('toolmenu');
+const fileinp=document.getElementById('fileinp'), toolsEl=document.getElementById('tools'), attachEl=document.getElementById('attach');
+let uploaderOn=false, pendingFile=null;  // {name, b64, dataurl, isImage}
+plus.onclick=()=>{ toolmenu.style.display = toolmenu.style.display==='none'?'block':'none'; };
+document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
+  toolmenu.style.display='none';
+  if(it.dataset.tool==='score_uploader'){ uploaderOn=true; renderTools(); }
+});
+function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolchip">🎬 Score Uploader <b title="外す" onclick="offUploader()">✕</b></span>' : ''; }
+function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
+function clearFile(){ pendingFile=null; attachEl.innerHTML=''; }
+function renderFile(){ attachEl.innerHTML = pendingFile ? ('<span class="filechip">'+(pendingFile.isImage?('<img src="'+pendingFile.dataurl+'">'):'🎬')+' '+pendingFile.name+' <b style="cursor:pointer" onclick="clearFile()">✕</b></span>') : ''; }
+function takeFile(f){
+  if(!f) return; const r=new FileReader();
+  r.onload=()=>{ const du=r.result; pendingFile={name:f.name, b64:du.split(',')[1], dataurl:du, isImage:f.type.startsWith('image/')}; if(!uploaderOn){uploaderOn=true;renderTools();} renderFile(); };
+  r.readAsDataURL(f);
+}
+fileinp.onchange=e=>takeFile(e.target.files[0]);
+// ドラッグ&ドロップ(チャット全体)
+['dragover','dragenter'].forEach(ev=>document.body.addEventListener(ev,e=>{e.preventDefault();log.classList.add('dragover');}));
+['dragleave','drop'].forEach(ev=>document.body.addEventListener(ev,e=>{e.preventDefault();log.classList.remove('dragover');}));
+document.body.addEventListener('drop',e=>{ if(e.dataTransfer.files[0]) takeFile(e.dataTransfer.files[0]); });
+async function apiPost(path,body){ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return r.json(); }
+async function uploaderFlow(file, hint){
+  el('user').textContent='🎬 '+file.name+(hint?(' — 「'+hint+'」'):'');
+  const b=el('bot'); b.classList.add('cursor');
+  let res; try{ res=await apiPost('/api/uploader/resolve',{filename:file.name,data_b64:file.b64,hint:hint}); }catch(e){ res={error:e.message}; }
+  b.classList.remove('cursor');
+  if(res.error){ b.textContent='[失敗] '+res.error; return; }
+  const card=document.createElement('div'); card.className='md';
+  let html='<div class="ulcard">';
+  if(res.recognized) html+='<div style="color:var(--mut);font-size:12px;margin-bottom:6px">👁 認識: '+esc(res.recognized).slice(0,200)+'</div>';
+  html+='<div><b>提出先タスクを選んでください</b>'+(res.parsed&&res.parsed.cut!=null?(' <span style="color:var(--mut)">(ヒント: cut'+res.parsed.cut+(res.parsed.intent?'/'+res.parsed.intent:'')+')</span>'):'')+'</div>';
+  card.innerHTML=html; b.appendChild(card);
+  const box=card.querySelector('.ulcard');
+  (res.candidates||[]).forEach(c=>{
+    const bt=document.createElement('button'); bt.className='ulopt';
+    bt.innerHTML='<b>'+esc(c.name)+'</b> <span style="color:var(--mut)">'+esc(c.project||'')+' / '+esc(c.status||'')+' / '+esc(c.due||'')+(c.shotID?(' / '+esc(c.shotID)):'')+'</span>'+(c.why&&c.why.length?(' ✅'+c.why.join(',')):'');
+    bt.onclick=()=>chooseCandidate(box, c, file, hint);
+    box.appendChild(bt);
+  });
+  const other=document.createElement('button'); other.className='ulopt'; other.textContent='その他 / 該当なし（自由記入・Casperが質問）';
+  other.onclick=()=>{ box.insertAdjacentHTML('beforeend','<div style="margin-top:8px;color:var(--mut);font-size:12px">→ どのタスクか、PJ名やカット番号を入力欄に書いて送信してください（通常チャットで補足）。</div>'); };
+  box.appendChild(other);
+  log.scrollTop=log.scrollHeight;
+}
+async function chooseCandidate(box, c, file, hint){
+  box.querySelectorAll('.ulopt').forEach(b=>b.classList.remove('sel'));
+  box.insertAdjacentHTML('beforeend','<div class="cc" style="margin-top:10px;color:var(--mut)">🔍 クロスチェック中…</div>');
+  let cc; try{ cc=await apiPost('/api/uploader/crosscheck',{task_id:c.id,hint:hint}); }catch(e){ cc={questions:[]}; }
+  const ccEl=box.querySelector('.cc'); let h='<div style="margin-top:10px"><b>🔍 クロスチェック（'+esc(c.name)+'）</b></div>';
+  if(cc.spec) h+='<div style="color:var(--mut);font-size:12px;margin:4px 0">仕様: '+esc(cc.spec).slice(0,300)+'</div>';
+  (cc.questions||[]).forEach((q,i)=>{ h+='<label style="display:block;font-size:13px;margin:3px 0"><input type="checkbox" class="ccq" data-q="'+i+'"> '+esc(q)+'</label>'; });
+  h+='<button class="ulsubmit">この内容で QC 提出（確認）</button>';
+  ccEl.innerHTML=h;
+  ccEl.querySelector('.ulsubmit').onclick=async()=>{
+    const r=await apiPost('/api/uploader/submit',{task_id:c.id,intent:(hint&&/参考|reference|リファ/.test(hint))?'reference':'qc',filename:file.name,note:hint});
+    ccEl.insertAdjacentHTML('beforeend','<div class="ulcard" style="margin-top:8px">'+(r.written?'✅ 提出しました':'🟡 '+esc(r.message||'確認のみ（書込権限待ち）'))+'</div>');
+    offUploader();
+  };
+  log.scrollTop=log.scrollHeight;
+}
+function sendRouter(){
+  const text=inp.value.trim();
+  if(uploaderOn && pendingFile){ const f=pendingFile, h=text; inp.value=''; inp.style.height='auto'; clearFile(); uploaderFlow(f,h); return; }
+  ask();
+}
+send.onclick=sendRouter;
 // Enter は送信しない(改行)。Ctrl+Enter / Cmd+Enter で改行を挿入。送信は送信ボタンで。
 inp.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){
