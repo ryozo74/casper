@@ -49,6 +49,20 @@
   .msg.user .bubble{background:var(--me);border:1px solid var(--line);text-align:left}
   .msg.bot  .bubble{background:var(--panel);border:1px solid var(--line)}
   .ptime{color:var(--mut);font-size:11px;margin-top:6px;opacity:.7}
+  #menubtn{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cfe8ff;border-radius:9px;width:38px;height:38px;font-size:17px;cursor:pointer;padding:0}
+  #who{cursor:pointer}
+  #sidebar{position:fixed;top:0;left:0;bottom:0;width:280px;background:#0e1420;border-right:1px solid var(--line);z-index:30;transform:translateX(-100%);transition:.2s;display:flex;flex-direction:column;padding:14px}
+  #sidebar.open{transform:translateX(0)}
+  #sbmask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:29;display:none}
+  #sbmask.open{display:block}
+  .sbhd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  #newthread{height:32px;font-size:13px;padding:0 12px}
+  #threadlist{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+  .thr{display:flex;align-items:center;gap:6px;padding:9px 11px;border-radius:9px;cursor:pointer;font-size:13px;color:var(--txt);border:1px solid transparent}
+  .thr:hover{background:rgba(255,255,255,.05);border-color:#243049}
+  .thr.cur{background:rgba(125,211,252,.14);border-color:#3a4a66}
+  .thr .ttl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .thr .del{color:var(--mut);cursor:pointer;font-size:12px}
   .think{color:var(--mut);font-size:12.5px;font-style:italic;border-left:2px solid var(--line);
          padding-left:10px;margin:2px 0 6px;white-space:pre-wrap}
   footer{border-top:1px solid var(--line);padding:14px 20px;background:rgba(14,20,32,.7);backdrop-filter:blur(8px)}
@@ -116,10 +130,17 @@
 </head>
 <body>
 <header>
+  <button id="menubtn" title="スレッド一覧">☰</button>
   <div><h1>Casper</h1></div>
   <nav class="nav"><a href="/learn">🧠 Casperに教える</a><a href="/play">🎲 Casperと遊ぶ</a><a href="/peek">🔮 Casperをのぞく</a></nav>
+  <div class="dot" id="who" title="ログイン">👤 <span id="whoname">ゲスト</span></div>
   <div class="dot" id="status"><b></b><span>接続確認中…</span></div>
 </header>
+<div id="sidebar">
+  <div class="sbhd"><b>スレッド</b><button id="newthread">＋ 新規</button></div>
+  <div id="threadlist"></div>
+</div>
+<div id="sbmask"></div>
 <div id="log"><div class="wrap" id="wrap">
   <div class="msg bot"><div class="av"><img src="/icon" alt="C" style="width:100%;height:100%;object-fit:cover;border-radius:8px"></div><div class="bubble">Casper です。社内の予定・人・過去の記録を踏まえてお答えします。何でも聞いてください。</div></div>
 </div></div>
@@ -282,7 +303,7 @@ async function ask(){
   const b=el('bot'); b.classList.add('cursor'); b.textContent='';
   let acc='',diagramUrl=null; const t0=performance.now();
   try{
-    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/chat',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:history})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
@@ -307,7 +328,48 @@ async function ask(){
     da.className='diagbtn';da.textContent='📊 図解を表示';b.appendChild(da);}
   history.push({role:'assistant',content:acc});
   send.disabled=false; inp.focus();
+  saveThread();
 }
+// ===== ユーザー & スレッド管理 =====
+let curThread=localStorage.getItem('casper_thread')||('t'+Date.now());
+async function jpost(p,b){ const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(b||{})}); return r.json(); }
+async function saveThread(){
+  if(!history.length) return;
+  try{ const r=await jpost('/api/threads/save',{id:curThread,messages:history}); if(r.id){curThread=r.id;localStorage.setItem('casper_thread',curThread);} refreshThreads(); }catch(e){}
+}
+async function refreshThreads(){
+  try{ const r=await jpost('/api/threads/list',{}); const el=document.getElementById('threadlist'); el.innerHTML='';
+    (r.threads||[]).forEach(t=>{ const d=document.createElement('div'); d.className='thr'+(t.id===curThread?' cur':'');
+      d.innerHTML='<span class="ttl">'+esc(t.title||'(無題)')+'</span><span class="del" title="削除">🗑</span>';
+      d.querySelector('.ttl').onclick=()=>loadThread(t.id);
+      d.querySelector('.del').onclick=(e)=>{e.stopPropagation();delThread(t.id);};
+      el.appendChild(d); });
+  }catch(e){}
+}
+async function loadThread(id){
+  const t=await jpost('/api/threads/get',{id}); curThread=id; localStorage.setItem('casper_thread',id);
+  history.length=0; wrap.innerHTML='';
+  (t.messages||[]).forEach(m=>{ if(m.role==='user'){el('user').textContent=m.content;} else {const b=el('bot'); render(b,m.content); renderMermaid(b);renderCanvas(b);} history.push(m); });
+  closeSidebar(); refreshThreads();
+}
+async function delThread(id){ await jpost('/api/threads/delete',{id}); if(id===curThread){newThread();} refreshThreads(); }
+function newThread(){ curThread='t'+Date.now(); localStorage.setItem('casper_thread',curThread); history.length=0; wrap.innerHTML=''; const b=el('bot'); b.textContent='Casper です。何でも聞いてください。'; closeSidebar(); refreshThreads(); }
+function openSidebar(){ document.getElementById('sidebar').classList.add('open'); document.getElementById('sbmask').classList.add('open'); refreshThreads(); }
+function closeSidebar(){ document.getElementById('sidebar').classList.remove('open'); document.getElementById('sbmask').classList.remove('open'); }
+document.getElementById('menubtn').onclick=openSidebar;
+document.getElementById('sbmask').onclick=closeSidebar;
+document.getElementById('newthread').onclick=newThread;
+// ログイン(名前選択)
+document.getElementById('who').onclick=async()=>{
+  const r=await fetch('/api/users',{credentials:'same-origin'}).then(x=>x.json()).catch(()=>({users:[]}));
+  const names=(r.users||[]).map(u=>u.name).join(' / ');
+  const name=prompt('あなたの名前を入力（社員一覧）:\n'+names);
+  if(!name) return;
+  const lr=await jpost('/api/login',{name});
+  if(lr.ok){ document.getElementById('whoname').textContent=lr.name||name; refreshThreads(); }
+  else alert(lr.error||'ログイン失敗');
+};
+(async()=>{ try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; }catch(e){} refreshThreads(); })();
 // ===== Score Uploader ツール =====
 const plus=document.getElementById('plus'), toolmenu=document.getElementById('toolmenu');
 const fileinp=document.getElementById('fileinp'), toolsEl=document.getElementById('tools'), attachEl=document.getElementById('attach');

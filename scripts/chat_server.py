@@ -334,6 +334,65 @@ def dev_log(who, user_msg, answer, meta=None):
         pass
 
 
+THREADS_DIR = os.path.join(HERE, "threads")
+
+
+def _user_key(who):
+    """ユーザー識別キー: uid(本人ログイン) 優先・無ければ sid(端末)。"""
+    return ("u_" + str(who.get("uid"))) if who.get("uid") else ("s_" + str(who.get("sid") or "anon"))
+
+
+def _thread_dir(who):
+    d = os.path.join(THREADS_DIR, re.sub(r"[^A-Za-z0-9_]", "", _user_key(who)))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def thread_list(who):
+    d = _thread_dir(who)
+    out = []
+    for fn in os.listdir(d):
+        if fn.endswith(".json"):
+            try:
+                t = json.load(open(os.path.join(d, fn), encoding="utf-8"))
+                out.append({"id": t.get("id"), "title": t.get("title", "(無題)"),
+                            "updated": t.get("updated", ""), "n": len(t.get("messages", []))})
+            except Exception:
+                pass
+    out.sort(key=lambda x: x.get("updated", ""), reverse=True)
+    return out
+
+
+def thread_get(who, tid):
+    p = os.path.join(_thread_dir(who), re.sub(r"[^A-Za-z0-9_]", "", str(tid)) + ".json")
+    if os.path.exists(p):
+        return json.load(open(p, encoding="utf-8"))
+    return {"id": tid, "title": "(無題)", "messages": []}
+
+
+def thread_save(who, tid, messages, title=None):
+    tid = re.sub(r"[^A-Za-z0-9_]", "", str(tid)) or uuid.uuid4().hex[:12]
+    p = os.path.join(_thread_dir(who), tid + ".json")
+    cur = thread_get(who, tid)
+    if not title:
+        title = cur.get("title") if cur.get("title") not in (None, "(無題)") else None
+    if not title:                                  # 最初のユーザー発言をタイトルに
+        first = next((m["content"] for m in messages if m.get("role") == "user" and m.get("content")), "")
+        title = (str(first)[:24] or "(無題)")
+    rec = {"id": tid, "title": title, "uid": who.get("uid", ""),
+           "updated": datetime.datetime.now().isoformat(timespec="seconds"),
+           "messages": messages[-200:]}
+    json.dump(rec, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+    return {"id": tid, "title": title}
+
+
+def thread_delete(who, tid):
+    p = os.path.join(_thread_dir(who), re.sub(r"[^A-Za-z0-9_]", "", str(tid)) + ".json")
+    if os.path.exists(p):
+        os.remove(p)
+    return {"ok": True}
+
+
 def log_convo(who, role, content, extra=None):
     """会話を発信元ごとの順序付きスレッドとして記録(文脈=流れ を資産化)。"""
     try:
@@ -374,7 +433,9 @@ def build_sys():
 
 
 def ollama_chat(messages, tools=None):
-    body = {"model": A.model, "messages": messages, "stream": False}
+    # think:false 必須 (qwen3.6 等の思考モデルが長考→遅延/タイムアウトするのを防ぐ)
+    body = {"model": A.model, "messages": messages, "stream": False, "think": False,
+            "options": {"num_ctx": 8192}}
     if tools:
         body["tools"] = tools
     req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
@@ -805,6 +866,26 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e), "nodes": [], "links": []})
             return
+        elif self.path == "/api/users":           # ログイン選択用の社員一覧
+            try:
+                us = casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []
+                out = [{"id": u.get("id"), "name": u.get("username") or u.get("name") or str(u.get("id"))}
+                       for u in us if u.get("is_active", True)]
+                self._json({"users": out})
+            except Exception as e:
+                self._json({"error": str(e), "users": []})
+            return
+        elif self.path == "/api/whoami":
+            who = identify(self)
+            name = ""
+            if who.get("uid") and casper_tools:
+                try:
+                    name = next((u.get("username") or u.get("name") for u in casper_tools._get("/users?limit=200").get("items", [])
+                                 if str(u.get("id")) == str(who["uid"])), "")
+                except Exception:
+                    pass
+            self._json({"uid": who.get("uid", ""), "name": name})
+            return
         elif self.path.startswith("/api/devlog"):
             try:
                 import urllib.parse
@@ -896,6 +977,42 @@ class H(BaseHTTPRequestHandler):
                 if self.path == "/api/iv/answer":
                     out["recorded"] = True
                 self._json(out)
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if self.path == "/api/login":             # 簡易ログイン: 名前→Calendar uid を cookie に
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            try:
+                uid = req.get("uid")
+                name = req.get("name", "")
+                if not uid and casper_tools:        # 名前から uid 解決
+                    for u in casper_tools._get("/users?limit=200").get("items", []):
+                        if name and name.lower() in (str(u.get("username") or "") + str(u.get("name") or "") + str(u.get("full_name") or "")).lower():
+                            uid = u.get("id"); name = u.get("username") or u.get("name"); break
+                if not uid:
+                    self._json({"ok": False, "error": "ユーザーが見つかりませぬ"}); return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Set-Cookie", f"casper_uid={uid}; Path=/; Max-Age=31536000; SameSite=Lax")
+                body = json.dumps({"ok": True, "uid": uid, "name": name}, ensure_ascii=False).encode()
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if self.path in ("/api/threads/list", "/api/threads/get", "/api/threads/save", "/api/threads/delete"):
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            try:
+                if self.path.endswith("list"):
+                    self._json({"threads": thread_list(who), "uid": who.get("uid", "")})
+                elif self.path.endswith("get"):
+                    self._json(thread_get(who, req.get("id")))
+                elif self.path.endswith("save"):
+                    self._json(thread_save(who, req.get("id") or "", req.get("messages", []), req.get("title")))
+                else:
+                    self._json(thread_delete(who, req.get("id")))
             except Exception as e:
                 self._json({"error": str(e)})
             return
