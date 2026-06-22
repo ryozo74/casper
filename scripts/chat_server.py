@@ -21,6 +21,10 @@ try:
 except Exception:
     casper_tools = None
 try:
+    import casper_mcp
+except Exception:
+    casper_mcp = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -1436,7 +1440,16 @@ class H(BaseHTTPRequestHandler):
                 working.append(m)
         if not any(m.get("role") == "system" for m in working):
             working = [{"role": "system", "content": build_sys() + fu + sysadd}] + working
-        tools = casper_tools.TOOLS if casper_tools else None
+        tools = list(casper_tools.TOOLS) if casper_tools else []
+        mcp_names = set()
+        if casper_mcp:                              # MCP公開ツールを合流(同名は MCP 優先)
+            try:
+                mt = casper_mcp.list_tools()
+                mcp_names = {t["function"]["name"] for t in mt}
+                tools = mt + [t for t in tools if t["function"]["name"] not in mcp_names]
+            except Exception:
+                pass
+        tools = tools or None
         final = ""
         MAXIT = 6
         try:
@@ -1456,7 +1469,10 @@ class H(BaseHTTPRequestHandler):
                                 args = json.loads(args)
                             except Exception:
                                 args = {}
-                        result = casper_tools.execute(fn, args) if casper_tools else "(no tools)"
+                        if fn in mcp_names and casper_mcp:    # MCP公開ツール
+                            result = casper_mcp.call_tool(fn, args, actor=who.get("uid"))
+                        else:
+                            result = casper_tools.execute(fn, args) if casper_tools else "(no tools)"
                         working.append({"role": "tool", "name": fn, "content": str(result)[:6000]})
                     if it == MAXIT - 2:            # 次が最終: ここまでの情報でまとめるよう促す
                         working.append({"role": "user", "content":
