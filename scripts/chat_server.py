@@ -7,7 +7,7 @@ CORS 不要・ブラウザから外部IPへ直接出ない。
 Usage:
   python3 chat_server.py --endpoint http://192.168.44.119:11434 --model qwen3:14b --port 8770
 """
-import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, urllib.request, uuid
+import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, urllib.request, urllib.error, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -71,17 +71,54 @@ DIAG_HINT = ("\n\n【見せ方は内容に応じて自分で判断せよ】答�
 CONVO_LOG = os.path.join(HERE, "conversation_log.jsonl")
 
 
+# Casper 独自の署名鍵(Score とは分離)。本人確認は Calendar /api/auth/token で行い、JWT は Casper 自前で署名。
+JWT_SECRET = os.environ.get("CASPER_JWT_SECRET", "")
+CAL_BASE = os.environ.get("CALENDAR_BASE_URL", "http://192.168.44.253:8001")
+_EMAIL_UID_CACHE = {}
+
+
+def _verify_score_token(tok):
+    """Score 互換 JWT(HS256・payload sub=email)を検証→email を返す。失敗時 None。"""
+    if not (tok and JWT_SECRET):
+        return None
+    try:
+        import jwt as _jwt
+        payload = _jwt.decode(tok, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("sub")
+    except Exception:
+        return None
+
+
+def _email_to_uid(email):
+    if not email:
+        return ""
+    if email in _EMAIL_UID_CACHE:
+        return _EMAIL_UID_CACHE[email]
+    uid = ""
+    try:
+        for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []):
+            if (u.get("email") or "").lower() == email.lower() or (u.get("username") or "").lower() == email.lower():
+                uid = u.get("id"); break
+    except Exception:
+        uid = ""
+    _EMAIL_UID_CACHE[email] = uid
+    return uid
+
+
 def identify(handler):
-    """発信元を識別。優先: X-Actor-User-Id(組込み時 Score/Calendar から) > cookie uid > 匿名 sid。
-    sid が無ければ新規発行(new_sid に入れて Set-Cookie する)。最終的に uid=Calendar uid へ寄せる。"""
-    uid = (handler.headers.get("X-Actor-User-Id", "") or "").strip()
+    """発信元を識別。本人確定は **JWT 検証** のみ(名前選択だけの成りすまし防止)。
+    優先: X-Actor-User-Id(組込み時 host が検証済) > 検証済 score_token/casper_token(JWT) > 匿名 sid。"""
     ck = http.cookies.SimpleCookie()
     try:
         ck.load(handler.headers.get("Cookie", "") or "")
     except Exception:
         pass
-    if not uid and "casper_uid" in ck:
-        uid = ck["casper_uid"].value
+    uid = (handler.headers.get("X-Actor-User-Id", "") or "").strip()   # 組込み host が検証済の uid
+    if not uid:
+        tok = ck["casper_token"].value if "casper_token" in ck else ""
+        email = _verify_score_token(tok)                               # Casper 独自鍵で検証
+        if email:
+            uid = str(_email_to_uid(email) or "")
     sid = ck["casper_sid"].value if "casper_sid" in ck else ""
     new_sid = ""
     if not sid:
@@ -851,7 +888,11 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         page = None
         if self.path in ("/", "/index.html"):
-            page = "chat.html"
+            # 認証要(独自鍵設定時): 未ログインなら login 画面へ
+            who = identify(self)
+            page = "chat.html" if (who.get("uid") or not JWT_SECRET) else "login.html"
+        elif self.path in ("/login", "/login.html"):
+            page = "login.html"
         elif self.path in ("/qa", "/qa.html"):
             page = "qa.html"
         elif self.path in ("/learn", "/learn.html"):
@@ -980,25 +1021,52 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)})
             return
-        if self.path == "/api/login":             # 簡易ログイン: 名前→Calendar uid を cookie に
+        if self.path == "/api/login":             # 認証ログイン: email+password を Calendar で検証→JWT cookie
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
             try:
-                uid = req.get("uid")
-                name = req.get("name", "")
-                if not uid and casper_tools:        # 名前から uid 解決
-                    for u in casper_tools._get("/users?limit=200").get("items", []):
-                        if name and name.lower() in (str(u.get("username") or "") + str(u.get("name") or "") + str(u.get("full_name") or "")).lower():
-                            uid = u.get("id"); name = u.get("username") or u.get("name"); break
-                if not uid:
-                    self._json({"ok": False, "error": "ユーザーが見つかりませぬ"}); return
+                if not JWT_SECRET:
+                    self._json({"ok": False, "error": "認証未設定(SCORE_JWT_SECRET 要)。管理者に連絡を"}); return
+                email = (req.get("email") or req.get("username") or "").strip()
+                pw = req.get("password") or ""
+                if not (email and pw):
+                    self._json({"ok": False, "error": "メールとパスワードが要ります"}); return
+                import urllib.parse as _up
+                data = _up.urlencode({"username": email, "password": pw}).encode()
+                vr = urllib.request.Request(CAL_BASE + "/api/auth/token", data=data,
+                                            headers={"Content-Type": "application/x-www-form-urlencoded"})
+                try:
+                    with urllib.request.urlopen(vr, timeout=8) as r:
+                        ok = (r.status == 200)
+                except urllib.error.HTTPError as he:
+                    if he.code in (400, 401, 403):    # 認証失敗(パスワード違い等)
+                        self._json({"ok": False, "error": "メールまたはパスワードが違います"}); return
+                    self._json({"ok": False, "error": f"Calendar 認証エラー(HTTP {he.code})"}); return
+                except Exception:
+                    self._json({"ok": False, "error": "Calendar 認証サーバに接続できませぬ"}); return
+                if not ok:
+                    self._json({"ok": False, "error": "メールまたはパスワードが違います"}); return
+                import jwt as _jwt, time as _t
+                token = _jwt.encode({"sub": email, "exp": int(_t.time()) + 86400}, JWT_SECRET, algorithm="HS256")
+                uid = _email_to_uid(email)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Set-Cookie", f"casper_uid={uid}; Path=/; Max-Age=31536000; SameSite=Lax")
-                body = json.dumps({"ok": True, "uid": uid, "name": name}, ensure_ascii=False).encode()
+                self.send_header("Set-Cookie", f"casper_token={token}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax")
+                body = json.dumps({"ok": True, "uid": uid, "name": email}, ensure_ascii=False).encode()
                 self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
             except Exception as e:
                 self._json({"error": str(e)})
+            return
+        if self.path == "/api/logout":
+            try:
+                _ = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0)
+            except Exception:
+                pass
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Set-Cookie", "casper_token=; Path=/; Max-Age=0")
+            b = b'{"ok":true}'
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
             return
         if self.path in ("/api/threads/list", "/api/threads/get", "/api/threads/save", "/api/threads/delete"):
             n = int(self.headers.get("Content-Length", 0))

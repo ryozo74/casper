@@ -359,15 +359,9 @@ function closeSidebar(){ document.getElementById('sidebar').classList.remove('op
 document.getElementById('menubtn').onclick=openSidebar;
 document.getElementById('sbmask').onclick=closeSidebar;
 document.getElementById('newthread').onclick=newThread;
-// ログイン(名前選択)
+// 👤クリック: ログアウト(ログインは専用画面 /login)
 document.getElementById('who').onclick=async()=>{
-  const r=await fetch('/api/users',{credentials:'same-origin'}).then(x=>x.json()).catch(()=>({users:[]}));
-  const names=(r.users||[]).map(u=>u.name).join(' / ');
-  const name=prompt('あなたの名前を入力（社員一覧）:\n'+names);
-  if(!name) return;
-  const lr=await jpost('/api/login',{name});
-  if(lr.ok){ document.getElementById('whoname').textContent=lr.name||name; refreshThreads(); }
-  else alert(lr.error||'ログイン失敗');
+  if(confirm('ログアウトしますか?')){ await jpost('/api/logout',{}); location.href='/login'; }
 };
 (async()=>{ try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; }catch(e){} refreshThreads(); })();
 // ===== Score Uploader ツール =====
