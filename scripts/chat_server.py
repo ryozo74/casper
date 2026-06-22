@@ -86,6 +86,7 @@ if not JWT_SECRET:
     except Exception:
         JWT_SECRET = ""
 CAL_BASE = os.environ.get("CALENDAR_BASE_URL", "http://192.168.44.253:8001")
+WRITE_TOKEN = os.environ.get("CASPER_WRITE_TOKEN", "")   # 書込/DM用(ニブ殿発行待ち・無ければDM空)
 _EMAIL_UID_CACHE = {}
 
 
@@ -344,6 +345,35 @@ def shot_assignee_digest(query):
         return ""
 
 
+def cross_digest(query):
+    """横断クエリ(全PJで一番遅れてる/誰が/やばい 等)に、全PJ遅延のPJ別・担当別ランキングを注入。"""
+    if not casper_tools:
+        return ""
+    if not re.search(r"全(PJ|プロジェクト|案件)|一番|最も|誰が.*遅|やばい|横断|全体|ランキング|ワースト|どのPJ|どのプロジェクト", query or "", re.I):
+        return ""
+    try:
+        _get = casper_tools._get
+        tasks = []
+        for off in (0, 500, 1000):
+            page = _get(f"/tasks?limit=500&offset={off}").get("items", [])
+            tasks += page
+            if len(page) < 500:
+                break
+        pm = {p["id"]: p.get("name") for p in _get("/projects?limit=200").get("items", [])}
+        um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+              for u in _get("/users?limit=200").get("items", [])}
+        import collections
+        dl = [t for t in tasks if (t.get("status") or "") == "delayed"]
+        byp = collections.Counter(pm.get(t.get("project_id"), t.get("project_id")) for t in dl)
+        byu = collections.Counter(um.get(t.get("assigned_to"), "未割当") for t in dl)
+        lines = [f"全PJ遅延タスク総数: {len(dl)}件",
+                 "PJ別遅延(多い順): " + ", ".join(f"{k}={v}" for k, v in byp.most_common(6)),
+                 "担当者別遅延(多い順): " + ", ".join(f"{k}={v}" for k, v in byu.most_common(6))]
+        return "\n\n## 横断サマリ(全PJ遅延・左脳ライブ)\n" + "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def meeting_digest(query):
     """会議/議事録/決定 クエリ時に最新会議の要約を先読み注入(generic/時系列クエリの取りこぼし対策)。"""
     if not casper_tools:
@@ -465,6 +495,54 @@ def portfolio_digest(query):
     except Exception:
         pass
     return ""
+
+
+def dm_threads(who):
+    """ログイン中ユーザーのDMスレッド一覧を取得(get_messages相当)。
+    書込トークン(per-user)が要る→未発行時は空。{threads:[{id,peer,unread,last,ts}], available:bool}"""
+    if not (who.get("authed") and who.get("uid") and WRITE_TOKEN):
+        return {"available": False, "threads": []}
+    try:
+        req = urllib.request.Request(
+            CAL_BASE + "/api/me/dm/threads",
+            headers={"Authorization": f"Bearer {WRITE_TOKEN}", "X-Actor-User-Id": str(who["uid"])})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.load(r)
+        items = data.get("items") if isinstance(data, dict) else data
+        umap = {}
+        try:
+            umap = {u.get("id"): (u.get("username") or u.get("name") or str(u.get("id")))
+                    for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else [])}
+        except Exception:
+            pass
+        out = []
+        for t in (items or []):
+            peer = t.get("peer_id") or t.get("other_user_id") or t.get("recipient_id")
+            out.append({"id": t.get("id") or t.get("thread_id"),
+                        "peer": umap.get(peer, peer), "peer_id": peer,
+                        "unread": int(t.get("unread") or t.get("unread_count") or 0),
+                        "last": str(t.get("last_message") or t.get("last_body") or "")[:60],
+                        "ts": str(t.get("updated_at") or t.get("last_at") or "")[:19]})
+        out.sort(key=lambda x: x.get("ts", ""), reverse=True)
+        return {"available": True, "threads": out}
+    except Exception as e:
+        return {"available": False, "threads": [], "error": str(e)[:120]}
+
+
+def dm_messages(who, thread_id):
+    """指定DMスレッドの本文取得。"""
+    if not (who.get("authed") and who.get("uid") and WRITE_TOKEN):
+        return {"available": False, "messages": []}
+    try:
+        req = urllib.request.Request(
+            CAL_BASE + f"/api/me/dm/threads/{thread_id}/messages",
+            headers={"Authorization": f"Bearer {WRITE_TOKEN}", "X-Actor-User-Id": str(who["uid"])})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.load(r)
+        items = data.get("items") if isinstance(data, dict) else data
+        return {"available": True, "messages": items or []}
+    except Exception as e:
+        return {"available": False, "messages": [], "error": str(e)[:120]}
 
 
 def user_profile_digest(who):
@@ -985,6 +1063,14 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e), "users": []})
             return
+        elif self.path == "/api/dm/threads":
+            self._json(dm_threads(identify(self)))
+            return
+        elif self.path.startswith("/api/dm/messages"):
+            import urllib.parse as _up
+            tid = dict(_up.parse_qsl(_up.urlparse(self.path).query)).get("id", "")
+            self._json(dm_messages(identify(self), tid))
+            return
         elif self.path == "/api/whoami":
             who = identify(self)
             name = who.get("email", "")
@@ -1269,6 +1355,7 @@ class H(BaseHTTPRequestHandler):
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
+            cal += cross_digest(last_user)            # 横断クエリは全PJ遅延サマリを注入
             cal += shot_assignee_digest(last_user)    # カット×担当(shot×task結合)も注入
             diag_hint = DIAG_HINT
             prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
@@ -1333,6 +1420,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
         sysadd += portfolio_digest(ll_user)             # 実績クエリは自社Vimeo実績を注入
+        sysadd += cross_digest(ll_user)                 # 横断クエリは全PJ遅延サマリを注入
         try:
             src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
             if fulltext:

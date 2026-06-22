@@ -63,6 +63,11 @@
   .thr.cur{background:rgba(125,211,252,.14);border-color:#3a4a66}
   .thr .ttl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .thr .del{color:var(--mut);cursor:pointer;font-size:12px}
+  .sbsec{font-size:11px;color:var(--mut);margin:10px 4px 4px;font-weight:700;letter-spacing:.05em}
+  .ubadge{background:#ef4444;color:#fff;border-radius:999px;padding:0 6px;font-size:10px;margin-left:4px}
+  .udot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#ef4444;margin-right:5px;vertical-align:middle}
+  .thr.dm .scorelink{color:var(--mut);text-decoration:none;font-size:13px;padding:0 4px}
+  .thr.dm .scorelink:hover{color:var(--accent)}
   .think{color:var(--mut);font-size:12.5px;font-style:italic;border-left:2px solid var(--line);
          padding-left:10px;margin:2px 0 6px;white-space:pre-wrap}
   footer{border-top:1px solid var(--line);padding:14px 20px;background:rgba(14,20,32,.7);backdrop-filter:blur(8px)}
@@ -337,14 +342,47 @@ async function saveThread(){
   if(!history.length) return;
   try{ const r=await jpost('/api/threads/save',{id:curThread,messages:history}); if(r.id){curThread=r.id;localStorage.setItem('casper_thread',curThread);} refreshThreads(); }catch(e){}
 }
+const SCORE_BASE='http://192.168.44.253:8201';   // 本番Score(DM直リンク用)
 async function refreshThreads(){
-  try{ const r=await jpost('/api/threads/list',{}); const el=document.getElementById('threadlist'); el.innerHTML='';
+  const el=document.getElementById('threadlist');
+  try{
+    // --- DM セクション(未読マーク・Score直リンク) ---
+    let dm={threads:[],available:false};
+    try{ dm=await fetch('/api/dm/threads',{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
+    el.innerHTML='';
+    if(dm.available && dm.threads.length){
+      const unread=dm.threads.reduce((a,t)=>a+(t.unread||0),0);
+      el.insertAdjacentHTML('beforeend','<div class="sbsec">💬 DM'+(unread?' <span class="ubadge">'+unread+'</span>':'')+'</div>');
+      dm.threads.forEach(t=>{
+        const d=document.createElement('div'); d.className='thr dm';
+        d.innerHTML='<span class="ttl">'+(t.unread?'<span class="udot"></span>':'')+esc(t.peer||'DM')+' <span style="color:var(--mut);font-size:11px">'+esc(t.last||'')+'</span></span>'+
+          '<a class="scorelink" href="'+SCORE_BASE+'/messages" target="_blank" title="Scoreで見る">↗</a>';
+        d.querySelector('.ttl').onclick=()=>openDM(t);
+        el.appendChild(d);
+      });
+      el.insertAdjacentHTML('beforeend','<div class="sbsec">🧵 スレッド</div>');
+    } else {
+      el.insertAdjacentHTML('beforeend','<div class="sbsec">🧵 スレッド</div>');
+    }
+    // --- 通常スレッド ---
+    const r=await jpost('/api/threads/list',{});
     (r.threads||[]).forEach(t=>{ const d=document.createElement('div'); d.className='thr'+(t.id===curThread?' cur':'');
       d.innerHTML='<span class="ttl">'+esc(t.title||'(無題)')+'</span><span class="del" title="削除">🗑</span>';
       d.querySelector('.ttl').onclick=()=>loadThread(t.id);
       d.querySelector('.del').onclick=(e)=>{e.stopPropagation();delThread(t.id);};
       el.appendChild(d); });
   }catch(e){}
+}
+async function openDM(t){
+  closeSidebar();
+  const b=el('bot'); b.classList.add('cursor');
+  let r={messages:[]}; try{ r=await fetch('/api/dm/messages?id='+encodeURIComponent(t.id),{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
+  b.classList.remove('cursor');
+  const lines=(r.messages||[]).map(m=>(m.sender_id==null?'':'')+esc(String(m.body||m.content||''))).join('\n');
+  let md='### 💬 '+esc(t.peer||'DM')+' との会話\n\n'+(lines||'(本文取得不可)')+
+    '\n\n---\n[Scoreで見る]('+SCORE_BASE+'/messages) ／ このまま返信内容を入力欄に書けば Casper が代筆送信します（実送信はニブ殿の書込権限後）';
+  render(b,md);
+  log.scrollTop=log.scrollHeight;
 }
 async function loadThread(id){
   const t=await jpost('/api/threads/get',{id}); curThread=id; localStorage.setItem('casper_thread',id);
