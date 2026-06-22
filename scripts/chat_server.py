@@ -450,6 +450,23 @@ def thread_delete(who, tid):
     return {"ok": True}
 
 
+def portfolio_digest(query):
+    """制作実績クエリ時、自社Vimeoポートフォリオを先読み注入(個人経歴との混同防止)。"""
+    if not re.search(r"実績|ポートフォリオ|portfolio|作品|制作事例|過去案件|どんな.*作", query or "", re.I):
+        return ""
+    try:
+        p = os.path.join(VAULT, "30_culture_rules", "ops_vimeo_portfolio.md")
+        if os.path.exists(p):
+            t = open(p, encoding="utf-8").read()
+            tbl = t.split("|", 1)
+            body = ("|" + tbl[1]) if len(tbl) > 1 else t
+            return ("\n\n## 自社制作実績(Vimeo公開・これが一次の会社実績)\n" + body[:3500]
+                    + "\n※会社実績はこのVimeo公開分を主に挙げよ。FF/Samurai Jack等は個人メンバーの経歴ゆえ区別。")
+    except Exception:
+        pass
+    return ""
+
+
 def user_profile_digest(who):
     """ログイン中ユーザーの蓄積プロファイル(profile_<ukey>.md)を先読み注入。
     会話学習で深まったユーザー理解を毎回の応対に反映する。"""
@@ -494,7 +511,10 @@ BASE_SYS = (
     "【短い語の入力】ユーザー入力が人物名/PJ名/タスク名など短い語だけの場合は、その対象を社内記録で調べ説明せよ(選択肢からの深掘りとみなす)。\n"
     "【主観の許容】『得意/良い/最適/向いている』等の評価を問われた場合、唯一の正解を装わず、"
     "根拠(スキルシート/過去PJの担当・実績/フィードバック)に基づく候補を複数挙げよ。評価は人や基準で異なって構わない。"
-    "断定せず『候補』として選べる形にし、可能なら各候補の根拠を一言添える。")
+    "断定せず『候補』として選べる形にし、可能なら各候補の根拠を一言添える。\n"
+    "【実績の区別】制作実績を聞かれたら、**自社公開のVimeoポートフォリオ(67本・CEATEC/InterBee/Leisure等)を一次の自社実績**として挙げよ。"
+    "スキルシート由来の有名作(FF/Samurai Jack等)は『個人メンバーの経歴』であり会社実績と混同するな(区別して述べよ)。"
+    "資料に無い作品名を一般知識から創作するな。")
 
 
 def build_sys():
@@ -1248,6 +1268,7 @@ class H(BaseHTTPRequestHandler):
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
+            cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
             cal += shot_assignee_digest(last_user)    # カット×担当(shot×task結合)も注入
             diag_hint = DIAG_HINT
             prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
@@ -1309,6 +1330,9 @@ class H(BaseHTTPRequestHandler):
         # 出力指針(表/mermaid/Canvas/動画)を system に追記。
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
+        sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
+        sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
+        sysadd += portfolio_digest(ll_user)             # 実績クエリは自社Vimeo実績を注入
         try:
             src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
             if fulltext:
