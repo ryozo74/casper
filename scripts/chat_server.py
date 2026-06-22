@@ -1013,18 +1013,58 @@ def graph_data():
             continue
         nset.add(base)
         nodes.append({"id": base, "label": base[:26], "group": GROUP.get(folder, "other")})
+    # 人物名・PJ名の語彙(2文字以上)を集め、本文出現で意味エッジを張る
+    people_names = []
+    proj_names = []
+    texts = {}
     for p in sorted(files):
         base = os.path.splitext(os.path.basename(p))[0]
         if base not in nset:
             continue
+        rel = os.path.relpath(p, V)
+        folder = rel.split(os.sep)[0] if os.sep in rel else "root"
         try:
             t = open(p, encoding="utf-8", errors="replace").read()
         except Exception:
             continue
+        texts[base] = t
+        if folder == "20_people":
+            nm = (re.search(r"^name:\s*(.+)$", t, re.M) or [None, ""])[1].strip()
+            for tok in re.findall(r"[A-Za-z]{3,}|[一-龠ぁ-んァ-ヶ]{2,}", nm):
+                if len(tok) >= 2:
+                    people_names.append((tok, base))
+        # PJ名: source 行や name から PJ語を拾う(asset/meeting/digest の project: 等)
+        pj = (re.search(r"project:\s*(.+)$", t, re.M) or [None, ""])[1].strip()
+        if pj and len(pj) >= 2:
+            proj_names.append((pj, base))
+
+    seen_e = set()
+
+    def add(s, tgt):
+        if s != tgt and (s, tgt) not in seen_e and (tgt, s) not in seen_e:
+            seen_e.add((s, tgt)); links.append({"source": s, "target": tgt})
+
+    for base, t in texts.items():
+        # ① wiki link
         for m in set(re.findall(r"\[\[([^\]|]+)", t)):
             tgt = m.strip()
-            if tgt in nset and tgt != base:
-                links.append({"source": base, "target": tgt})
+            if tgt in nset:
+                add(base, tgt)
+        body = t.lower()
+        # ② 人物名が本文に出る → 人物ノートへ
+        for nm, pnode in people_names:
+            if pnode != base and nm.lower() in body:
+                add(base, pnode)
+        # ③ PJ名が本文に出る → 同PJの他ノートへ(project: 値で束ねる)
+    # ③: 同じ project 値を持つノート同士を結ぶ
+    from collections import defaultdict
+    bypj = defaultdict(list)
+    for pj, base in proj_names:
+        bypj[pj.lower()].append(base)
+    for pj, members in bypj.items():
+        for i in range(len(members)):
+            for j in range(i + 1, min(i + 6, len(members))):  # 各PJ内で連結(過密回避に上限)
+                add(members[i], members[j])
     return {"nodes": nodes, "links": links}
 
 
