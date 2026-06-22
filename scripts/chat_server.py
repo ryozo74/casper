@@ -1059,23 +1059,35 @@ class H(BaseHTTPRequestHandler):
         # --- Ollama(local) backend (qwen3.6:27b 等・自律 tool-calling) ---
         ll_user = next((m.get("content", "") for m in reversed(msgs)
                         if m.get("role") == "user"), "")
-        # 出力指針(表/mermaid/Canvas/動画)を system に追記。tool は自分で呼べるので先読み注入は最小限。
+        # 出力指針(表/mermaid/Canvas/動画)を system に追記。
+        # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
+        sysadd = DIAG_HINT
+        try:
+            src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
+            if fulltext:
+                sysadd += ("\n\n## 該当資料(右脳vault・" + src + ") — サムネ等の画像URL `![](/asset/..)` は"
+                           "ここから一字一句コピーせよ。これに無い画像URLは創作するな:\n" + fulltext[:7000])
+        except Exception:
+            pass
         working = []
         for m in msgs:
             if m.get("role") == "system":
-                working.append({"role": "system", "content": m["content"] + DIAG_HINT})
+                working.append({"role": "system", "content": m["content"] + sysadd})
             else:
                 working.append(m)
         if not any(m.get("role") == "system" for m in working):
-            working = [{"role": "system", "content": build_sys() + fu + DIAG_HINT}] + working
+            working = [{"role": "system", "content": build_sys() + fu + sysadd}] + working
         tools = casper_tools.TOOLS if casper_tools else None
         final = ""
+        MAXIT = 6
         try:
-            for _ in range(6):                      # 最大6反復 (ツール多段)
-                resp = ollama_chat(working, tools=tools)
+            for it in range(MAXIT):
+                last = (it == MAXIT - 1)
+                # 最終反復は tool 無しで強制的に回答させる(空振り無限ループ防止)
+                resp = ollama_chat(working, tools=(None if last else tools))
                 m = resp.get("message", {}) or {}
                 tcs = m.get("tool_calls")
-                if tcs:
+                if tcs and not last:
                     working.append(m)
                     for tc in tcs:
                         fn = tc.get("function", {}).get("name", "")
@@ -1087,11 +1099,13 @@ class H(BaseHTTPRequestHandler):
                                 args = {}
                         result = casper_tools.execute(fn, args) if casper_tools else "(no tools)"
                         working.append({"role": "tool", "name": fn, "content": str(result)[:6000]})
+                    if it == MAXIT - 2:            # 次が最終: ここまでの情報でまとめるよう促す
+                        working.append({"role": "user", "content":
+                            "（これ以上ツールは呼ばず、ここまでに取得した情報だけで今すぐ回答せよ。"
+                            "サムネイル等 vault 由来の画像は『関連社内記録』に在ればそれを使い、無ければ無い旨を述べよ）"})
                     continue
                 final = strip_think(m.get("content", ""))
                 break
-            else:
-                final = final or "(ツール反復が上限に達し申した)"
         except Exception as e:
             final = f"[error] {e}"
 
