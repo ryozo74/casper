@@ -40,12 +40,15 @@
   #log{flex:1;overflow-y:auto;padding:22px;display:flex;flex-direction:column;gap:16px}
   .wrap{max-width:820px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:16px}
   .msg{display:flex;gap:12px;align-items:flex-start}
+  .msg.user{flex-direction:row-reverse}                 /* ユーザーは右側 */
+  .msg.user .bubble{max-width:78%}
   .msg .av{width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:15px}
   .msg.user .av{background:var(--me);color:var(--accent)}
   .msg.bot  .av{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f}
   .bubble{padding:11px 15px;border-radius:12px;white-space:pre-wrap;word-break:break-word;max-width:100%}
-  .msg.user .bubble{background:var(--me);border:1px solid var(--line)}
+  .msg.user .bubble{background:var(--me);border:1px solid var(--line);text-align:left}
   .msg.bot  .bubble{background:var(--panel);border:1px solid var(--line)}
+  .ptime{color:var(--mut);font-size:11px;margin-top:6px;opacity:.7}
   .think{color:var(--mut);font-size:12.5px;font-style:italic;border-left:2px solid var(--line);
          padding-left:10px;margin:2px 0 6px;white-space:pre-wrap}
   footer{border-top:1px solid var(--line);padding:14px 20px;background:rgba(14,20,32,.7);backdrop-filter:blur(8px)}
@@ -89,8 +92,9 @@
   .toolmenu{position:absolute;bottom:64px;left:14px;background:#11182a;border:1px solid #243049;border-radius:12px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:9}
   .tmitem{padding:8px 12px;border-radius:8px;cursor:pointer;font-size:14px}
   .tmitem:hover{background:rgba(125,211,252,.15)}
-  #tools .toolchip{display:inline-flex;align-items:center;gap:6px;background:rgba(125,211,252,.14);border:1px solid #3a4a66;color:#cfe8ff;border-radius:999px;padding:3px 10px;font-size:12px;margin:0 0 6px 4px}
-  #tools .toolchip b{cursor:pointer}
+  #tools{display:inline-flex;align-items:center}
+  .toolico{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:9px;background:rgba(125,211,252,.16);border:1px solid #3a4a66;font-size:17px;cursor:pointer;flex:none}
+  .toolico:hover{background:rgba(125,211,252,.28)}
   #attach .filechip{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.05);border:1px solid #243049;border-radius:10px;padding:5px 10px;font-size:12px;margin:0 0 6px 4px}
   #attach .filechip img{width:40px;height:30px;object-fit:cover;border-radius:5px}
   .ulcard{background:rgba(14,20,32,.6);border:1px solid #1f2937;border-radius:12px;padding:12px;margin:8px 0}
@@ -112,7 +116,7 @@
 </head>
 <body>
 <header>
-  <div><h1>Casper</h1><div class="sub">入力負担ゼロ 伴走AI</div></div>
+  <div><h1>Casper</h1></div>
   <nav class="nav"><a href="/learn">🧠 Casperに教える</a><a href="/play">🎲 Casperと遊ぶ</a><a href="/peek">🔮 Casperをのぞく</a></nav>
   <div class="dot" id="status"><b></b><span>接続確認中…</span></div>
 </header>
@@ -120,11 +124,11 @@
   <div class="msg bot"><div class="av"><img src="/icon" alt="C" style="width:100%;height:100%;object-fit:cover;border-radius:8px"></div><div class="bubble">Casper です。社内の予定・人・過去の記録を踏まえてお答えします。何でも聞いてください。</div></div>
 </div></div>
 <footer>
-  <div id="tools"></div>
   <div id="attach"></div>
   <div class="ic">
     <button id="plus" title="ツールを追加">＋</button>
-    <textarea id="inp" rows="1" placeholder="メッセージを入力（Ctrl+Enterで改行・送信ボタンで送信）"></textarea>
+    <span id="tools"></span>
+    <textarea id="inp" rows="1" placeholder="メッセージを入力（Enterで送信・Shift+Enterで改行）"></textarea>
     <button id="send">送信</button>
   </div>
   <div id="toolmenu" class="toolmenu" style="display:none">
@@ -276,7 +280,7 @@ async function ask(){
   inp.value=''; inp.style.height='auto'; send.disabled=true;
   el('user').textContent=text; history.push({role:'user',content:text});
   const b=el('bot'); b.classList.add('cursor'); b.textContent='';
-  let acc='',diagramUrl=null;
+  let acc='',diagramUrl=null; const t0=performance.now();
   try{
     const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:history})});
@@ -296,6 +300,8 @@ async function ask(){
     }
   }catch(e){ acc+='\n[通信失敗] '+e.message; render(b,acc); }
   b.classList.remove('cursor');
+  const dt=((performance.now()-t0)/1000).toFixed(1);
+  const tm=document.createElement('div'); tm.className='ptime'; tm.textContent='⏱ '+dt+'s'; b.appendChild(tm);
   renderMermaid(b); renderCanvas(b); addFeedback(b, text, acc); log.scrollTop=log.scrollHeight;
   if(diagramUrl){const da=document.createElement('a');da.href=diagramUrl;da.target='_blank';
     da.className='diagbtn';da.textContent='📊 図解を表示';b.appendChild(da);}
@@ -311,7 +317,7 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
   toolmenu.style.display='none';
   if(it.dataset.tool==='score_uploader'){ uploaderOn=true; renderTools(); }
 });
-function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolchip">🎬 Score Uploader <b title="外す" onclick="offUploader()">✕</b></span>' : ''; }
+function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
 function clearFile(){ pendingFile=null; attachEl.innerHTML=''; }
 function renderFile(){ attachEl.innerHTML = pendingFile ? ('<span class="filechip">'+(pendingFile.isImage?('<img src="'+pendingFile.dataurl+'">'):'🎬')+' '+pendingFile.name+' <b style="cursor:pointer" onclick="clearFile()">✕</b></span>') : ''; }
@@ -335,35 +341,62 @@ async function uploaderFlow(file, hint){
   const card=document.createElement('div'); card.className='md';
   let html='<div class="ulcard">';
   if(res.recognized) html+='<div style="color:var(--mut);font-size:12px;margin-bottom:6px">👁 認識: '+esc(res.recognized).slice(0,200)+'</div>';
-  html+='<div><b>提出先タスクを選んでください</b>'+(res.parsed&&res.parsed.cut!=null?(' <span style="color:var(--mut)">(ヒント: cut'+res.parsed.cut+(res.parsed.intent?'/'+res.parsed.intent:'')+')</span>'):'')+'</div>';
   card.innerHTML=html; b.appendChild(card);
   const box=card.querySelector('.ulcard');
-  (res.candidates||[]).forEach(c=>{
+  const useArea=document.createElement('div');                 // 用途選択
+  const optWrap=document.createElement('div');                 // 候補リスト専用エリア
+  const ccArea=document.createElement('div'); ccArea.className='ccarea';   // クロスチェック/保存 専用(複製防止)
+  box.appendChild(useArea); box.appendChild(optWrap); box.appendChild(ccArea);
+  let selected=null;
+  function selOpt(btn, c){ optWrap.querySelectorAll('.ulopt').forEach(x=>x.classList.remove('sel')); btn.classList.add('sel'); selected=c; openCross(ccArea, c, file, hint); }
+  function showTaskPicker(){
+    optWrap.innerHTML='<div style="margin:6px 0"><b>提出先タスクを選んでください</b>'+(res.parsed&&res.parsed.cut!=null?(' <span style="color:var(--mut)">(ヒント: cut'+res.parsed.cut+')</span>'):'')+'</div>';
+    (res.candidates||[]).forEach(c=>{
+      const bt=document.createElement('button'); bt.className='ulopt';
+      bt.innerHTML='<b>'+esc(c.name)+'</b> <span style="color:var(--mut)">'+esc(c.project||'')+' / '+esc(c.status||'')+' / '+esc(c.due||'')+(c.shotID?(' / '+esc(c.shotID)):'')+'</span>'+(c.why&&c.why.length?(' ✅'+c.why.join(',')):'');
+      bt.onclick=()=>selOpt(bt, c); optWrap.appendChild(bt);
+    });
+    const other=document.createElement('button'); other.className='ulopt'; other.textContent='その他 / 該当なし（ここに記入）';
+    other.onclick=()=>{ optWrap.querySelectorAll('.ulopt').forEach(x=>x.classList.remove('sel')); other.classList.add('sel'); selected=null;
+      ccArea.innerHTML='<div style="margin-top:10px"><b>📝 該当タスクを記入</b><input class="ulfree" placeholder="例: marukome c12 アニメ" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid #243049;color:#dbe4ee;border-radius:9px;padding:8px 11px;font-size:13px;margin-top:4px"><button class="ulsubmit">この内容で 提出（確認）</button></div>';
+      const inq=ccArea.querySelector('.ulfree'); ccArea.querySelector('.ulsubmit').onclick=()=>doSubmit(ccArea,{id:null,name:inq.value||'(記入)'},file,(hint?hint+' ':'')+inq.value,'qc'); inq.focus();
+    };
+    optWrap.appendChild(other);
+  }
+  // 用途選択(まずここから)
+  useArea.innerHTML='<div style="margin:4px 0"><b>この投入物の用途は?</b></div>';
+  [['qc','🎬 成果物(QC/Review提出)','提出先タスクを選びクロスチェック→Calendar(権限待ち)'],
+   ['daily','🗂 daily / メモ(記録だけ)','右脳vaultに即記録(権限不要)'],
+   ['reference','📚 リファレンス(参考資料)','紐付け先を選んでCalendar(権限待ち)']].forEach(([v,label,desc])=>{
     const bt=document.createElement('button'); bt.className='ulopt';
-    bt.innerHTML='<b>'+esc(c.name)+'</b> <span style="color:var(--mut)">'+esc(c.project||'')+' / '+esc(c.status||'')+' / '+esc(c.due||'')+(c.shotID?(' / '+esc(c.shotID)):'')+'</span>'+(c.why&&c.why.length?(' ✅'+c.why.join(',')):'');
-    bt.onclick=()=>chooseCandidate(box, c, file, hint);
-    box.appendChild(bt);
+    bt.innerHTML='<b>'+label+'</b> <span style="color:var(--mut);font-size:12px">'+desc+'</span>';
+    bt.onclick=()=>{
+      useArea.querySelectorAll('.ulopt').forEach(x=>x.classList.remove('sel')); bt.classList.add('sel');
+      optWrap.innerHTML=''; ccArea.innerHTML='';
+      if(v==='daily'){
+        ccArea.innerHTML='<div style="margin-top:8px"><b>🗂 daily/メモとして記録</b><input class="ulfree" placeholder="メモ(任意): 何の作業か等" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid #243049;color:#dbe4ee;border-radius:9px;padding:8px 11px;font-size:13px;margin-top:4px" value="'+esc(hint||'')+'"><button class="ulsubmit">vaultに記録</button></div>';
+        const inq=ccArea.querySelector('.ulfree'); ccArea.querySelector('.ulsubmit').onclick=()=>doSubmit(ccArea,{id:null,name:file.name},file,inq.value,'daily',res.recognized); inq.focus();
+      } else { showTaskPicker(); }
+    };
+    useArea.appendChild(bt);
   });
-  const other=document.createElement('button'); other.className='ulopt'; other.textContent='その他 / 該当なし（自由記入・Casperが質問）';
-  other.onclick=()=>{ box.insertAdjacentHTML('beforeend','<div style="margin-top:8px;color:var(--mut);font-size:12px">→ どのタスクか、PJ名やカット番号を入力欄に書いて送信してください（通常チャットで補足）。</div>'); };
-  box.appendChild(other);
   log.scrollTop=log.scrollHeight;
 }
-async function chooseCandidate(box, c, file, hint){
-  box.querySelectorAll('.ulopt').forEach(b=>b.classList.remove('sel'));
-  box.insertAdjacentHTML('beforeend','<div class="cc" style="margin-top:10px;color:var(--mut)">🔍 クロスチェック中…</div>');
+async function openCross(ccArea, c, file, hint){
+  ccArea.innerHTML='<div style="margin-top:10px;color:var(--mut)">🔍 クロスチェック中…</div>';
   let cc; try{ cc=await apiPost('/api/uploader/crosscheck',{task_id:c.id,hint:hint}); }catch(e){ cc={questions:[]}; }
-  const ccEl=box.querySelector('.cc'); let h='<div style="margin-top:10px"><b>🔍 クロスチェック（'+esc(c.name)+'）</b></div>';
+  let h='<div style="margin-top:10px"><b>🔍 クロスチェック（'+esc(c.name)+'）</b></div>';
   if(cc.spec) h+='<div style="color:var(--mut);font-size:12px;margin:4px 0">仕様: '+esc(cc.spec).slice(0,300)+'</div>';
   (cc.questions||[]).forEach((q,i)=>{ h+='<label style="display:block;font-size:13px;margin:3px 0"><input type="checkbox" class="ccq" data-q="'+i+'"> '+esc(q)+'</label>'; });
   h+='<button class="ulsubmit">この内容で QC 提出（確認）</button>';
-  ccEl.innerHTML=h;
-  ccEl.querySelector('.ulsubmit').onclick=async()=>{
-    const r=await apiPost('/api/uploader/submit',{task_id:c.id,intent:(hint&&/参考|reference|リファ/.test(hint))?'reference':'qc',filename:file.name,note:hint});
-    ccEl.insertAdjacentHTML('beforeend','<div class="ulcard" style="margin-top:8px">'+(r.written?'✅ 提出しました':'🟡 '+esc(r.message||'確認のみ（書込権限待ち）'))+'</div>');
-    offUploader();
-  };
+  ccArea.innerHTML=h;
+  ccArea.querySelector('.ulsubmit').onclick=()=>doSubmit(ccArea, c, file, hint, 'qc');
   log.scrollTop=log.scrollHeight;
+}
+async function doSubmit(ccArea, c, file, note, intent, recognized){
+  const r=await apiPost('/api/uploader/submit',{task_id:c.id,intent:intent||'qc',filename:file.name,note:note,recognized:recognized||''});
+  ccArea.insertAdjacentHTML('beforeend','<div class="ulcard" style="margin-top:8px">'+(r.written?('✅ '+esc(r.message||'記録しました')):'🟡 '+esc(r.message||'確認のみ（書込権限待ち）'))+'</div>');
+  offUploader();
 }
 function sendRouter(){
   const text=inp.value.trim();
@@ -371,15 +404,9 @@ function sendRouter(){
   ask();
 }
 send.onclick=sendRouter;
-// Enter は送信しない(改行)。Ctrl+Enter / Cmd+Enter で改行を挿入。送信は送信ボタンで。
+// Enter で送信。Shift+Enter で改行。
 inp.addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){
-    e.preventDefault();
-    const s=inp.selectionStart, en=inp.selectionEnd;
-    inp.value=inp.value.slice(0,s)+'\n'+inp.value.slice(en);
-    inp.selectionStart=inp.selectionEnd=s+1;
-    inp.dispatchEvent(new Event('input'));
-  }
+  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendRouter(); }
 });
 inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px';});
 inp.focus();

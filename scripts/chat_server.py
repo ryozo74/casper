@@ -937,14 +937,25 @@ class H(BaseHTTPRequestHandler):
                     self._json(out)
                 elif self.path.endswith("crosscheck"):
                     self._json(uploader_crosscheck(req.get("task_id"), req.get("hint", ""), uid))
-                else:  # submit — 安全フェーズ: 書込はせず確認記録のみ
+                else:  # submit — 用途で分岐: daily/メモ=右脳vault即保存(権限不要) / QC・reference=Calendar(権限待ち)
+                    intent = req.get("intent", "qc")
+                    fn = req.get("filename", "upload")
+                    note = req.get("note", "")
                     rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-                           "uid": uid or "", "task_id": req.get("task_id"), "intent": req.get("intent", "qc"),
-                           "filename": req.get("filename"), "note": req.get("note", ""), "status": "confirmed_no_write"}
+                           "uid": uid or "", "task_id": req.get("task_id"), "intent": intent,
+                           "filename": fn, "note": note}
                     with open(os.path.join(HERE, "uploader_intent_log.jsonl"), "a", encoding="utf-8") as f:
-                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    self._json({"ok": True, "written": False,
-                                "message": "確認のみ記録(書込権限は未取得。ニブ/エルヴィス殿の許可後に実提出を接続)"})
+                        f.write(json.dumps({**rec, "status": "submitted"}, ensure_ascii=False) + "\n")
+                    if intent in ("daily", "memo", "record"):
+                        # 右脳vault に即保存(Calendar 権限不要)
+                        out = feed_save(fn, note or "(daily 記録)",
+                                        (req.get("recognized") or note or "")[:1500], [], fn)
+                        self._json({"ok": True, "written": True, "dest": "vault",
+                                    "message": "✅ 右脳(vault)に記録しました（daily/メモはCalendar権限不要）"})
+                    else:
+                        # QC/reference は Calendar 書込ゆえ権限待ち(確認のみ)
+                        self._json({"ok": True, "written": False, "dest": "calendar",
+                                    "message": "🟡 確認のみ（QC/参照のCalendar登録はニブ/エルヴィス殿の書込許可後に接続）"})
             except Exception as e:
                 self._json({"error": str(e)})
             return
