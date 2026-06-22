@@ -20,14 +20,21 @@ TOOLS = [
             "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "calendar_lookup",
-        "description": "左脳Calendarの最新データをライブ照会。プロジェクト一覧/状態、タスク、メンバーを取得。"
-                       "『今日のタスク』は kind=tasks, due='today', active=true で取れる。",
+        "description": "左脳Calendarの最新データをライブ照会(プロジェクト/タスク/メンバー)。"
+                       "★PJ名(marukome/FUJI等)が質問に出たら必ず query にそのPJ名を渡せ。"
+                       "例: marukomeの遅延→{kind:'tasks',query:'marukome',status:'delayed'} / "
+                       "今日のタスク→{kind:'tasks',due:'today',active:true} / "
+                       "rui担当の遅延→{kind:'tasks',query:'marukome',status:'delayed',assignee:'rui'} / "
+                       "高井の担当全部→{kind:'tasks',query:'marukome',assignee:'ryoji'}。"
+                       "結果に total(全件数)を含む。0件なら本当に0、推測で『無い』と言うな。",
         "parameters": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["projects", "tasks", "users"], "description": "照会対象"},
-            "query": {"type": "string", "description": "名前での絞り込み(任意)"},
+            "query": {"type": "string", "description": "PJ名やタスク名で絞り込み。PJ名が質問に在れば必ず渡す"},
             "project_id": {"type": "integer", "description": "tasks 照会時の project_id 絞り込み(任意)"},
             "due": {"type": "string", "description": "tasks 期日絞り込み(任意)。'today'=本日締切"},
-            "active": {"type": "boolean", "description": "true で未完(completed/approved除く)のみ(任意)"}},
+            "active": {"type": "boolean", "description": "true で未完(completed/approved除く)のみ(任意)"},
+            "status": {"type": "string", "description": "tasks 状態絞り込み(任意)。例 'delayed'(遅延)/'todo'/'in-progress'/'retake'"},
+            "assignee": {"type": "string", "description": "tasks 担当者で絞り込み(任意)。ユーザー名 例 'rui' 'hori'。日本語名(高井等)はローマ字username 'ryoji' 等で"}},
             "required": ["kind"]}}},
 ]
 
@@ -43,7 +50,7 @@ def search_vault(query):
     return "\n".join(hits) if hits else "(該当する記録なし)"
 
 
-def calendar_lookup(kind, query="", project_id=None, due=None, active=False):
+def calendar_lookup(kind, query="", project_id=None, due=None, active=False, status=None, assignee=None):
     q = (query or "").lower()
     if kind == "projects":
         d = _get("/projects?limit=200")["items"]
@@ -75,13 +82,24 @@ def calendar_lookup(kind, query="", project_id=None, due=None, active=False):
         if active:
             d = [t for t in d if (t.get("status") or "").lower().replace("_", "-")
                  not in ("completed", "approved", "cancelled")]
+        if status:                              # status 絞り込み(例 delayed) でトークン圧縮
+            sl = status.lower().replace("_", "-")
+            d = [t for t in d if (t.get("status") or "").lower().replace("_", "-") == sl]
         umap = {u.get("id"): (u.get("username") or u.get("name") or str(u.get("id")))
                 for u in _get("/users?limit=200").get("items", [])}
-        return json.dumps([{"id": t.get("id"), "name": t.get("name"), "status": t.get("status"),
-                            "assignee": umap.get(t.get("assigned_to"), "未割当"),
-                            "due_date": str(t.get("due_date") or "")[:10],
-                            "shotID": t.get("shotID"), "project_id": t.get("project_id")}
-                           for t in d[:60]], ensure_ascii=False)
+        if assignee:                            # 担当者で絞り込み(ユーザー名 部分一致→uid)
+            al = assignee.lower()
+            aids = {uid for uid, nm in umap.items() if al in str(nm).lower()}
+            d = [t for t in d if t.get("assigned_to") in aids]
+        total = len(d)
+        rows = [{"name": t.get("name"), "status": t.get("status"),
+                 "assignee": umap.get(t.get("assigned_to"), "未割当"),
+                 "due_date": str(t.get("due_date") or "")[:10],
+                 "shotID": t.get("shotID")} for t in d[:80]]
+        out = {"total": total, "shown": len(rows), "tasks": rows}
+        if total > len(rows):
+            out["note"] = f"全{total}件中{len(rows)}件表示(status/projectで絞ると全件取得可)"
+        return json.dumps(out, ensure_ascii=False)
     if kind == "users":
         d = _get("/users?limit=200")["items"]
         return json.dumps([{k: u.get(k) for k in ("id", "username", "role")} for u in d[:40]],
@@ -95,7 +113,8 @@ def execute(name, args):
             return search_vault(args.get("query", ""))
         if name == "calendar_lookup":
             return calendar_lookup(args.get("kind", "projects"), args.get("query", ""),
-                                   args.get("project_id"), args.get("due"), args.get("active", False))
+                                   args.get("project_id"), args.get("due"), args.get("active", False),
+                                   args.get("status"), args.get("assignee"))
     except Exception as e:
         return f"(tool error: {e})"
     return f"(unknown tool: {name})"

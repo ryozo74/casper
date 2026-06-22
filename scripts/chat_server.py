@@ -518,8 +518,10 @@ def build_sys():
 
 def ollama_chat(messages, tools=None):
     # think:false 必須 (qwen3.6 等の思考モデルが長考→遅延/タイムアウトするのを防ぐ)
+    # num_ctx は大きめ(tool結果が大きいとコンテキスト溢れで出力が1文字に途切れる事故あり)
     body = {"model": A.model, "messages": messages, "stream": False, "think": False,
-            "options": {"num_ctx": 8192}}
+            "options": {"num_ctx": 24576, "num_predict": 1536,
+                        "temperature": 0.15, "top_p": 0.9}}   # tool呼出を安定化(非決定性を抑制)
     if tools:
         body["tools"] = tools
     req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
