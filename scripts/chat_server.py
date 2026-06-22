@@ -25,6 +25,10 @@ try:
 except Exception:
     casper_mcp = None
 try:
+    import casper_embed
+except Exception:
+    casper_embed = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -1352,7 +1356,8 @@ class H(BaseHTTPRequestHandler):
                 hist = "\n\n## これまでの会話(直近):\n" + "\n".join(
                     ("殿: " if m["role"] == "user" else "Casper: ") + str(m["content"])[:600]
                     for m in convo[-7:-1])
-            hits = casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []
+            hits = (casper_embed.hybrid(last_user, k=8) if (casper_embed and last_user)
+                    else (casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []))
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
@@ -1426,6 +1431,10 @@ class H(BaseHTTPRequestHandler):
         sysadd += portfolio_digest(ll_user)             # 実績クエリは自社Vimeo実績を注入
         sysadd += cross_digest(ll_user)                 # 横断クエリは全PJ遅延サマリを注入
         try:
+            hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)
+                    else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
+            if hits:
+                sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
             src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
             if fulltext:
                 sysadd += ("\n\n## 該当資料(右脳vault・" + src + ") — サムネ等の画像URL `![](/asset/..)` は"
