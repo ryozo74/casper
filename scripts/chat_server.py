@@ -50,6 +50,24 @@ AURORA_RENDER = os.path.join(PROJECT_ROOT, "skills", "aurora", "scripts", "rende
 DIAG_DIR = os.path.join(HERE, "diagrams")
 ASSETS_DIR = os.path.join(HERE, "assets")
 FEEDBACK_LOG = os.path.join(HERE, "feedback_log.jsonl")
+
+DIAG_HINT = ("\n\n【見せ方は内容に応じて自分で判断せよ】答えを最も分かりやすく伝える形式を選ぶ:\n"
+    "・一覧/カット表/スケジュール/比較/項目×属性 など表が分かりやすいデータ → **markdown の表**で書く"
+    "(チャット内にそのまま見やすい表として描画される)。冒頭は要点1〜2行、続けて表。例:\n"
+    "| カット | 画像 | 秒数 | 内容 |\n|---|---|---|---|\n| 1 | ![](/asset/x.jpeg) | 0:00~ | … |\n"
+    "・**資料の全文に画像 `![](/asset/...)` が含まれていれば、表の画像列にそのURLを一字一句変えずコピーせよ**"
+    "(サムネイルが表示される)。URLを創作・改変するな。\n"
+    "・工程/流れ/手順/関係性/構成/タイムライン が主役 → ```mermaid フェンスで **mermaid 記法**で書く"
+    "(チャット内に図として描画される)。用途別に flowchart(`flowchart LR`)/sequenceDiagram/gantt/"
+    "mindmap/erDiagram を使い分けよ。例:\n```mermaid\nflowchart LR\n  A[実写] --> B[キー] --> C[合成]\n```\n"
+    "・数値の大小比較が主役 → 行頭に `AURORA:` を付け1行のJSON STATE(bars)。\n"
+    "・表/mermaid/数値で表せない独自のビジュアル(図形・レイアウト・簡単なインタラクション) → "
+    "```html フェンスで**自己完結HTML/SVG**(外部依存なし・1ファイル完結・<style>同梱)。"
+    "隔離サンドボックスで描画される。本当に必要な時だけ・多用するな。\n"
+    "・動画・実績映像を見せたい時 → 該当の **Vimeo URL(https://vimeo.com/ID)** をそのまま本文に書け"
+    "(チャットにプレイヤーが埋め込まれ再生できる)。YouTube/.mp4 URL も同様。\n"
+    "・短い事実確認・雑談・1〜2文で済む話 → 図解も表も不要。普通の文章で簡潔に。\n"
+    "迷ったら表が無難。無理に図解しようとしなくてよい。図解は1回答に1つまで。")
 CONVO_LOG = os.path.join(HERE, "conversation_log.jsonl")
 
 
@@ -224,6 +242,53 @@ def uploader_crosscheck(task_id, hint="", uid=None):
         pass
     questions = [f"決定『{d[:50]}』は反映済?" for d in decs[:4]] or ["仕様/指示どおりに作成しましたか?"]
     return {"task": task.get("name"), "spec": " / ".join(spec)[:600], "decisions": decs[:6], "questions": questions}
+
+
+def shot_assignee_digest(query):
+    """ショットの担当はshotテーブルに無く task.shotID 経由。クエリにPJ名+カット/担当語があれば
+    shot×task を shotID で突合し『カット×担当×工程』を先読み注入する。"""
+    if not casper_tools:
+        return ""
+    if not re.search(r"カット|cut|ショット|shot|担当|アサイン|誰", query or "", re.I):
+        return ""
+    _get = casper_tools._get
+    try:
+        projs = _get("/projects?limit=200").get("items", [])
+        ql = (query or "").lower()
+        pj = next((p for p in projs if (p.get("name") or "").lower() in ql
+                   or (p.get("name") or "").lower() in ql.replace(" ", "")), None)
+        # クエリにPJ名が含まれる方を緩く照合
+        if not pj:
+            pj = next((p for p in projs if p.get("name") and p["name"].lower() in ql), None)
+        if not pj:
+            return ""
+        pid = pj["id"]
+        umap = {u.get("id"): (u.get("username") or u.get("name") or str(u.get("id")))
+                for u in _get("/users?limit=200").get("items", [])}
+        tasks = []
+        for off in (0, 500, 1000):
+            page = _get(f"/tasks?limit=500&offset={off}").get("items", [])
+            tasks += page
+            if len(page) < 500:
+                break
+        # shotID -> [(task名, 担当, status)]
+        from collections import defaultdict
+        bysh = defaultdict(list)
+        for t in tasks:
+            if str(t.get("project_id")) != str(pid):
+                continue
+            sid = str(t.get("shotID") or "").strip()
+            if sid:
+                bysh[sid].append((t.get("name"), umap.get(t.get("assigned_to"), "未割当"), t.get("status")))
+        if not bysh:
+            return ""
+        lines = [f"{pj['name']} のカット×担当 (task.shotID 経由・shotに担当列は無い):"]
+        for sid in sorted(bysh):
+            for nm, who, st in bysh[sid]:
+                lines.append(f"  {sid}: {nm} 担当={who} [{st}]")
+        return "\n\n## カット別 担当 (左脳・task結合)\n" + "\n".join(lines[:60])
+    except Exception:
+        return ""
 
 
 def meeting_digest(query):
@@ -936,23 +1001,8 @@ class H(BaseHTTPRequestHandler):
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = calendar_digest(last_user)          # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
-            diag_hint = ("\n\n【見せ方は内容に応じて自分で判断せよ】答えを最も分かりやすく伝える形式を選ぶ:\n"
-                "・一覧/カット表/スケジュール/比較/項目×属性 など表が分かりやすいデータ → **markdown の表**で書く"
-                "(チャット内にそのまま見やすい表として描画される)。冒頭に要点を1〜2行、続けて表。例:\n"
-                "| カット | 画像 | 秒数 | 内容 |\n|---|---|---|---|\n| 1 | ![](/asset/x.jpeg) | 0:00~ | … |\n"
-                "・**資料の全文に画像 `![](/asset/...)` が含まれていれば、表の画像列にそのURLを一字一句変えずコピーせよ**"
-                "(サムネイルが表示される)。URLを創作・改変するな。\n"
-                "・工程/流れ/手順/関係性/構成/タイムライン が主役 → ```mermaid フェンスで **mermaid 記法**で書く"
-                "(チャット内に図として描画される)。用途別に flowchart(`flowchart LR`)/sequenceDiagram/gantt/"
-                "mindmap/erDiagram を使い分けよ。例:\n```mermaid\nflowchart LR\n  A[実写] --> B[キー] --> C[合成]\n```\n"
-                "・数値の大小比較が主役 → 行頭に `AURORA:` を付け1行のJSON STATE(bars)。\n"
-                "・表/mermaid/数値で表せない独自のビジュアル(図形・レイアウト・簡単なインタラクション) → "
-                "```html フェンスで**自己完結HTML/SVG**(外部依存なし・1ファイル完結・<style>同梱)。"
-                "隔離サンドボックスで描画される。本当に必要な時だけ・多用するな。\n"
-                "・動画・実績映像を見せたい時 → 該当の **Vimeo URL(https://vimeo.com/ID)** をそのまま本文に書け"
-                "(チャットにプレイヤーが埋め込まれ再生できる)。YouTube/.mp4 URL も同様。\n"
-                "・短い事実確認・雑談・1〜2文で済む話 → 図解も表も不要。普通の文章で簡潔に。\n"
-                "迷ったら表が無難。無理に図解しようとしなくてよい。図解は1回答に1つまで。")
+            cal += shot_assignee_digest(last_user)    # カット×担当(shot×task結合)も注入
+            diag_hint = DIAG_HINT
             prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
                       + fullnote
                       + "\n\n## ユーザーの今回の発言:\n" + last_user
@@ -1006,12 +1056,22 @@ class H(BaseHTTPRequestHandler):
                 pass
             return
 
-        # --- Ollama(local) backend ---
-        working = list(msgs)
+        # --- Ollama(local) backend (qwen3.6:27b 等・自律 tool-calling) ---
+        ll_user = next((m.get("content", "") for m in reversed(msgs)
+                        if m.get("role") == "user"), "")
+        # 出力指針(表/mermaid/Canvas/動画)を system に追記。tool は自分で呼べるので先読み注入は最小限。
+        working = []
+        for m in msgs:
+            if m.get("role") == "system":
+                working.append({"role": "system", "content": m["content"] + DIAG_HINT})
+            else:
+                working.append(m)
+        if not any(m.get("role") == "system" for m in working):
+            working = [{"role": "system", "content": build_sys() + fu + DIAG_HINT}] + working
         tools = casper_tools.TOOLS if casper_tools else None
         final = ""
         try:
-            for _ in range(5):                      # 最大5反復 (ツール多段)
+            for _ in range(6):                      # 最大6反復 (ツール多段)
                 resp = ollama_chat(working, tools=tools)
                 m = resp.get("message", {}) or {}
                 tcs = m.get("tool_calls")
@@ -1037,9 +1097,16 @@ class H(BaseHTTPRequestHandler):
 
         if not final:
             final = "(応答を得られませなんだ)"
+        final = re.sub(r"\n{3,}", "\n\n", final).strip()
+        final, diagram = render_diagram(final)
+        log_convo(who, "user", ll_user)
+        log_convo(who, "casper", final, {"diagram": bool(diagram)})
+        dev_log(who, ll_user, final, {"model": A.model, "backend": "ollama"})
         for i in range(0, len(final), 36):          # 疑似ストリーミング
             self._emit(final[i:i + 36])
         try:
+            if diagram:
+                self.wfile.write((json.dumps({"diagram": diagram}) + "\n").encode())
             self.wfile.write(b'{"done":true}\n')
         except Exception:
             pass
