@@ -72,7 +72,19 @@ CONVO_LOG = os.path.join(HERE, "conversation_log.jsonl")
 
 
 # Casper 独自の署名鍵(Score とは分離)。本人確認は Calendar /api/auth/token で行い、JWT は Casper 自前で署名。
+# 固定鍵: env > .casper_secret ファイル(再起動で不変=ログイン維持) > 無ければ生成して保存。
 JWT_SECRET = os.environ.get("CASPER_JWT_SECRET", "")
+if not JWT_SECRET:
+    _secf = os.path.join(HERE, ".casper_secret")
+    try:
+        if os.path.exists(_secf):
+            JWT_SECRET = open(_secf, encoding="utf-8").read().strip()
+        else:
+            import secrets as _sec
+            JWT_SECRET = "casper_" + _sec.token_hex(24)
+            open(_secf, "w", encoding="utf-8").write(JWT_SECRET)
+    except Exception:
+        JWT_SECRET = ""
 CAL_BASE = os.environ.get("CALENDAR_BASE_URL", "http://192.168.44.253:8001")
 _EMAIL_UID_CACHE = {}
 
@@ -114,18 +126,22 @@ def identify(handler):
     except Exception:
         pass
     uid = (handler.headers.get("X-Actor-User-Id", "") or "").strip()   # 組込み host が検証済の uid
+    email = ""
+    authed = bool(uid)
     if not uid:
         tok = ck["casper_token"].value if "casper_token" in ck else ""
-        email = _verify_score_token(tok)                               # Casper 独自鍵で検証
+        email = _verify_score_token(tok) or ""                          # Casper 独自鍵で検証
         if email:
-            uid = str(_email_to_uid(email) or "")
+            authed = True                                              # トークン有効=認証成功(uid解決可否に依らず)
+            uid = str(_email_to_uid(email) or "")                      # readonly は email マスクで引けぬ場合あり
     sid = ck["casper_sid"].value if "casper_sid" in ck else ""
     new_sid = ""
     if not sid:
         sid = uuid.uuid4().hex[:16]
         new_sid = sid
     ip = handler.client_address[0] if getattr(handler, "client_address", None) else ""
-    return {"uid": uid, "sid": sid, "ip": ip, "new_sid": new_sid}
+    # 本人キー: uid 優先・無ければ email(認証済) ・最後に sid
+    return {"uid": uid, "email": email, "authed": authed, "sid": sid, "ip": ip, "new_sid": new_sid}
 
 
 def calendar_digest(query):
@@ -375,8 +391,12 @@ THREADS_DIR = os.path.join(HERE, "threads")
 
 
 def _user_key(who):
-    """ユーザー識別キー: uid(本人ログイン) 優先・無ければ sid(端末)。"""
-    return ("u_" + str(who.get("uid"))) if who.get("uid") else ("s_" + str(who.get("sid") or "anon"))
+    """ユーザー識別キー: uid > email(認証済) > sid(端末)。"""
+    if who.get("uid"):
+        return "u_" + str(who.get("uid"))
+    if who.get("email"):
+        return "e_" + re.sub(r"[^A-Za-z0-9]", "_", str(who.get("email")))
+    return "s_" + str(who.get("sid") or "anon")
 
 
 def _thread_dir(who):
@@ -430,11 +450,31 @@ def thread_delete(who, tid):
     return {"ok": True}
 
 
+def user_profile_digest(who):
+    """ログイン中ユーザーの蓄積プロファイル(profile_<ukey>.md)を先読み注入。
+    会話学習で深まったユーザー理解を毎回の応対に反映する。"""
+    try:
+        if not who.get("authed"):
+            return ""
+        p = os.path.join(VAULT, "20_people", f"profile_{_user_key(who)}.md")
+        if not os.path.exists(p):
+            return ""
+        t = open(p, encoding="utf-8").read()
+        if "## Casper の理解" in t:
+            u = t.split("## Casper の理解", 1)[1].strip()[:1200]
+            return "\n\n## 話し相手(ログイン中ユーザー)についての理解\n" + u + \
+                   "\nこの理解を踏まえ、相手に合わせて応対せよ(押し付けず・自然に)。"
+    except Exception:
+        pass
+    return ""
+
+
 def log_convo(who, role, content, extra=None):
     """会話を発信元ごとの順序付きスレッドとして記録(文脈=流れ を資産化)。"""
     try:
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-               "uid": who.get("uid", ""), "sid": who.get("sid", ""), "ip": who.get("ip", ""),
+               "uid": who.get("uid", ""), "email": who.get("email", ""), "ukey": _user_key(who),
+               "sid": who.get("sid", ""), "ip": who.get("ip", ""),
                "role": role, "content": str(content)[:2000]}
         if extra:
             rec.update(extra)
@@ -890,7 +930,7 @@ class H(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             # 認証要(独自鍵設定時): 未ログインなら login 画面へ
             who = identify(self)
-            page = "chat.html" if (who.get("uid") or not JWT_SECRET) else "login.html"
+            page = "chat.html" if (who.get("authed") or not JWT_SECRET) else "login.html"
         elif self.path in ("/login", "/login.html"):
             page = "login.html"
         elif self.path in ("/qa", "/qa.html"):
@@ -918,14 +958,15 @@ class H(BaseHTTPRequestHandler):
             return
         elif self.path == "/api/whoami":
             who = identify(self)
-            name = ""
+            name = who.get("email", "")
             if who.get("uid") and casper_tools:
                 try:
                     name = next((u.get("username") or u.get("name") for u in casper_tools._get("/users?limit=200").get("items", [])
-                                 if str(u.get("id")) == str(who["uid"])), "")
+                                 if str(u.get("id")) == str(who["uid"])), "") or name
                 except Exception:
                     pass
-            self._json({"uid": who.get("uid", ""), "name": name})
+            self._json({"uid": who.get("uid", ""), "email": who.get("email", ""),
+                        "authed": who.get("authed", False), "name": name})
             return
         elif self.path.startswith("/api/devlog"):
             try:
@@ -1039,8 +1080,8 @@ class H(BaseHTTPRequestHandler):
                     with urllib.request.urlopen(vr, timeout=8) as r:
                         ok = (r.status == 200)
                 except urllib.error.HTTPError as he:
-                    if he.code in (400, 401, 403):    # 認証失敗(パスワード違い等)
-                        self._json({"ok": False, "error": "メールまたはパスワードが違います"}); return
+                    if he.code in (400, 401, 403):    # 認証失敗(email不一致 or パスワード違い)
+                        self._json({"ok": False, "error": "ログインできません。Score と同じ『メールアドレス』と『パスワード』で入力してください（ユーザー名でなく Calendar 登録のメール）"}); return
                     self._json({"ok": False, "error": f"Calendar 認証エラー(HTTP {he.code})"}); return
                 except Exception:
                     self._json({"ok": False, "error": "Calendar 認証サーバに接続できませぬ"}); return
@@ -1195,7 +1236,8 @@ class H(BaseHTTPRequestHandler):
             hits = casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
-            cal = calendar_digest(last_user)          # Calendar 左脳を必要時に先読み注入
+            cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
+            cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += shot_assignee_digest(last_user)    # カット×担当(shot×task結合)も注入
             diag_hint = DIAG_HINT
@@ -1257,7 +1299,7 @@ class H(BaseHTTPRequestHandler):
                         if m.get("role") == "user"), "")
         # 出力指針(表/mermaid/Canvas/動画)を system に追記。
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
-        sysadd = DIAG_HINT
+        sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
         try:
             src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
             if fulltext:
