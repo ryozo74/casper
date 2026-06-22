@@ -506,7 +506,14 @@ def build_sys():
             ctx = open(ctx_path, encoding="utf-8").read()
         except Exception:
             ctx = ""
-    return (ctx + "\n\n---\n" + BASE_SYS) if ctx else BASE_SYS
+    today = datetime.date.today()
+    wd = "月火水木金土日"[today.weekday()]
+    datehdr = (f"【今日の日付】{today.isoformat()}（{wd}曜）。日数・遅延・締切は必ずこの日付を基準に計算せよ"
+               "(自分の記憶の日付を使うな)。\n")
+    tail = ("\n【回答の作法】記号や番号(A/B/C等)1文字だけで答えるな。必ず日本語の文で具体的に答えよ。"
+            "数値(遅延日数等)はデータから計算して明示せよ。")
+    base = datehdr + BASE_SYS + tail
+    return (ctx + "\n\n---\n" + base) if ctx else base
 
 
 def ollama_chat(messages, tools=None):
