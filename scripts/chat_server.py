@@ -817,27 +817,42 @@ def find_gaps(max_gaps=60):
 
 
 QUESTION_BANK = os.path.join(HERE, "question_bank.jsonl")
+PROJECT_BANK = os.path.join(HERE, "project_question_bank.jsonl")
 
 
 def _load_bank():
+    """穴ドリブン(人物/資料)＋PJ種別 の両バンクを統合して返す。"""
     out = []
-    try:
-        with open(QUESTION_BANK, encoding="utf-8") as f:
-            for ln in f:
-                ln = ln.strip()
-                if ln:
-                    out.append(json.loads(ln))
-    except Exception:
-        pass
+    for path in (QUESTION_BANK, PROJECT_BANK):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if ln:
+                        out.append(json.loads(ln))
+        except Exception:
+            pass
     return out
 
 
 def gen_question(asked):
     import re
-    # ① 事前生成バンク(Opus)から未出題を即提示
+    # ① 事前生成バンク(Opus)から未出題を即提示。
+    #    人物バンクとPJ種別バンクを交互(インターリーブ)に出して両方を早く回す。
     recent_all = " ".join(asked)
-    for q in _load_bank():
-        if q.get("question") and q["question"] not in recent_all and q.get("target", "") not in (" ".join(asked[-6:])):
+    bank = _load_bank()
+    persons = [q for q in bank if q.get("type") != "project"]
+    projects = [q for q in bank if q.get("type") == "project"]
+    inter = []
+    for i in range(max(len(persons), len(projects))):
+        if i < len(persons):
+            inter.append(persons[i])
+        if i < len(projects):
+            inter.append(projects[i])
+    recent6 = " ".join(asked[-6:])
+    for q in inter:
+        tgt = q.get("target", "")
+        if q.get("question") and q["question"] not in recent_all and not (tgt and tgt in recent6):
             ch = [c for c in q.get("choices", []) if c]
             if "その他" not in ch:
                 ch.append("その他")
