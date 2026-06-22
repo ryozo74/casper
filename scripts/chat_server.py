@@ -248,6 +248,27 @@ def meeting_digest(query):
         return ""
 
 
+DEV_LOG = os.path.join(HERE, "dev_log.jsonl")
+
+
+def dev_log(who, user_msg, answer, meta=None):
+    """開発用: 1ターンの『発言・回答・思考(thinking)・注入材料』を残す(デバッグ/改善用)。"""
+    try:
+        rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+               "uid": who.get("uid", ""), "sid": who.get("sid", ""),
+               "user": str(user_msg)[:1000], "answer": str(answer)[:2000]}
+        if meta:
+            m = dict(meta)
+            if isinstance(m.get("hits"), list):
+                m["hits"] = [str(h)[:200] for h in m["hits"][:8]]
+            m["thinking"] = str(m.get("thinking", ""))[:4000]
+            rec.update(m)
+        with open(DEV_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def log_convo(who, role, content, extra=None):
     """会話を発信元ごとの順序付きスレッドとして記録(文脈=流れ を資産化)。"""
     try:
@@ -719,6 +740,19 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e), "nodes": [], "links": []})
             return
+        elif self.path.startswith("/api/devlog"):
+            try:
+                import urllib.parse
+                qs = urllib.parse.urlparse(self.path).query
+                n = int(dict(urllib.parse.parse_qsl(qs)).get("n", "20"))
+                lines = []
+                if os.path.exists(DEV_LOG):
+                    lines = open(DEV_LOG, encoding="utf-8").read().splitlines()
+                recs = [json.loads(x) for x in lines[-n:] if x.strip()]
+                self._json({"count": len(recs), "entries": list(reversed(recs))})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
         elif self.path.startswith("/diagram/"):
             sid = re.sub(r"[^a-f0-9]", "", self.path.split("/diagram/")[-1])[:32]
             dp = os.path.join(DIAG_DIR, sid + ".html")
@@ -934,11 +968,20 @@ class H(BaseHTTPRequestHandler):
                       "(例: データに無い映画/ゲーム/CM名を勝手に足さない)。"
                       "データに該当が無ければ『記録にあるのは〜』と在る分だけ挙げ、無い旨を正直に言え。"
                       "Casper として簡潔に答えよ。")
-            ans = strip_think(claude_cli_text(prompt, allow=["WebSearch", "WebFetch"]))
+            raw = claude_cli_text(prompt, allow=["WebSearch", "WebFetch"])
+            thinking = ""
+            tm = re.search(r"<think>(.*?)</think>", raw or "", re.S)
+            if tm:
+                thinking = tm.group(1).strip()
+            ans = strip_think(raw)
             ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
             ans, diagram = render_diagram(ans)
             log_convo(who, "user", last_user)                     # 文脈=流れ を順序記録
             log_convo(who, "casper", ans, {"diagram": bool(diagram)})
+            dev_log(who, last_user, ans, {                        # 開発用: 思考と材料を残す
+                "thinking": thinking,
+                "hits": hits, "top_source": src, "calendar": bool(cal),
+                "prompt_chars": len(prompt), "model": CLI_MODEL})
             for i in range(0, len(ans), 36):
                 self._emit(ans[i:i + 36])
             try:
