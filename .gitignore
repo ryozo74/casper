@@ -17,3 +17,5 @@ __pycache__/
 .venv/
 *.log
 scripts/threads/
+scripts/.casper_secret
+scripts/casper_embed_index.json

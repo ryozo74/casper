@@ -42,24 +42,37 @@ def embed_one(text):
         return None
 
 
-def build():
-    """casper_rag の全chunkをベクトル化して保存。"""
+def embed_batch(texts):
+    """複数テキストをバッチ埋め込み(/api/embed)。[[float],...] or None。"""
+    try:
+        req = urllib.request.Request(
+            OLLAMA + "/api/embed",
+            data=json.dumps({"model": MODEL, "input": [t[:2000] for t in texts]}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            d = json.load(r)
+        return d.get("embeddings")
+    except Exception:
+        return None
+
+
+def build(batch=32):
+    """casper_rag の全chunkをバッチでベクトル化して保存。"""
     if casper_rag._CACHE is None:
         casper_rag._CACHE = json.load(open(casper_rag.INDEX, encoding="utf-8")) \
             if os.path.exists(casper_rag.INDEX) else []
     chunks = casper_rag._CACHE
-    out, fail = [], 0
-    for i, e in enumerate(chunks):
-        v = embed_one(e["t"])
-        if v is None:
-            fail += 1
-            if fail <= 1:
-                print("  埋め込み失敗(モデル未導入?)。中断。", file=sys.stderr)
-                return 0
-            continue
-        out.append({"src": e["src"], "title": e.get("title", ""), "t": e["t"], "v": v})
-        if (i + 1) % 200 == 0:
-            print(f"  {i+1}/{len(chunks)} ...", flush=True)
+    out = []
+    for i in range(0, len(chunks), batch):
+        grp = chunks[i:i + batch]
+        vecs = embed_batch([e["t"] for e in grp])
+        if not vecs:
+            print("  バッチ埋め込み失敗(モデル未導入?)。中断。", file=sys.stderr)
+            return 0
+        for e, v in zip(grp, vecs):
+            out.append({"src": e["src"], "title": e.get("title", ""), "t": e["t"], "v": v})
+        if (i + batch) % 320 == 0 or i + batch >= len(chunks):
+            print(f"  {min(i+batch,len(chunks))}/{len(chunks)} ...", flush=True)
     json.dump(out, open(EMB_INDEX, "w", encoding="utf-8"), ensure_ascii=False)
     return len(out)
 
