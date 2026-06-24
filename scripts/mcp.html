@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casper — My Tools (個人MCP)</title>
+<link rel="icon" type="image/jpeg" href="/icon">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#fff;color:#000;font-family:"Helvetica Neue","Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif;
+    line-height:1.7}
+  .wrap{max-width:760px;margin:0 auto;padding:40px 24px 80px}
+  a.back{font-size:11px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#000;text-decoration:none;
+    border:1px solid #000;padding:7px 13px;transition:all .2s}
+  a.back:hover{background:#000;color:#fff}
+  h1{font-size:26px;font-weight:900;letter-spacing:2px;margin:26px 0 4px}
+  .lead{font-size:13px;color:#555;margin-bottom:6px}
+  .warn{font-size:12px;color:#a00;background:#fff5f5;border-left:3px solid #a00;padding:10px 14px;margin:14px 0 28px}
+  h2{font-size:12px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#555;
+    border-bottom:2px solid #000;padding-bottom:8px;margin:34px 0 16px}
+  label{display:block;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#666;margin:14px 0 5px}
+  input,select{width:100%;padding:10px 12px;border:1px solid #bbb;font-size:14px;font-family:inherit;background:#fff}
+  input:focus,select:focus{outline:none;border-color:#000}
+  .btn{display:inline-block;margin-top:18px;background:#000;color:#fff;border:1px solid #000;padding:11px 22px;
+    font-size:13px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;cursor:pointer;transition:all .2s}
+  .btn:hover{background:#fff;color:#000}
+  .row{border:1px solid #ddd;padding:14px 16px;margin-bottom:12px;display:flex;align-items:center;gap:14px}
+  .row .info{flex:1;min-width:0}
+  .row .nm{font-weight:800;font-size:15px}
+  .row .u{font-size:12px;color:#777;word-break:break-all}
+  .row .tag{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#999}
+  .row .st{font-size:10px;font-weight:700;letter-spacing:1px;padding:3px 8px;border:1px solid;border-radius:999px}
+  .st.on{color:#0a0;border-color:#0a0}.st.off{color:#999;border-color:#ccc}
+  .row button{background:#fff;border:1px solid #000;padding:6px 12px;font-size:11px;cursor:pointer;font-family:inherit}
+  .row button:hover{background:#000;color:#fff}
+  .empty{color:#999;font-size:13px;padding:20px 0}
+  #msg{font-size:13px;margin-top:12px;min-height:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a href="/" class="back">← Casper へ戻る</a>
+  <h1>MY TOOLS</h1>
+  <div class="lead">あなた個人の外部ツール(MCPサーバ)を登録すると、Casper があなたの権限で操作できます。<br>
+    例: 個人の Notion / Google Drive / Slack などの MCP サーバ。</div>
+  <div class="warn">⚠ ここに登録するトークンは<strong>あなた本人専用</strong>です。他者からは見えません(本人ログイン時のみ使用)。
+    外部サービスを叩くと社内データが社外に送られる場合があります。業務ルールに沿って登録してください。</div>
+
+  <h2>登録済みツール</h2>
+  <div id="list"><div class="empty">読み込み中…</div></div>
+
+  <h2>新しいツールを追加</h2>
+  <label>名前 (任意の識別名)</label>
+  <input id="f-name" placeholder="例: My Notion">
+  <label>MCP サーバ URL</label>
+  <input id="f-url" placeholder="例: https://mcp.example.com/mcp/">
+  <label>アクセストークン (任意・Bearer)</label>
+  <input id="f-token" type="password" placeholder="本人のトークン (空でも可)">
+  <label>トランスポート</label>
+  <select id="f-transport"><option value="http">Streamable HTTP (既定)</option></select>
+  <div class="btn" onclick="addSrv()">＋ 追加する</div>
+  <div id="msg"></div>
+</div>
+<script>
+const TONE={people:'#000'};
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function load(){
+  fetch('/api/mcp/servers').then(r=>r.json()).then(d=>{
+    const L=document.getElementById('list');
+    if(d.error){L.innerHTML='<div class="empty">'+esc(d.error)+'（ログインしてください）</div>';return;}
+    const ss=d.servers||[];
+    if(!ss.length){L.innerHTML='<div class="empty">まだ登録がありません。下から追加してください。</div>';return;}
+    L.innerHTML=ss.map(s=>`
+      <div class="row">
+        <div class="info">
+          <div class="nm">${esc(s.name)} <span class="st ${s.enabled?'on':'off'}">${s.enabled?'有効':'無効'}</span></div>
+          <div class="u">${esc(s.url)}</div>
+          <div class="tag">${esc(s.transport)} · token ${s.has_token?'あり':'なし'}</div>
+        </div>
+        <button onclick="toggle('${esc(s.name)}',${!s.enabled})">${s.enabled?'無効化':'有効化'}</button>
+        <button onclick="remove('${esc(s.name)}')">削除</button>
+      </div>`).join('');
+  });
+}
+function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());}
+function addSrv(){
+  const name=document.getElementById('f-name').value.trim();
+  const url=document.getElementById('f-url').value.trim();
+  const token=document.getElementById('f-token').value;
+  const transport=document.getElementById('f-transport').value;
+  const msg=document.getElementById('msg');
+  if(!name||!url){msg.style.color='#a00';msg.textContent='名前とURLは必須です。';return;}
+  msg.style.color='#666';msg.textContent='追加中…';
+  post('/api/mcp/add',{name,url,token,transport}).then(d=>{
+    if(d.error){msg.style.color='#a00';msg.textContent=d.error;return;}
+    msg.style.color='#0a0';msg.textContent='追加しました。';
+    document.getElementById('f-name').value='';document.getElementById('f-url').value='';document.getElementById('f-token').value='';
+    load();
+  });
+}
+function toggle(name,on){post('/api/mcp/toggle',{name,enabled:on}).then(load);}
+function remove(name){if(!confirm(name+' を削除しますか？'))return;post('/api/mcp/remove',{name}).then(load);}
+load();
+</script>
+</body>
+</html>

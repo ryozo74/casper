@@ -19,7 +19,7 @@
   .title .sub{font-size:12px;color:var(--mut)}
   .legend{position:fixed;bottom:14px;left:16px;z-index:5;background:rgba(18,24,38,.7);backdrop-filter:blur(6px);
     border:1px solid var(--line);border-radius:12px;padding:10px 13px;font-size:12px}
-  .legend div{display:flex;align-items:center;gap:7px;margin:3px 0}
+  .legend div{display:flex;align-items:center;gap:7px;margin:3px 0;cursor:pointer;user-select:none}
   .legend i{width:11px;height:11px;border-radius:50%;display:inline-block}
   .ctrl{position:fixed;bottom:14px;right:16px;z-index:5;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
   .ctrl button{background:rgba(18,24,38,.7);backdrop-filter:blur(6px);border:1px solid var(--line);color:var(--mut);
@@ -30,31 +30,46 @@
 </head>
 <body>
   <a href="/" class="back">← 戻る</a>
-  <div class="title"><h1>🔮 Casperをのぞく <span style="color:var(--accent)">3D</span></h1><div class="sub" id="stat">読み込み中…</div></div>
+  <div class="title"><h1>🔮 Casperをのぞく <span style="color:var(--accent)">組織構造</span></h1><div class="sub" id="stat">読み込み中…</div></div>
   <canvas id="cv"></canvas>
   <div class="legend" id="legend"></div>
   <div class="ctrl"><button id="spin">⏸ 自動回転を止める</button><div class="hint">ドラッグで回転 / ホイールで拡大</div></div>
 <script>
-const COL={people:'#34d399',project:'#38bdf8',legacy:'#f59e0b',comms:'#ec4899',
-  company:'#a855f7',asset:'#22d3ee',learned:'#fbbf24',other:'#64748b'};
-const LBL={people:'人物',project:'PJ',legacy:'旧スコア',comms:'対話',company:'会社',asset:'資料',learned:'学習',other:'他'};
+const COL={root:'#f87171',division:'#a855f7',area:'#38bdf8',people:'#34d399',external:'#f59e0b',
+  project:'#38bdf8',legacy:'#f59e0b',comms:'#ec4899',company:'#a855f7',asset:'#22d3ee',learned:'#fbbf24',other:'#64748b'};
+const LBL={root:'studio bokan',division:'部門',area:'領域',people:'社員',external:'社外',
+  project:'PJ',legacy:'旧スコア',comms:'対話',company:'会社',asset:'資料',learned:'学習',other:'他'};
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),stat=document.getElementById('stat');
 const DPR=Math.min(devicePixelRatio||1,2);
 let W,H,nodes=[],links=[],yaw=0.6,pitch=0.35,zoom=1,FOCAL=1100,auto=true,
     drag=false,lx=0,ly=0,hover=null,mx=0,my=0,alpha=1;
+const hidden=new Set();   // 凡例でOFFにした group(非表示)
 function resize(){W=cv.width=innerWidth*DPR;H=cv.height=innerHeight*DPR;cv.style.width=innerWidth+'px';cv.style.height=innerHeight+'px';}
 addEventListener('resize',resize);resize();
 
-fetch('/api/graph').then(r=>r.json()).then(d=>{
+fetch('/api/org',{cache:'no-store'}).then(r=>{
+  if(!r.ok) throw new Error('HTTP '+r.status+' (/api/org)');
+  return r.json();
+}).then(d=>{
+  if(d&&d.error) throw new Error(d.error);
   const by={};
   nodes=(d.nodes||[]).map(n=>{const o={...n,
     x:(Math.random()-.5)*500,y:(Math.random()-.5)*500,z:(Math.random()-.5)*500,vx:0,vy:0,vz:0,deg:0};by[n.id]=o;return o;});
   links=(d.links||[]).map(l=>({s:by[l.source],t:by[l.target]})).filter(l=>l.s&&l.t);
   links.forEach(l=>{l.s.deg++;l.t.deg++;});
+  if(!nodes.length){stat.textContent='データが空です (/api/org が 0 ノード)';return;}
   stat.textContent=nodes.length+' ノード / '+links.length+' リンク (3D)';
   const lg=document.getElementById('legend');const used=[...new Set(nodes.map(n=>n.group))];
-  lg.innerHTML=used.map(g=>`<div><i style="background:${COL[g]||COL.other}"></i>${LBL[g]||g}</div>`).join('');
+  lg.innerHTML=used.map(g=>`<div class="lgitem" data-g="${g}" title="クリックで表示/非表示"><i style="background:${COL[g]||COL.other}"></i>${LBL[g]||g}</div>`).join('');
+  lg.querySelectorAll('.lgitem').forEach(el=>el.onclick=()=>{
+    const g=el.dataset.g;
+    if(hidden.has(g)){hidden.delete(g);el.style.opacity='1';el.style.textDecoration='none';}
+    else{hidden.add(g);el.style.opacity='.3';el.style.textDecoration='line-through';}
+  });
   loop();
+}).catch(e=>{
+  stat.textContent='読み込み失敗: '+(e&&e.message||e);
+  stat.style.color='#f87171';
 });
 
 function sim(){
@@ -79,10 +94,10 @@ function proj(n){
 }
 function draw(){
   ctx.clearRect(0,0,W,H);
-  const P=nodes.map(n=>({n,p:proj(n)}));
+  const P=nodes.filter(n=>!hidden.has(n.group)).map(n=>({n,p:proj(n)}));
   // edges
   ctx.lineWidth=.7*DPR;
-  links.forEach(l=>{const a=proj(l.s),b=proj(l.t);const hot=hover&&(l.s===hover||l.t===hover);
+  links.forEach(l=>{if(hidden.has(l.s.group)||hidden.has(l.t.group))return;const a=proj(l.s),b=proj(l.t);const hot=hover&&(l.s===hover||l.t===hover);
     ctx.strokeStyle=hot?'rgba(56,189,248,.6)':'rgba(148,163,184,.10)';
     ctx.beginPath();ctx.moveTo(a.sx,a.sy);ctx.lineTo(b.sx,b.sy);ctx.stroke();});
   // nodes far->near
@@ -103,7 +118,7 @@ function loop(){
   draw();requestAnimationFrame(loop);
 }
 function pick(px,py){let best=null,bd=20*DPR;
-  for(const n of nodes){const p=proj(n);const d=Math.hypot(p.sx-px,p.sy-py);if(d<bd){bd=d;best=n;}}
+  for(const n of nodes){if(hidden.has(n.group))continue;const p=proj(n);const d=Math.hypot(p.sx-px,p.sy-py);if(d<bd){bd=d;best=n;}}
   return best;}
 cv.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY;cv.style.cursor='grabbing';});
 addEventListener('mousemove',e=>{mx=e.clientX*DPR;my=e.clientY*DPR;

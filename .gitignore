@@ -18,4 +18,12 @@ __pycache__/
 *.log
 scripts/threads/
 scripts/.casper_secret
+scripts/.casper_write_token
 scripts/casper_embed_index.json
+scripts/.casper_user_mcp.json
+scripts/.casper_user_mcp.json.tmp
+
+# === Casper 秘密/設定ファイル(全 .casper_ 系を遮断) ===
+scripts/.casper_*
+*vimeo_token*
+*.casper_aurora

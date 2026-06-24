@@ -146,9 +146,7 @@
   <div id="threadlist"></div>
 </div>
 <div id="sbmask"></div>
-<div id="log"><div class="wrap" id="wrap">
-  <div class="msg bot"><div class="av"><img src="/icon" alt="C" style="width:100%;height:100%;object-fit:cover;border-radius:8px"></div><div class="bubble">Casper です。社内の予定・人・過去の記録を踏まえてお答えします。何でも聞いてください。</div></div>
-</div></div>
+<div id="log"><div class="wrap" id="wrap"></div></div>
 <footer>
   <div id="attach"></div>
   <div class="ic">
@@ -179,10 +177,24 @@ function el(role){
   const b=document.createElement('div'); b.className='bubble'; m.appendChild(b);
   wrap.appendChild(m); log.scrollTop=log.scrollHeight; return b;
 }
+function attachEdit(msgDiv, idx, text){
+  // 誤発言の地点まで巻き戻して編集(ロールバック)。idx=この発言の履歴位置。
+  const e=document.createElement('span'); e.textContent='✏️ 編集';
+  e.title='ここまで巻き戻して編集し直す';
+  e.style.cssText='cursor:pointer;font-size:11px;color:var(--mut);margin-left:8px;opacity:.5;user-select:none';
+  e.onmouseover=()=>e.style.opacity='1'; e.onmouseout=()=>e.style.opacity='.5';
+  e.onclick=()=>{
+    history.length=idx;                              // この発言以降を切り捨て
+    let node=msgDiv; while(node){ const nx=node.nextElementSibling; node.remove(); node=nx; }
+    inp.value=text; inp.style.height='auto'; enableInput(); inp.focus();
+  };
+  msgDiv.appendChild(e);
+}
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function inlineMd(s){
   s=esc(s);
   s=s.replace(/!\[[^\]]*\]\((\/asset\/[A-Za-z0-9_.\-]+)\)/g,'<img class="thumb" src="$1" loading="lazy" onclick="this.classList.toggle(\'big\')">');
+  s=s.replace(/\[([^\]]+)\]\(casper-dm:(\d+):(\d*)\)/g,'<a href="#" class="dmlink" data-dm="$2" data-pid="$3" onclick="openDMById(this);return false">$1</a>');
   s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank">$1</a>');
   s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
   s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
@@ -191,7 +203,12 @@ function inlineMd(s){
 function mediaEmbed(ln){
   // Vimeo / YouTube / 直リンク動画 を埋め込みプレイヤーに
   let m=ln.match(/(?:player\.vimeo\.com\/video\/|vimeo\.com\/)(\d+)/);
-  if(m) return '<div class="vid"><iframe src="https://player.vimeo.com/video/'+m[1]+'" allow="fullscreen;picture-in-picture" allowfullscreen></iframe></div>';
+  if(m){
+    const id=m[1];
+    const hm=ln.match(/[?&]h=([A-Za-z0-9]+)/)||ln.match(new RegExp(id+'\\/([A-Za-z0-9]+)'));  // 限定動画のhash
+    const hq=hm?('?h='+hm[1]):'';
+    return '<div class="vid"><iframe src="https://player.vimeo.com/video/'+id+hq+'" allow="fullscreen;picture-in-picture" allowfullscreen></iframe></div>';
+  }
   m=ln.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
   if(m) return '<div class="vid"><iframe src="https://www.youtube.com/embed/'+m[1]+'" allowfullscreen></iframe></div>';
   m=ln.match(/(https?:\/\/[^\s)]+\.(?:mp4|webm|mov))/i);
@@ -304,9 +321,12 @@ async function renderMermaid(b){
 async function ask(){
   const text=inp.value.trim(); if(!text) return;
   inp.value=''; inp.style.height='auto'; send.disabled=true;
-  el('user').textContent=text; history.push({role:'user',content:text});
+  let umsg=text;                                  // DMモード時は指示を付与(表示は元テキスト)
+  if(curDM&&curDM.mode==='reply'){ umsg='【'+(curDM.peer||'相手')+'（uid '+(curDM.peer_id||'?')+'）へのDM返信】次の本文を send_message で本人名義送信して: '+text; }
+  else if(curDM&&curDM.mode==='question'){ umsg='【DM「'+(curDM.peer||'')+'」について】'+text; }
+  const _ub=el('user'); _ub.textContent=text; attachEdit(_ub.parentElement, history.length, text); history.push({role:'user',content:umsg});
   const b=el('bot'); b.classList.add('cursor'); b.textContent='';
-  let acc='',diagramUrl=null; const t0=performance.now();
+  let acc='',diagramUrl=null,pendingConfirms=[]; const t0=performance.now();
   try{
     const r=await fetch('/api/chat',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:history})});
@@ -321,6 +341,7 @@ async function ask(){
         if(j.error){ acc+='\n[error] '+j.error; }
         else if(j.message&&j.message.content){ acc+=j.message.content; }
         else if(j.diagram){ diagramUrl=j.diagram; }
+        else if(j.confirm){ pendingConfirms.push(j.confirm); }
         render(b,acc); log.scrollTop=log.scrollHeight;
       }
     }
@@ -331,12 +352,43 @@ async function ask(){
   renderMermaid(b); renderCanvas(b); addFeedback(b, text, acc); log.scrollTop=log.scrollHeight;
   if(diagramUrl){const da=document.createElement('a');da.href=diagramUrl;da.target='_blank';
     da.className='diagbtn';da.textContent='📊 図解を表示';b.appendChild(da);}
+  pendingConfirms.forEach(pa=>renderConfirm(b,pa));   // Stage2: 承認待ち操作のカード
   history.push({role:'assistant',content:acc});
   send.disabled=false; inp.focus();
   saveThread();
 }
+// ===== Stage2: 承認待ち副作用操作のカード =====
+function renderConfirm(b, pa){
+  const c=document.createElement('div');
+  c.style.cssText='margin:10px 0;padding:12px 14px;border:1px solid #f59e0b;border-radius:12px;background:rgba(245,158,11,.08)';
+  const isDM=(pa.tool==='send_message');
+  const h=document.createElement('div'); h.textContent=isDM?'📨 DM送信の承認 — 宛先を必ず確認':'🔐 承認が必要な操作'; h.style.cssText='font-weight:700;margin-bottom:6px;color:#f59e0b';
+  let rc=null;
+  if(isDM){
+    const mto=(pa.summary||'').match(/宛先[:：]\s*([^（(]+)/);
+    rc=document.createElement('div');
+    rc.innerHTML='📨 宛先: <b style="font-size:18px;color:#fca5a5">'+esc(mto?mto[1].trim():'(不明)')+'</b> さん ← この方で間違いないですか？';
+    rc.style.cssText='font-size:14px;margin-bottom:8px;padding:8px 10px;border:1px solid #ef4444;border-radius:8px;background:rgba(239,68,68,.12)';
+  }
+  const s=document.createElement('div'); s.textContent=pa.summary||pa.tool; s.style.cssText='font-size:14px;margin-bottom:10px;white-space:pre-wrap';
+  const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px';
+  const ok=document.createElement('button'); ok.textContent='✅ 承認して実行';
+  const ng=document.createElement('button'); ng.textContent='却下';
+  [ok,ng].forEach(x=>x.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit');
+  ok.style.borderColor='#22c55e';
+  const rEl=document.createElement('div'); rEl.style.cssText='margin-top:8px;font-size:13px;color:#94a3b8';
+  ok.onclick=async()=>{ ok.disabled=ng.disabled=true; rEl.textContent='実行中…';
+    const res=await jpost('/api/confirm',{id:pa.id,approve:true});
+    rEl.textContent=(res.ok&&res.executed)?('✅ 実行しました: '+(res.result||'')):('⚠️ '+(res.error||res.message||'失敗')); };
+  ng.onclick=async()=>{ ok.disabled=ng.disabled=true; await jpost('/api/confirm',{id:pa.id,approve:false}); rEl.textContent='却下しました'; };
+  bs.appendChild(ok); bs.appendChild(ng);
+  c.appendChild(h); if(rc) c.appendChild(rc); c.appendChild(s); c.appendChild(bs); c.appendChild(rEl);
+  b.appendChild(c);
+}
 // ===== ユーザー & スレッド管理 =====
 let curThread=localStorage.getItem('casper_thread')||('t'+Date.now());
+let curDM=null;   // 開いているDMの宛先文脈(代筆用)
+function enableInput(){ inp.disabled=false; send.disabled=false; inp.placeholder='メッセージを入力（Enterで送信・Shift+Enterで改行）'; }
 async function jpost(p,b){ const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(b||{})}); return r.json(); }
 async function saveThread(){
   if(!history.length) return;
@@ -373,25 +425,48 @@ async function refreshThreads(){
       el.appendChild(d); });
   }catch(e){}
 }
+function openDMById(el){   // ブリーフィングのDMリンク→そのDMをCasperに開く
+  openDM({id:el.dataset.dm, peer:((el.textContent||'').split('：')[0]||'DM').trim(), peer_id:el.dataset.pid||null});
+}
 async function openDM(t){
   closeSidebar();
+  wrap.innerHTML=''; history.length=0;        // 追記でなく新規表示(画面をクリアしてDMを表示)
+  curThread='t'+Date.now(); localStorage.setItem('casper_thread',curThread);  // 返信/質問で新スレッドとして保存
+  curDM={peer:t.peer||'',peer_id:t.peer_id||'',thread:t.id};                   // 代筆の宛先文脈
   const b=el('bot'); b.classList.add('cursor');
   let r={messages:[]}; try{ r=await fetch('/api/dm/messages?id='+encodeURIComponent(t.id),{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
   b.classList.remove('cursor');
-  const lines=(r.messages||[]).map(m=>(m.sender_id==null?'':'')+esc(String(m.body||m.content||''))).join('\n');
-  let md='### 💬 '+esc(t.peer||'DM')+' との会話\n\n'+(lines||'(本文取得不可)')+
-    '\n\n---\n[Scoreで見る]('+SCORE_BASE+'/messages) ／ このまま返信内容を入力欄に書けば Casper が代筆送信します（実送信はニブ殿の書込権限後）';
+  const lines=(r.messages||[]).map(m=>{
+    const nm=esc(m.sender_name||(m.sender_id==null?'システム':String(m.sender_id)));
+    const ts=m.created_at?('（'+esc(String(m.created_at).slice(5,16).replace('T',' '))+'）'):'';
+    return '**'+nm+'**'+ts+'：'+esc(String(m.body||m.content||''));
+  }).join('\n\n');
+  let md='### 💬 '+esc(t.peer||'DM')+' との会話\n\n'+(lines||'(本文取得不可)');
   render(b,md);
+  // DM文脈を履歴に仕込む(返信/質問の土台＋代筆の宛先)。次の発言でこのスレッドが保存される。
+  history.push({role:'assistant',content:md+'\n[DM文脈] 相手='+(t.peer||'')+' / uid='+(t.peer_id||'')+' / thread='+t.id+
+    '。ユーザーが返信を書けば send_message(to_user_id=上記uid)で本人名義代筆。質問なら社内知識で回答。'});
+  // 閲覧中はメッセージ欄を無効化→下のボタンで有効化
+  inp.disabled=true; send.disabled=true; inp.placeholder='下の「返信」か「質問」を選ぶと入力できます';
+  const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:12px;flex-wrap:wrap';
+  const mk=(label,bd,fn)=>{ const x=document.createElement('button'); x.textContent=label;
+    x.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid '+bd+';background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit'; x.onclick=fn; return x; };
+  const enable=(mode,ph)=>{ curDM.mode=mode; inp.disabled=false; send.disabled=false; inp.placeholder=ph; inp.focus(); };
+  bar.appendChild(mk('↗ Scoreで見る','#334155',()=>window.open(SCORE_BASE+'/messages','_blank')));
+  bar.appendChild(mk('✍ 返信','#22c55e',()=>enable('reply',(t.peer||'相手')+' さんへの返信を入力…')));
+  bar.appendChild(mk('❓ 質問','#3b82f6',()=>enable('question','このDMについて Casper に質問…')));
+  b.appendChild(bar);
   log.scrollTop=log.scrollHeight;
 }
 async function loadThread(id){
   const t=await jpost('/api/threads/get',{id}); curThread=id; localStorage.setItem('casper_thread',id);
   history.length=0; wrap.innerHTML='';
-  (t.messages||[]).forEach(m=>{ if(m.role==='user'){el('user').textContent=m.content;} else {const b=el('bot'); render(b,m.content); renderMermaid(b);renderCanvas(b);} history.push(m); });
+  (t.messages||[]).forEach(m=>{ if(m.role==='user'){const ub=el('user'); ub.textContent=m.content; attachEdit(ub.parentElement, history.length, m.content);} else {const b=el('bot'); render(b,m.content); renderMermaid(b);renderCanvas(b);} history.push(m); });
+  curDM=null; enableInput();
   closeSidebar(); refreshThreads();
 }
 async function delThread(id){ await jpost('/api/threads/delete',{id}); if(id===curThread){newThread();} refreshThreads(); }
-function newThread(){ curThread='t'+Date.now(); localStorage.setItem('casper_thread',curThread); history.length=0; wrap.innerHTML=''; const b=el('bot'); b.textContent='Casper です。何でも聞いてください。'; closeSidebar(); refreshThreads(); }
+function newThread(){ curThread='t'+Date.now(); localStorage.setItem('casper_thread',curThread); history.length=0; wrap.innerHTML=''; const b=el('bot'); b.textContent='Casper です。何でも聞いてください。'; curDM=null; enableInput(); closeSidebar(); refreshThreads(); }
 function openSidebar(){ document.getElementById('sidebar').classList.add('open'); document.getElementById('sbmask').classList.add('open'); refreshThreads(); }
 function closeSidebar(){ document.getElementById('sidebar').classList.remove('open'); document.getElementById('sbmask').classList.remove('open'); }
 document.getElementById('menubtn').onclick=openSidebar;
@@ -401,7 +476,11 @@ document.getElementById('newthread').onclick=newThread;
 document.getElementById('who').onclick=async()=>{
   if(confirm('ログアウトしますか?')){ await jpost('/api/logout',{}); location.href='/login'; }
 };
-(async()=>{ try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; }catch(e){} refreshThreads(); })();
+(async()=>{
+  const b0=el('bot'); b0.textContent='Casper にござる。（タスク・新着DMを確認中…）';   // 即時表示で白画面を防ぐ
+  try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; }catch(e){}
+  try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json()); if(br.text){ render(b0,br.text); renderMermaid(b0); log.scrollTop=log.scrollHeight; } }catch(e){}
+  refreshThreads(); })();
 // ===== Score Uploader ツール =====
 const plus=document.getElementById('plus'), toolmenu=document.getElementById('toolmenu');
 const fileinp=document.getElementById('fileinp'), toolsEl=document.getElementById('tools'), attachEl=document.getElementById('attach');
@@ -414,11 +493,67 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
 function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
 function clearFile(){ pendingFile=null; attachEl.innerHTML=''; }
-function renderFile(){ attachEl.innerHTML = pendingFile ? ('<span class="filechip">'+(pendingFile.isImage?('<img src="'+pendingFile.dataurl+'">'):'🎬')+' '+pendingFile.name+' <b style="cursor:pointer" onclick="clearFile()">✕</b></span>') : ''; }
+function renderFile(){
+  if(!pendingFile){ attachEl.innerHTML=''; return; }
+  let h='<span class="filechip">'+(pendingFile.isImage?('<img src="'+pendingFile.dataurl+'">'):'🎬')+' '+pendingFile.name+' <b style="cursor:pointer" onclick="clearFile()">✕</b></span>';
+  if(!pendingFile.isImage){ h+=' <button onclick="vimeoUpload()" style="padding:5px 12px;border-radius:8px;border:1px solid #22c55e;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit;font-size:12px">🎬 Vimeoへアップ</button>'; }
+  attachEl.innerHTML=h;
+}
+function vimeoUpload(){
+  if(!pendingFile) return;
+  const f=pendingFile; clearFile();
+  const base=(f.name||'').replace(/\.[^.]+$/,'');
+  const b=el('bot');
+  const inS='width:100%;box-sizing:border-box;margin:2px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit';
+  const lbS='display:block;font-size:12px;color:var(--mut)';
+  const btS='padding:7px 16px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit';
+  b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:14px;background:rgba(255,255,255,.03)">'
+    +'<div style="font-weight:700;margin-bottom:10px">🎬 Vimeo アップ設定 — '+esc(f.name)+'</div>'
+    +'<label style="'+lbS+'">タイトル</label><input id="vmTitle" style="'+inS+'" value="'+esc(base)+'">'
+    +'<label style="'+lbS+'">説明（任意）</label><textarea id="vmDesc" rows="2" style="'+inS+'"></textarea>'
+    +'<label style="'+lbS+'">パスワード（任意・空欄なら無し）</label><input id="vmPw" style="'+inS+'" placeholder="例: bokan2026">'
+    +'<div style="display:flex;gap:8px"><button id="vmGo" style="'+btS+';border-color:#22c55e">アップロード</button>'
+    +'<button id="vmCancel" style="'+btS+'">キャンセル</button></div></div>';
+  document.getElementById('vmGo').onclick=()=>doVimeoUpload(f,
+    document.getElementById('vmTitle').value, document.getElementById('vmDesc').value,
+    document.getElementById('vmPw').value, b);
+  document.getElementById('vmCancel').onclick=()=>{ b.textContent='（アップロードを中止しました）'; };
+  log.scrollTop=log.scrollHeight;
+}
+async function doVimeoUpload(f,title,desc,pw,b){
+  if(!f.file){ render(b,'⚠️ ファイルが取得できません。添付し直して下さい'); return; }
+  b.classList.add('cursor'); b.textContent='準備中…';
+  // ① サーバで Vimeo 動画作成 + tus upload_link 取得(本体データは送らない)
+  let cr; try{ cr=await apiPost('/api/vimeo/create',{size:f.file.size,title:title||f.name,description:desc||'',password:pw||''}); }catch(e){ cr={ok:false,error:e.message}; }
+  if(!cr||!cr.ok){ b.classList.remove('cursor'); render(b,'⚠️ 作成失敗: '+((cr&&cr.error)||'不明')); return; }
+  // ② ブラウザから Vimeo へ直接 tus 送信(64MB分割・大容量対応)
+  const file=f.file, size=file.size, CHUNK=64*1024*1024; let offset=0;
+  try{
+    while(offset<size){
+      const slice=file.slice(offset, Math.min(offset+CHUNK,size));
+      const resp=await fetch(cr.upload_link,{method:'PATCH',headers:{'Tus-Resumable':'1.0.0','Upload-Offset':String(offset),'Content-Type':'application/offset+octet-stream'},body:slice});
+      if(!resp.ok && resp.status!==204) throw new Error('tus HTTP '+resp.status);
+      const no=resp.headers.get('Upload-Offset');
+      offset = (no!=null) ? parseInt(no) : (offset+slice.size);
+      b.textContent='アップロード中… '+Math.round(offset/size*100)+'%';
+    }
+  }catch(e){ b.classList.remove('cursor'); render(b,'⚠️ 送信失敗: '+e.message+'（ネット/CORS の可能性）'); return; }
+  b.classList.remove('cursor');
+  const md='✅ **Vimeo へアップしました**\n\n確認リンク: '+cr.link+(pw?('\nパスワード: `'+pw+'`'):'')+'\n\n'+cr.link;
+  render(b,md); renderMermaid(b);
+  log.scrollTop=log.scrollHeight;
+}
 function takeFile(f){
-  if(!f) return; const r=new FileReader();
-  r.onload=()=>{ const du=r.result; pendingFile={name:f.name, b64:du.split(',')[1], dataurl:du, isImage:f.type.startsWith('image/')}; if(!uploaderOn){uploaderOn=true;renderTools();} renderFile(); };
-  r.readAsDataURL(f);
+  if(!f) return;
+  if(f.type.startsWith('image/')){               // 画像=vision用にbase64化(小容量)
+    const r=new FileReader();
+    r.onload=()=>{ const du=r.result; pendingFile={name:f.name, b64:du.split(',')[1], dataurl:du, isImage:true, file:f}; if(!uploaderOn){uploaderOn=true;renderTools();} renderFile(); };
+    r.readAsDataURL(f);
+  } else {                                        // 動画=base64化せずFile保持(大容量はtusで直送)
+    pendingFile={name:f.name, isImage:false, file:f};
+    if(!uploaderOn){uploaderOn=true;renderTools();}
+    renderFile();
+  }
 }
 fileinp.onchange=e=>takeFile(e.target.files[0]);
 // ドラッグ&ドロップ(チャット全体)
@@ -500,7 +635,8 @@ function sendRouter(){
 send.onclick=sendRouter;
 // Enter で送信。Shift+Enter で改行。
 inp.addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendRouter(); }
+  // IME変換確定のEnterは送信しない(Mac等の誤送信防止): isComposing / keyCode 229 を除外
+  if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){ e.preventDefault(); sendRouter(); }
 });
 inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px';});
 inp.focus();

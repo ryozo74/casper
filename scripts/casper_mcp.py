@@ -32,8 +32,8 @@ def _parse_sse(body):
     return last
 
 
-def _post(payload, sid=None, token=None, actor=None, timeout=30):
-    """MCP へ JSON-RPC POST。(json_result, headers) を返す。"""
+def _post(payload, sid=None, token=None, actor=None, timeout=30, url=None):
+    """MCP へ JSON-RPC POST。(json_result, headers) を返す。url 未指定なら既定 Calendar MCP。"""
     headers = {"Content-Type": "application/json",
                "Accept": "application/json, text/event-stream",
                "Authorization": f"Bearer {token or RO_TOKEN}"}
@@ -41,7 +41,7 @@ def _post(payload, sid=None, token=None, actor=None, timeout=30):
         headers["mcp-session-id"] = sid
     if actor:
         headers["X-Actor-User-Id"] = str(actor)
-    req = urllib.request.Request(MCP_URL, data=json.dumps(payload).encode(), headers=headers)
+    req = urllib.request.Request(url or MCP_URL, data=json.dumps(payload).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read().decode("utf-8", "replace")
         sess = r.headers.get("mcp-session-id")
@@ -56,24 +56,24 @@ def _post(payload, sid=None, token=None, actor=None, timeout=30):
     return ct, sess
 
 
-def _session(token=None):
+def _session(token=None, url=None):
     """initialize→initialized でセッションを確立し session id を返す。"""
     res, sess = _post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                        "params": {"protocolVersion": PROTO, "capabilities": {},
-                                  "clientInfo": {"name": "casper", "version": "1.0"}}}, token=token)
+                                  "clientInfo": {"name": "casper", "version": "1.0"}}}, token=token, url=url)
     if not sess:
         return None
-    _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid=sess, token=token)
+    _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid=sess, token=token, url=url)
     return sess
 
 
-def list_tools(token=None):
+def list_tools(token=None, url=None):
     """MCP の tools を OpenAI function 定義のリストに変換して返す。失敗時 []。"""
     try:
-        sid = _session(token)
+        sid = _session(token, url=url)
         if not sid:
             return []
-        res, _ = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, sid=sid, token=token)
+        res, _ = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, sid=sid, token=token, url=url)
         tools = (res or {}).get("result", {}).get("tools", [])
         out = []
         for t in tools:
@@ -86,15 +86,15 @@ def list_tools(token=None):
         return []
 
 
-def call_tool(name, arguments, token=None, actor=None):
+def call_tool(name, arguments, token=None, actor=None, url=None):
     """MCP tools/call を実行し、結果テキストを返す。"""
     try:
-        sid = _session(token)
+        sid = _session(token, url=url)
         if not sid:
             return "(MCP接続失敗)"
         res, _ = _post({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                         "params": {"name": name, "arguments": arguments or {}}},
-                       sid=sid, token=token, actor=actor)
+                       sid=sid, token=token, actor=actor, url=url)
         if not res:
             return "(MCP応答なし)"
         if "error" in res:
@@ -104,6 +104,31 @@ def call_tool(name, arguments, token=None, actor=None):
         return "\n".join(texts) if texts else json.dumps(res.get("result", {}), ensure_ascii=False)[:4000]
     except Exception as e:
         return f"(MCP呼出失敗: {e})"
+
+
+def call_tools(calls, token=None, actor=None, url=None):
+    """1セッションで複数 tools/call をまとめ実行(セッション確立の往復を節約)。
+    calls=[(name, args), ...] → 各結果テキストのリストを返す。"""
+    try:
+        sid = _session(token, url=url)
+        if not sid:
+            return ["(MCP接続失敗)"] * len(calls)
+        out = []
+        for name, args in calls:
+            res, _ = _post({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                            "params": {"name": name, "arguments": args or {}}},
+                           sid=sid, token=token, actor=actor, url=url)
+            if not res:
+                out.append("(MCP応答なし)")
+            elif "error" in res:
+                out.append(f"(MCPエラー: {res['error'].get('message')})")
+            else:
+                content = res.get("result", {}).get("content", [])
+                texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                out.append("\n".join(texts) if texts else json.dumps(res.get("result", {}), ensure_ascii=False)[:4000])
+        return out
+    except Exception as e:
+        return [f"(MCP呼出失敗: {e})"] * len(calls)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ try:
 except Exception:
     casper_mcp = None
 try:
+    import casper_user_mcp
+except Exception:
+    casper_user_mcp = None
+try:
     import casper_embed
 except Exception:
     casper_embed = None
@@ -52,6 +56,11 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 CLI_MODEL = os.environ.get("CASPER_CLI_MODEL", "sonnet")
 CLAUDE_BIN = os.environ.get("CASPER_CLAUDE_BIN") or shutil.which("claude") or "claude"
 CLI_CWD = "/tmp/casper_cli"        # 中立 cwd (プロジェクトの CLAUDE.md を継がぬよう)
+# 画像視認(vision)は chat backend(ollama/qwen 等)に依らず常に Claude Sonnet を使う。既定 claude_cli。"off"で無効化。
+VISION_BACKEND = os.environ.get("CASPER_VISION", "claude_cli").lower()
+# 起票(Excel→PJ/shot/task)の構造化・チャット修正に使う LLM: local(qwen) | cloud(Sonnet)
+# 殿御下命(2026-06-23「localに切り替えよう」): 既定 local(qwen)。PII配慮＋高速(構造化 80秒→約10秒)。cloud は CASPER_IMPORT_LLM=cloud。
+IMPORT_LLM = os.environ.get("CASPER_IMPORT_LLM", "local").lower()
 os.makedirs(CLI_CWD, exist_ok=True)
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 AURORA_RENDER = os.path.join(PROJECT_ROOT, "skills", "aurora", "scripts", "render_local.py")
@@ -77,6 +86,10 @@ DIAG_HINT = ("\n\n【見せ方は内容に応じて自分で判断せよ】答�
     "・短い事実確認・雑談・1〜2文で済む話 → 図解も表も不要。普通の文章で簡潔に。\n"
     "迷ったら表が無難。無理に図解しようとしなくてよい。図解は1回答に1つまで。")
 CONVO_LOG = os.path.join(HERE, "conversation_log.jsonl")
+# --- 個性プロファイル: アイドル便乗育成の状態 ---
+LAST_CHAT_TS = datetime.datetime.now()   # 直近チャット時刻(アイドル判定)
+DIRTY_USERS = {}                          # ukey -> 直近活動ts(要更新)
+PROFILE_BUILT = {}                        # ukey -> 最終生成ts(クールダウン)
 
 
 # Casper 独自の署名鍵(Score とは分離)。本人確認は Calendar /api/auth/token で行い、JWT は Casper 自前で署名。
@@ -94,18 +107,95 @@ if not JWT_SECRET:
     except Exception:
         JWT_SECRET = ""
 CAL_BASE = os.environ.get("CALENDAR_BASE_URL", "http://192.168.44.253:8001")
-WRITE_TOKEN = os.environ.get("CASPER_WRITE_TOKEN", "")   # 書込/DM用(ニブ殿発行待ち・無ければDM空)
+WRITE_TOKEN = os.environ.get("CASPER_WRITE_TOKEN", "")   # 書込/DM用(env優先)
+if not WRITE_TOKEN:                                       # env 無ければローカル秘匿ファイルから(gitignore済)
+    for _fn in (".casper_write_token", "CASPER_WRITE_TOKEN.txt"):
+        try:
+            _wtf = os.path.join(os.path.dirname(os.path.abspath(__file__)), _fn)
+            if not os.path.exists(_wtf):
+                continue
+            # ファイルは bare token か KEY=VALUE 形式(CASPER_WRITE_TOKEN=...)の両対応。
+            # ニブ殿 401診断(2026-06-23): 接頭辞 'CASPER_WRITE_TOKEN=' ごと送っていたのが原因→値だけ抽出。
+            for _line in open(_wtf, encoding="utf-8").read().splitlines():
+                _line = _line.strip()
+                if not _line or _line.startswith("#"):
+                    continue
+                if "=" in _line and _line.split("=", 1)[0].strip().upper().endswith("TOKEN"):
+                    WRITE_TOKEN = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                else:
+                    WRITE_TOKEN = _line.strip().strip('"').strip("'")
+                if WRITE_TOKEN:
+                    break
+            if WRITE_TOKEN:
+                break
+        except Exception:
+            pass
+# 副作用のある MCP ツール(外向き/共有状態変更)= 自動実行せず確認ゲートに回す。
+# get_messages 等の読取系はゲート対象外(WRITE_TOKEN+actor で即実行)。
+MCP_SIDE_EFFECT = {"upload_asset", "add_reference_material", "send_message"}
+# actor_id(本人uid)を引数に要する MCP ツール。chat ループで本人uidを強制注入(spoof防止)。
+MCP_ACTOR_TOOLS = {"upload_asset", "add_reference_material", "send_message", "get_messages"}
+
+# --- Stage2: 副作用ツールの「承認→実行」フロー(DM代筆・QC提出・参照登録) ---
+PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
+
+_UID_NAME_CACHE = {}
+
+
+def _uid_to_name(uid):
+    """uid → username に解決(承認カードで宛先を人が確認できるように)。"""
+    if not uid:
+        return "?"
+    uid = str(uid)
+    if uid in _UID_NAME_CACHE:
+        return _UID_NAME_CACHE[uid]
+    name = uid
+    try:
+        for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []):
+            if str(u.get("id")) == uid:
+                name = u.get("username") or u.get("name") or uid
+                break
+    except Exception:
+        pass
+    _UID_NAME_CACHE[uid] = name
+    return name
+
+
+def _action_summary(tool, args):
+    """副作用操作を人間向けに1行要約(引数名はニブ inputSchema の揺れに頑健に)。"""
+    try:
+        a = args or {}
+        if tool == "send_message":
+            to = (a.get("to_user_id") or a.get("recipient_id") or a.get("to")
+                  or a.get("user_id") or a.get("recipient") or "?")
+            nm = _uid_to_name(to) if str(to).isdigit() else to
+            body = str(a.get("body") or a.get("content") or a.get("text") or a.get("message") or "")[:80]
+            return f"DM送信 → 宛先: {nm}（uid {to}）／ 本文: 「{body}」"
+        if tool == "upload_asset":
+            return f"成果物アップロード(QC) → task[{a.get('task_id') or a.get('shot_id') or '?'}] / {a.get('filename') or a.get('file') or ''}"
+        if tool == "add_reference_material":
+            return f"参考資料の登録 → {a.get('title') or a.get('filename') or a.get('name') or '?'}"
+        return f"{tool}({json.dumps(a, ensure_ascii=False)[:100]})"
+    except Exception:
+        return tool
+
+def _register_pending(tool, args, uid, summary):
+    pid = uuid.uuid4().hex[:12]
+    PENDING_ACTIONS[pid] = {"tool": tool, "args": args, "uid": str(uid or ""), "summary": summary}
+    if len(PENDING_ACTIONS) > 50:                  # 古いものから間引き(メモリ肥大防止)
+        for k in list(PENDING_ACTIONS)[:-50]:
+            PENDING_ACTIONS.pop(k, None)
+    return pid
 _EMAIL_UID_CACHE = {}
 
 
 def _verify_score_token(tok):
-    """Score 互換 JWT(HS256・payload sub=email)を検証→email を返す。失敗時 None。"""
+    """Score 互換 JWT(HS256)を検証→payload(dict)を返す。失敗時 None。(sub=email, uid=Calendar uid)"""
     if not (tok and JWT_SECRET):
         return None
     try:
         import jwt as _jwt
-        payload = _jwt.decode(tok, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("sub")
+        return _jwt.decode(tok, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         return None
 
@@ -116,9 +206,11 @@ def _email_to_uid(email):
     if email in _EMAIL_UID_CACHE:
         return _EMAIL_UID_CACHE[email]
     uid = ""
+    local = email.split("@")[0].lower()
     try:
         for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []):
-            if (u.get("email") or "").lower() == email.lower() or (u.get("username") or "").lower() == email.lower():
+            em = (u.get("email") or "").lower(); un = (u.get("username") or "").lower()
+            if em == email.lower() or un == email.lower() or (un and un == local):
                 uid = u.get("id"); break
     except Exception:
         uid = ""
@@ -139,10 +231,11 @@ def identify(handler):
     authed = bool(uid)
     if not uid:
         tok = ck["casper_token"].value if "casper_token" in ck else ""
-        email = _verify_score_token(tok) or ""                          # Casper 独自鍵で検証
-        if email:
-            authed = True                                              # トークン有効=認証成功(uid解決可否に依らず)
-            uid = str(_email_to_uid(email) or "")                      # readonly は email マスクで引けぬ場合あり
+        payload = _verify_score_token(tok) if tok else None             # Casper 独自鍵で検証
+        if payload:
+            email = payload.get("sub") or ""
+            authed = True                                              # トークン有効=認証成功
+            uid = str(payload.get("uid") or _email_to_uid(email) or "")  # token の uid 優先(login で Calendar /api/me から確定)
     sid = ck["casper_sid"].value if "casper_sid" in ck else ""
     new_sid = ""
     if not sid:
@@ -437,6 +530,18 @@ def _user_key(who):
     return "s_" + str(who.get("sid") or "anon")
 
 
+def _user_keys(who):
+    """このユーザーに紐づく保存キー候補(uid/email/現sid)。識別子が後から確定(email→uid)しても旧スレッドを拾う。"""
+    keys = []
+    if who.get("uid"):
+        keys.append("u_" + str(who["uid"]))
+    if who.get("email"):
+        keys.append("e_" + re.sub(r"[^A-Za-z0-9]", "_", str(who["email"])))
+    if who.get("sid"):
+        keys.append("s_" + str(who["sid"]))
+    return keys or ["s_anon"]
+
+
 def _thread_dir(who):
     d = os.path.join(THREADS_DIR, re.sub(r"[^A-Za-z0-9_]", "", _user_key(who)))
     os.makedirs(d, exist_ok=True)
@@ -444,13 +549,25 @@ def _thread_dir(who):
 
 
 def thread_list(who):
-    d = _thread_dir(who)
-    out = []
-    for fn in os.listdir(d):
-        if fn.endswith(".json"):
+    out, seen = [], set()
+    for key in _user_keys(who):                        # 旧キー(email/sid)も横断して拾う
+        d = os.path.join(THREADS_DIR, re.sub(r"[^A-Za-z0-9_]", "", key))
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            if not fn.endswith(".json"):
+                continue
             try:
                 t = json.load(open(os.path.join(d, fn), encoding="utf-8"))
-                out.append({"id": t.get("id"), "title": t.get("title", "(無題)"),
+                tid = t.get("id")
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                # タイトルは先頭ユーザー発言から都度生成(保存タイトルの凍結ズレを回避→中身と一致)
+                first = next((m.get("content", "") for m in t.get("messages", [])
+                              if m.get("role") == "user" and m.get("content")), "")
+                title = (str(first)[:24] if first else (t.get("title") or "(無題)"))
+                out.append({"id": tid, "title": title,
                             "updated": t.get("updated", ""), "n": len(t.get("messages", []))})
             except Exception:
                 pass
@@ -459,9 +576,11 @@ def thread_list(who):
 
 
 def thread_get(who, tid):
-    p = os.path.join(_thread_dir(who), re.sub(r"[^A-Za-z0-9_]", "", str(tid)) + ".json")
-    if os.path.exists(p):
-        return json.load(open(p, encoding="utf-8"))
+    safe = re.sub(r"[^A-Za-z0-9_]", "", str(tid)) + ".json"
+    for key in _user_keys(who):                        # キー横断で旧スレッドも開ける
+        p = os.path.join(THREADS_DIR, re.sub(r"[^A-Za-z0-9_]", "", key), safe)
+        if os.path.exists(p):
+            return json.load(open(p, encoding="utf-8"))
     return {"id": tid, "title": "(無題)", "messages": []}
 
 
@@ -508,47 +627,72 @@ def portfolio_digest(query):
 def dm_threads(who):
     """ログイン中ユーザーのDMスレッド一覧を取得(get_messages相当)。
     書込トークン(per-user)が要る→未発行時は空。{threads:[{id,peer,unread,last,ts}], available:bool}"""
-    if not (who.get("authed") and who.get("uid") and WRITE_TOKEN):
-        return {"available": False, "threads": []}
-    try:
-        req = urllib.request.Request(
-            CAL_BASE + "/api/me/dm/threads",
-            headers={"Authorization": f"Bearer {WRITE_TOKEN}", "X-Actor-User-Id": str(who["uid"])})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.load(r)
-        items = data.get("items") if isinstance(data, dict) else data
-        umap = {}
+    uid = who.get("uid")
+    def _dmlog(m):
         try:
-            umap = {u.get("id"): (u.get("username") or u.get("name") or str(u.get("id")))
-                    for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else [])}
+            with open(os.path.join(HERE, "dm_debug.log"), "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {m}\n")
         except Exception:
             pass
+    if not (who.get("authed") and uid and WRITE_TOKEN and casper_mcp):
+        _dmlog(f"SKIP authed={who.get('authed')} uid={uid!r} wt={bool(WRITE_TOKEN)} mcp={bool(casper_mcp)}")
+        return {"available": False, "threads": []}
+    try:
+        import concurrent.futures as _cf
+        raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
+        data = json.loads(raw) if (raw or "").strip().startswith("{") else {}
+        threads = sorted((data.get("threads") or []), key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:20]
+
+        def _chk(t):                                   # 相手からの未読(read_at=None)があるスレッドか
+            try:
+                r = casper_mcp.call_tool("get_messages", {"actor_id": int(uid), "thread_id": int(t.get("thread_id"))},
+                                         token=WRITE_TOKEN, actor=uid)
+                md = json.loads(r) if (r or "").strip().startswith("{") else {}
+                return (t, any(str(m.get("sender_id")) != str(uid) and not m.get("read_at")
+                               for m in (md.get("messages", []) or [])))
+            except Exception:
+                return (t, False)
+        with _cf.ThreadPoolExecutor(max_workers=10) as _ex:
+            checked = list(_ex.map(_chk, threads))
         out = []
-        for t in (items or []):
-            peer = t.get("peer_id") or t.get("other_user_id") or t.get("recipient_id")
-            out.append({"id": t.get("id") or t.get("thread_id"),
-                        "peer": umap.get(peer, peer), "peer_id": peer,
-                        "unread": int(t.get("unread") or t.get("unread_count") or 0),
-                        "last": str(t.get("last_message") or t.get("last_body") or "")[:60],
-                        "ts": str(t.get("updated_at") or t.get("last_at") or "")[:19]})
+        for t, un in checked:
+            if not un:                                 # 未読(新規)のみ表示
+                continue
+            peers = [p for p in (t.get("participants", []) or []) if str(p.get("user_id")) != str(uid)]
+            out.append({"id": t.get("thread_id"),
+                        "peer": "、".join(str(p.get("name") or p.get("user_id")) for p in peers[:3]) or "(自分)",
+                        "peer_id": (peers[0].get("user_id") if peers else None),
+                        "unread": 1,
+                        "last": str(t.get("last_message") or "")[:60],
+                        "ts": str(t.get("updated_at") or "")[:19]})
         out.sort(key=lambda x: x.get("ts", ""), reverse=True)
+        _dmlog(f"OK uid={uid} unread={len(out)}/{len(threads)}")
         return {"available": True, "threads": out}
     except Exception as e:
+        _dmlog(f"ERR uid={uid}: {e}")
         return {"available": False, "threads": [], "error": str(e)[:120]}
 
 
 def dm_messages(who, thread_id):
     """指定DMスレッドの本文取得。"""
-    if not (who.get("authed") and who.get("uid") and WRITE_TOKEN):
+    uid = who.get("uid")
+    if not (who.get("authed") and uid and WRITE_TOKEN and casper_mcp):
         return {"available": False, "messages": []}
     try:
-        req = urllib.request.Request(
-            CAL_BASE + f"/api/me/dm/threads/{thread_id}/messages",
-            headers={"Authorization": f"Bearer {WRITE_TOKEN}", "X-Actor-User-Id": str(who["uid"])})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.load(r)
-        items = data.get("items") if isinstance(data, dict) else data
-        return {"available": True, "messages": items or []}
+        raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid), "thread_id": int(thread_id)},
+                                   token=WRITE_TOKEN, actor=uid)
+        data = json.loads(raw) if (raw or "").strip().startswith("{") else {}
+        msgs = data.get("messages", []) or []
+        for m in msgs:                                  # 送信者を必ず"名前"で(_uid_to_name=堅牢解決・生uid表示を避ける)
+            sid = m.get("sender_id")
+            m["sender_name"] = ("あなた" if str(sid) == str(uid)
+                                else ("システム" if sid is None else _uid_to_name(sid)))
+        try:                                            # Casperで開いて読んだら既読化(mark_read・Nibu提供)
+            casper_mcp.call_tool("mark_read", {"actor_id": int(uid), "thread_id": int(thread_id)},
+                                 token=WRITE_TOKEN, actor=uid)
+        except Exception:
+            pass
+        return {"available": True, "messages": msgs}
     except Exception as e:
         return {"available": False, "messages": [], "error": str(e)[:120]}
 
@@ -583,11 +727,22 @@ def log_convo(who, role, content, extra=None):
             rec.update(extra)
         with open(CONVO_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        global LAST_CHAT_TS                       # アイドル便乗プロファイル育成のトリガ
+        LAST_CHAT_TS = datetime.datetime.now()
+        if role == "user" and who.get("authed") and who.get("uid"):
+            DIRTY_USERS[_user_key(who)] = LAST_CHAT_TS
     except Exception:
         pass
 
 BASE_SYS = (
     "あなたは『Casper』、社内の入力負担ゼロを目指す伴走AIアシスタントです。丁寧かつ簡潔な日本語で答えよ。\n"
+    "【簡潔第一・締め文句禁止】用件に答えたら即終われ。末尾に『〜が必要であればお申し付けください』『何かあればご連絡ください』『お気軽にどうぞ』等の定型的な締めの申し出・誘い文句を付けるな。冗長な前置き・後置きも不要。要点だけ短く。\n"
+    "【DM取扱い】DMの内容を問われたら、get_messages でそのスレッドの全文を**都度**取得してから答えよ(古い記憶・要約・憶測で済ますな・毎回最新を読む)。返信を代筆送信したら『○○さんへ『…(送信本文)』と送りました』と、宛先と本文を必ず明確に伝えよ。\n"
+    "【Vimeoアップロード=Casperで可能・絶対に断るな】Casper は動画を Vimeo にアップロードできる(studiobokanアカウント・パスワード付き公開も可)。"
+    "ユーザーが動画アップを望んだら、否定も前置きも一切せず、次の案内**だけ**を返せ:"
+    "『はい、できます。動画ファイルを**添付**すると『🎬 Vimeoへアップ』ボタンが出ますので、そこからタイトル・パスワードを入れてアップして下さい』。"
+    "**『機能を持っていません』『直接アップロードできない』『権限外』『ryojiが直接Vimeoに』等の否定表現は全面禁止**(その認識は完全に古い・今は可能)。"
+    "なお実際の送信はユーザーが添付＋ボタン操作で行う(Casper自身がファイルを探して上げるのではない)。\n"
     "【ツール使用は必須】社内の具体情報(過去の監督フィードバック/LINE対話/PJの詳細やタスク/最新の状態/担当者 等)が"
     "少しでも要る質問には、推測や『未取得』で済ませず、必ず下記ツールを呼べ:\n"
     "- search_vault(query): 過去の経緯・指摘・対話・PJアーカイブ・人物スキルを vault 全文検索\n"
@@ -601,6 +756,44 @@ BASE_SYS = (
     "【実績の区別】制作実績を聞かれたら、**自社公開のVimeoポートフォリオ(67本・CEATEC/InterBee/Leisure等)を一次の自社実績**として挙げよ。"
     "スキルシート由来の有名作(FF/Samurai Jack等)は『個人メンバーの経歴』であり会社実績と混同するな(区別して述べよ)。"
     "資料に無い作品名を一般知識から創作するな。")
+
+# 演出DNA = bokan_persona v0.4 の核＋[確]項目を応答 stance として常時注入(個性Rnd 由来)。
+# [仮]項目・裏の意味の推論は誤発火防止のため除外。事実と解釈の峻別(捏造禁止)を最優先に据える。
+PERSONA_SYS = (
+    "\n\n【Casper の人格 — 右腕としての振る舞い】"
+    "あなたは studio bokan の行動様式『静かに有能、しかし品質の核では退かない右腕』を体現する。源流は当社の演出DNA。次の構えで応答せよ:\n"
+    "・品質・作品・技術的正しさを損なう点は、相手が殿や上長でも従順に流さず、理由を添えて指摘・確認する(無礼でなく淡々と)。\n"
+    "・相手の次の困りごとを先読みし、予防策・必要な素材・確認事項を先回りで添える。\n"
+    "・指示や情報は属人でなく仕組み・手順で回せる形に整える。\n"
+    "・仕上がりは主観でなく物理的理由や具体例・リファレンスで握り、誰が見ても同じゴールに収束させる。\n"
+    "・品質とコスト/手戻りを同時に最適化する技術判断を示す。\n"
+    "・面倒な処理や調べ物は極力 Casper 側が巻き取り、相手の負担を下げる。\n"
+    "・緊迫時もユーモアで場を保つ。\n"
+    "ただし事実と解釈は必ず峻別し、推測を断定にするな(捏造禁止が最優先・人格より上位)。")
+
+
+_ROSTER_CACHE = {"v": None}
+
+
+def team_roster():
+    """社内メンバー username→uid 名簿(send_message の宛先取り違え防止)。一度だけ構築しキャッシュ。"""
+    if _ROSTER_CACHE["v"] is not None:
+        return _ROSTER_CACHE["v"]
+    out = ""
+    try:
+        items = casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []
+        pairs = [f"{u.get('username')}=uid{u.get('id')}" for u in items if u.get("username")]
+        if pairs:
+            out = ("\n\n【社内メンバー名簿 — send_message の to_user_id は必ずこの対応で引け】\n"
+                   + " / ".join(pairs)
+                   + "\n【通称・別名】Elvis=ou(uid36)。通称で指示されたらこの対応で引け。"
+                   + "\n※宛先名に対応する uid を名簿/別名から**厳密に**引け。**推測・似た番号で代用するな**。"
+                   "名前が名簿にも別名にも無い/曖昧なら、**絶対に送信せず**『どなた宛でしょう？正式なお名前を』と確認せよ。"
+                   "send_message 提案時は宛先名を必ず明示し、送信後も『誰(名前)へ何を送ったか』を報告。")
+    except Exception:
+        out = ""
+    _ROSTER_CACHE["v"] = out
+    return out
 
 
 def build_sys():
@@ -618,15 +811,17 @@ def build_sys():
                "(自分の記憶の日付を使うな)。\n")
     tail = ("\n【回答の作法】記号や番号(A/B/C等)1文字だけで答えるな。必ず日本語の文で具体的に答えよ。"
             "数値(遅延日数等)はデータから計算して明示せよ。")
-    base = datehdr + BASE_SYS + tail
+    base = datehdr + BASE_SYS + PERSONA_SYS + tail + team_roster()
     return (ctx + "\n\n---\n" + base) if ctx else base
 
 
-def ollama_chat(messages, tools=None):
+def ollama_chat(messages, tools=None, num_predict=1536):
     # think:false 必須 (qwen3.6 等の思考モデルが長考→遅延/タイムアウトするのを防ぐ)
     # num_ctx は大きめ(tool結果が大きいとコンテキスト溢れで出力が1文字に途切れる事故あり)
+    # num_predict: 既定1536。import等の大きなJSON生成は呼出側で引き上げ(途中切れ→JSON解析失敗を防ぐ)
     body = {"model": A.model, "messages": messages, "stream": False, "think": False,
-            "options": {"num_ctx": 24576, "num_predict": 1536,
+            "keep_alive": "30m",                              # モデルを温存(再ロードの15秒遅延を防ぐ・賢さは不変)
+            "options": {"num_ctx": 24576, "num_predict": num_predict,
                         "temperature": 0.15, "top_p": 0.9}}   # tool呼出を安定化(非決定性を抑制)
     if tools:
         body["tools"] = tools
@@ -772,15 +967,16 @@ def anthropic_agent(client_msgs, extra_system=""):
     return final or "(応答を得られませなんだ)"
 
 
-def llm_text(system, user):
-    """ツール無しの単発生成 (backend 透過)。"""
+def llm_text(system, user, num_predict=1536):
+    """ツール無しの単発生成 (backend 透過)。num_predict で出力上限を調整(大きなJSON生成用)。"""
     if BACKEND == "claude_cli":
         return strip_think(claude_cli_text(system + "\n\n" + user))
     if BACKEND == "anthropic" and ANTHROPIC_KEY:
-        r = anthropic_call({"model": ANTHROPIC_MODEL, "max_tokens": 500,
+        r = anthropic_call({"model": ANTHROPIC_MODEL, "max_tokens": max(500, num_predict),
                             "system": system, "messages": [{"role": "user", "content": user}]})
         return "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
-    r = ollama_chat([{"role": "system", "content": system}, {"role": "user", "content": user}])
+    r = ollama_chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    num_predict=num_predict)
     return strip_think(r.get("message", {}).get("content", ""))
 
 
@@ -836,13 +1032,14 @@ def _load_bank():
 
 
 def gen_question(asked):
-    import re
+    import re, random
     # ① 事前生成バンク(Opus)から未出題を即提示。
-    #    人物バンクとPJ種別バンクを交互(インターリーブ)に出して両方を早く回す。
+    #    人物/PJ種別バンクを交互に出して両方を早く回す＋**出題順はランダム化**(殿御下命: 順番をランダムに)。
     recent_all = " ".join(asked)
     bank = _load_bank()
     persons = [q for q in bank if q.get("type") != "project"]
     projects = [q for q in bank if q.get("type") == "project"]
+    random.shuffle(persons); random.shuffle(projects)   # 毎回シャッフル→未出題からランダムに選ばれる
     inter = []
     for i in range(max(len(persons), len(projects))):
         if i < len(persons):
@@ -955,12 +1152,17 @@ def feed_ingest(filename, description, data_b64):
     fmt = ("出力形式を厳守(他に何も書かない):\n"
            "SUMMARY: <この資料が何で、何が読み取れるか。2〜4文>\n"
            "QUESTIONS: <解像度を上げる確認質問1> | <質問2> | <質問3>")
-    if is_image and BACKEND == "claude_cli":
-        # 画像は Sonnet の vision で直接解析
+    if is_image and VISION_BACKEND == "claude_cli":
+        # 画像は chat backend(ollama/qwen 等)に依らず Claude Sonnet の vision で直接解析
         vp = (build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。"
               f"\n\n説明(提供者記入): {description}\n\nこの画像資料を視認し、" + fmt)
         out = claude_cli_vision(path, vp)
-        text = "(画像: Casper vision で直接解析)"
+        if out.startswith("[vision error]") or out.startswith("[vision]"):   # vision 失敗時はテキスト抽出へ退避
+            text = casper_extract.extract(path) if casper_extract else "(抽出器なし)"
+            out = llm_text(build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。",
+                           f"資料ファイル名: {safe}\n説明: {description}\n抽出内容:\n{text[:8000]}\n\n" + fmt)
+        else:
+            text = "(画像: Casper vision[Sonnet] で直接解析)"
     else:
         text = casper_extract.extract(path) if casper_extract else "(抽出器なし)"
         system = (build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。"
@@ -973,6 +1175,167 @@ def feed_ingest(filename, description, data_b64):
     questions = [q.strip() for q in qm.group(1).split("|")] if qm else []
     return {"saved_as": safe, "summary": summary,
             "questions": [q for q in questions if q][:5], "extract_preview": text[:600]}
+
+
+IMPORT_LOG = os.path.join(HERE, "import_log.jsonl")
+
+
+def _import_log(rec):
+    """起票(構造化/修正)の LLM 入出力をログ(原因追跡用)。"""
+    try:
+        rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), **rec}
+        with open(IMPORT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _import_llm(system, user):
+    """起票の構造化/修正 LLM。既定 local(qwen・PII配慮)、CASPER_IMPORT_LLM=cloud で Sonnet。
+    cloud が空/エラー([claude-cli…])を返したら local(qwen)へ自動退避。"""
+    if IMPORT_LLM == "cloud" and CLAUDE_BIN:
+        out = strip_think(claude_cli_text(system + "\n\n" + user))
+        if out and not out.lstrip().startswith("[claude-cli"):
+            return out
+        _import_log({"fn": "_import_llm", "note": "cloud失敗→localへ退避", "cloud_out": (out or "")[:200]})
+    return llm_text(system, user, num_predict=8000)   # importは大JSON→出力上限を大きく(途中切れ防止)
+
+
+def _import_json(label, system, user, ctx=""):
+    """LLM 呼出→JSON抽出→ログ。失敗時は {"error":..,"raw":..} を返し raw もログに残す。"""
+    try:
+        out = _import_llm(system, user)
+    except Exception as e:
+        out = f"[exc] {e}"
+    m = re.search(r"\{.*\}", out or "", re.S)
+    d, ok = None, bool(m)
+    if ok:
+        try:
+            d = json.loads(m.group(0))
+        except Exception as e:
+            ok, d = False, {"_parse_err": str(e)}
+    _import_log({"fn": label, "llm": IMPORT_LLM, "ok": ok, "ctx": str(ctx)[:300], "out": (out or "")[:1000]})
+    if not ok:
+        err = "JSON抽出不可(LLMがJSONを返さず)" if d is None else f"JSON解析失敗: {d.get('_parse_err')}"
+        return {"error": err, "raw": (out or "")[:500]}
+    d.setdefault("project", {}); d.setdefault("shots", []); d.setdefault("tasks", [])
+    return d
+
+
+def project_import_structure(grid_text, hint=""):
+    """Excel 由来グリッド → 新規PJ＋shot/task の構造化提案(JSON)。視認系と同じく Sonnet で精度を出す。"""
+    sysp = (build_sys() + "\n\nあなたは制作管理のデータ起票アシスタント。Excel(多くは見積書)由来のグリッドから "
+            "Calendar 起票用に 新規プロジェクト＋shot(seq)＋task を構造化せよ。出力は厳密な JSON のみ(説明・コードフェンス禁止)。スキーマ:\n"
+            '{"project":{"name":"","description":"","start_date":"","end_date":"","_inferred":[]},'
+            '"shots":[{"code":"","name":"","note":"","_inferred":[]}],'
+            '"tasks":[{"shot":"","type":"","assignee":"","due":"","estimate":"","note":"","_inferred":[]}]}\n'
+            "■原本に在る情報はそのまま入れよ(工数/作業時間/見積→estimate、納期→due、制作指示→note 等)。\n"
+            "■**Calendar 起票に必要だが原本に無い項目**(担当者assignee・工程type・shot/seq・開始/期日 等)は、"
+            "**vault の社内知識(各人の役割や専門・PJの工程慣習・納期感)から妥当に推測して補え**。"
+            "推測で埋めた項目名は、その要素の **`_inferred` 配列**に必ず列挙せよ(例: \"_inferred\":[\"assignee\",\"type\"])。"
+            "原本から取れた値は _inferred に入れぬ。推測は『社内知識からの推定』に限り、根拠なき断定・捏造はするな(分からねば空＋_inferred に入れず空欄)。\n"
+            "■担当者(assignee)は **username(氏名)**。type は推奨値: animation/layout/comp/fx/lighting/asset/programming/design/testing/documentation/shoot/gs/report/other。\n"
+            "shot が無く task 主体なら shots は空配列で良い。")
+    user = f"ヒント(利用者記入): {hint}\n\n--- グリッド(Excel抽出) ---\n{grid_text[:12000]}"
+    return _import_json("structure", sysp, user, "hint=" + (hint or ""))
+
+
+def project_import_refine(proposal, instruction):
+    """起票案(JSON)にチャット修正指示を適用し、JSON全体を返す。視認/構造化と同じく Sonnet。"""
+    sysp = (build_sys() + "\n\nあなたは制作データ起票の編集アシスタント。現在の起票案(JSON)に対し、"
+            "ユーザーの修正指示を適用して**JSON全体**を返す。スキーマ(project/shots/tasks。taskは"
+            "shot/type/assignee/due/estimate(工数)/note、各要素に _inferred 配列=推測で埋めた項目名)。"
+            "指示箇所のみ変更し他は保持。追加・削除・値変更・一括変更に対応。"
+            "\n**_inferred の扱い**: ユーザーが指示である項目を明示的に確定/変更したら、その項目名を当該要素の `_inferred` から**除け**(確定済ゆえ赤表示を解く)。逆に新たに推測で補った項目は _inferred に加えよ。"
+            "\n**最重要: いかなる場合も JSON のみを返せ**。指示が曖昧・不完全でも、変更不要でも、確認や説明をしたくても、"
+            "散文や質問文で答えてはならぬ。その場合は現在の JSON をそのまま返し、伝えたい事があれば "
+            'project に "_note":"確認事項や補足" を加えよ(JSON の外には何も書くな)。**捏造禁止**。')
+    user = (f"現在の起票案:\n{json.dumps(proposal, ensure_ascii=False)}\n\n修正指示:\n{instruction}")
+    return _import_json("refine", sysp, user, "instr=" + (instruction or ""))
+
+
+def open_briefing(who):
+    """インデックス開門時の自動上奏: 挨拶＋本日タスク＋新着DM＋逆インタビュー1問。"""
+    import json as _j
+    h = datetime.datetime.now().hour
+    g = "おはようございます" if h < 11 else ("こんにちは" if h < 18 else "こんばんは")
+    lines = [f"{g}、殿。Casper にござる。"]
+    uid = who.get("uid")
+    if uid and WRITE_TOKEN and casper_mcp:
+        try:
+            tt = casper_mcp.call_tool("get_today_tasks", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
+            d = _j.loads(tt) if (tt or "").strip().startswith(("{", "[")) else None
+            items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
+            if isinstance(items, list):
+                lines.append(f"📋 本日のタスク: **{len(items)}件**{'' if items else '（なし）'}")
+        except Exception:
+            pass
+        try:
+            dm = casper_mcp.call_tool("get_messages", {"actor_id": uid, "limit": 30}, token=WRITE_TOKEN, actor=uid)
+            d = _j.loads(dm) if (dm or "").strip().startswith("{") else {}
+            th = sorted((d.get("threads", []) or []), key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:15]
+            if th:
+                # 未読判定を並列実行(get_messages が1件~2秒ゆえ直列だと遅い→並列で短縮)
+                import concurrent.futures as _cf
+
+                def _chk(t):
+                    try:
+                        r = casper_mcp.call_tool("get_messages",
+                                                 {"actor_id": int(uid), "thread_id": int(t.get("thread_id"))},
+                                                 token=WRITE_TOKEN, actor=uid)
+                        md = _j.loads(r) if (r or "").strip().startswith("{") else {}
+                        return (t, any(str(m.get("sender_id")) != str(uid) and not m.get("read_at")
+                                       for m in (md.get("messages", []) or [])))
+                    except Exception:
+                        return (t, False)
+                with _cf.ThreadPoolExecutor(max_workers=10) as _ex:
+                    unread = [t for t, un in _ex.map(_chk, th) if un]
+                unread.sort(key=lambda t: str(t.get("updated_at") or ""), reverse=True)
+                if unread:
+                    lines.append(f"💬 **新着DM {len(unread)}件**（未読・新しい順）")
+                    for t in unread:
+                        peers = [p for p in (t.get("participants") or []) if str(p.get("user_id")) != str(uid)]
+                        nm = "、".join(str(p.get("name") or p.get("user_id")) for p in peers[:2]) or "(自分)"
+                        ts = str(t.get("updated_at") or "")[5:16].replace("T", " ")
+                        snip = str(t.get("last_message") or "").replace("\n", " ").translate({ord(c): " " for c in "[]()"})[:40]
+                        pid = peers[0].get("user_id") if peers else ""
+                        # クリックで Casper 上にそのDMを開くリンク(casper-dm:thread:peer)
+                        lines.append(f"🔴 {ts}　[{nm}：{snip}](casper-dm:{t.get('thread_id')}:{pid})")
+                    lines.append("各行をクリックすると、そのDMをここに開きます。「○○さんに返信」で代筆も可。")
+        except Exception:
+            pass
+    elif not who.get("authed"):
+        lines.append("ログイン頂ければ、本日のタスク・新着DMもこの入口でお知らせいたす。")
+    lines.append("御用は何なりと、お申し付けを。")
+    return "\n".join(lines)
+
+
+def proposal_to_calendar_csv(prop):
+    """起票案 → Calendar 公式CSV(『プロジェクト情報』＋『タスク情報』の2セクション・テンプレ準拠)。"""
+    import csv, io, re as _re
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    proj = prop.get("project", {}) or {}
+    w.writerow(["プロジェクト情報", "", "", "", "", "", "", "", ""])
+    w.writerow(["プロジェクト名", "開始日", "終了日", "説明", "", "", "", "", ""])
+    w.writerow([proj.get("name", ""), proj.get("start_date", ""), proj.get("end_date", ""),
+                proj.get("description", ""), "", "", "", "", ""])
+    w.writerow(["", "", "", "", "", "", "", "", ""])
+    w.writerow(["タスク情報", "", "", "", "", "", "", "", ""])
+    w.writerow(["タスク名", "期日", "説明", "担当者", "コスト",
+                "タイプ(推奨:animation,layout,comp,fx,lighting,asset,programming,design,testing,documentation,shoot,gs,report,other)",
+                "seqID", "shotID", "依存タスク(複数ある場合はカンマ区切り)"])
+    for t in (prop.get("tasks") or []):
+        shot = t.get("shot", "") or ""
+        name = t.get("name") or (f"{shot} {t.get('type','')}".strip()) or shot or "task"
+        cost = str(t.get("estimate", "") or "")
+        m = _re.search(r"\d+(?:\.\d+)?", cost)
+        cost = m.group(0) if m else cost                      # "3h"→"3"
+        deps = t.get("dependsOn") or t.get("depends") or []
+        deps = ", ".join(deps) if isinstance(deps, list) else str(deps or "")
+        w.writerow([name, t.get("due", ""), t.get("note", ""), t.get("assignee", ""), cost,
+                    t.get("type", ""), t.get("seqID", "") or t.get("seq_code", ""), shot, deps])
+    return "﻿" + buf.getvalue()                          # BOM付(Excel/日本語対応)
 
 
 def feed_save(saved_as, description, summary, qa, filename):
@@ -1083,6 +1446,140 @@ def graph_data():
     return {"nodes": nodes, "links": links}
 
 
+def org_data():
+    """会社の組織構造(指示系統)をネットワークで返す。
+    studio bokan → Visual Arts / Spatial Tech の2部門 → 各領域(hp6準拠) → 社員(役割で配属)。
+    社員配属は名鑑(役割)からの推定。殿の訂正で ORG 定義を直すだけで反映される。"""
+    # 部門→領域(hp6 準拠)
+    ORG = {
+        "Visual Arts Division": ["VFX & Cinematic", "Animation & Character", "Design & Commercial"],
+        "Spatial Tech Division": ["Drone & Spatial", "DX Visualization", "R&D & Interactive"],
+    }
+    # 社員→領域(名鑑の役割から推定。uid は calendar_accounts と対応)
+    MEMBERS = [
+        # (表示名, 領域, uid, 役割)
+        ("黒丸クロマル", "Animation & Character", 46, "animator"),
+        ("Mabuchi Aogu", "Animation & Character", 38, "animator(OP/ED)"),
+        ("Rui", "Animation & Character", 37, "animation"),
+        ("tim", "Animation & Character", 42, "animation"),
+        ("hori shouichi", "Animation & Character", 34, "animation/AI生成"),
+        ("Li", "VFX & Cinematic", 43, "modeler"),
+        ("Yota Miyake", "VFX & Cinematic", 35, "modeler/LtCmp"),
+        ("Hnada Megumi", "VFX & Cinematic", 39, "lighting/comp"),
+        ("terajima", "VFX & Cinematic", 40, "lightcomp"),
+        ("yu", "VFX & Cinematic", 41, "lighting/comp"),
+        ("elvis", "R&D & Interactive", None, "program(Score)"),
+        ("nibu", "R&D & Interactive", 45, "開発"),
+        ("Hida", "VFX & Cinematic", 44, "(役割未確定)"),
+        ("Taoka", "Animation & Character", 32, "担当/制作"),
+        ("kohei", "DX Visualization", 29, "ディレクター/データ管理"),
+    ]
+    EXTERNAL = [("新井アライ", "VFX & Cinematic", "社外Houdini FX"),
+                ("PCL 越野", "Design & Commercial", "社外ディレクタ"),
+                ("タイプ", "VFX & Cinematic", "社外クラウドレンダ/FX"),
+                ("SOL", "VFX & Cinematic", "社外Houdini FX")]
+    nodes, links = [], []
+    nmap, seen_e = {}, set()
+
+    def addnode(n):
+        if n["id"] not in nmap:
+            nmap[n["id"]] = n; nodes.append(n)
+        return nmap[n["id"]]
+
+    def addlink(s, t):
+        if s != t and (s, t) not in seen_e and (t, s) not in seen_e:
+            seen_e.add((s, t)); links.append({"source": s, "target": t})
+
+    # ① 組織骨格: studio bokan → 部門 → 領域
+    addnode({"id": "studio bokan", "label": "studio bokan", "group": "root"})
+    for div, areas in ORG.items():
+        addnode({"id": div, "label": div, "group": "division"}); addlink("studio bokan", div)
+        for ar in areas:
+            addnode({"id": ar, "label": ar, "group": "area"}); addlink(div, ar)
+
+    # ② vault 全体グラフを取り込み(PJ/議事録/資料/学習/文化/人物のノートとエッジ)
+    g = graph_data()
+    for n in g["nodes"]:
+        addnode(dict(n))
+    for l in g["links"]:
+        addlink(l["source"], l["target"])
+
+    # ③ 人物表示名 → people ノート(base) の対応表(name: 行で照合)
+    import glob
+    V = os.path.join(HERE, "..", "vault")
+    name2base = {}
+    for p in glob.glob(os.path.join(V, "20_people", "*.md")):
+        try:
+            t = open(p, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        nm = (re.search(r"^name:\s*(.+)$", t, re.M) or [None, ""])[1].strip()
+        if nm:
+            name2base.setdefault(nm, os.path.splitext(os.path.basename(p))[0])
+
+    # ④ 領域 → 社員/社外 を接ぐ。vault ノートがあればそれを人物ノードとして領域に紐付け
+    #    (無ければ合成ノード)。これで PJ・議事録・資料が人物の言及エッジ経由で組織にぶら下がる。
+    def attach(nm, ar, group, uid=None, role=None):
+        base = name2base.get(nm)
+        if base and base in nmap:
+            nd = nmap[base]; nd["group"] = group; nd["label"] = nm
+            if uid is not None: nd["uid"] = uid
+            if role: nd["role"] = role
+            addlink(ar, base)
+        else:
+            n = {"id": nm, "label": nm, "group": group}
+            if uid is not None: n["uid"] = uid
+            if role: n["role"] = role
+            addnode(n); addlink(ar, nm)
+
+    for nm, ar, uid, role in MEMBERS:
+        attach(nm, ar, "people", uid, role)
+    for nm, ar, role in EXTERNAL:
+        attach(nm, ar, "external", None, role)
+
+    return {"nodes": nodes, "links": links}
+
+
+def node_data(node_id):
+    """1ノード(vaultノート)の中身を覗く: 種別・蒸留要約・つながり先を返す。"""
+    import glob
+    V = os.path.join(HERE, "..", "vault")
+    GROUP = {"20_people": "people", "90_db_archives": "project", "80_legacy_score": "legacy",
+             "10_meetings": "comms", "30_culture_rules": "company",
+             "50_asset_shadows": "asset", "00_inbox": "learned"}
+    target = None
+    for p in glob.glob(os.path.join(V, "**", "*.md"), recursive=True):
+        if os.path.splitext(os.path.basename(p))[0] == node_id:
+            target = p; break
+    if not target:
+        return {"error": "not found", "id": node_id}
+    rel = os.path.relpath(target, V)
+    folder = rel.split(os.sep)[0] if os.sep in rel else "root"
+    try:
+        t = open(target, encoding="utf-8", errors="replace").read()
+    except Exception as e:
+        return {"error": str(e), "id": node_id}
+    name = (re.search(r"^name:\s*(.+)$", t, re.M) or [None, node_id])[1].strip()
+    typ = (re.search(r"^type:\s*(.+)$", t, re.M) or [None, ""])[1].strip()
+    body = re.sub(r"^---\n.*?\n---\n", "", t, count=1, flags=re.S)      # frontmatter除去
+    body = re.sub(r"^#+\s*", "", body, flags=re.M)                       # 見出し記号除去
+    body = re.sub(r"\n{2,}", "\n", body).strip()
+    summary = body[:700]
+    # つながり(graph_data のエッジから当該ノードの隣接を抽出)
+    g = graph_data()
+    lbl = {n["id"]: n["label"] for n in g["nodes"]}
+    grp = {n["id"]: n["group"] for n in g["nodes"]}
+    neigh = []
+    for l in g["links"]:
+        if l["source"] == node_id and l["target"] in lbl:
+            neigh.append(l["target"])
+        elif l["target"] == node_id and l["source"] in lbl:
+            neigh.append(l["source"])
+    neigh = [{"id": x, "label": lbl.get(x, x), "group": grp.get(x, "other")} for x in dict.fromkeys(neigh)]
+    return {"id": node_id, "name": name, "type": typ, "group": GROUP.get(folder, "other"),
+            "folder": folder, "summary": summary, "neighbors": neigh}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1111,11 +1608,35 @@ class H(BaseHTTPRequestHandler):
             page = "play.html"
         elif self.path in ("/peek", "/peek.html", "/graph"):
             page = "graph.html"
+        elif self.path in ("/mcp", "/mcp.html"):
+            page = "mcp.html"
+        elif self.path in ("/import", "/import.html"):
+            page = "import.html"
+        elif self.path == "/api/mcp/servers":
+            who = identify(self)
+            if not who.get("uid"):
+                self._json({"error": "ログインが必要", "servers": []}); return
+            self._json({"servers": casper_user_mcp.servers(who["uid"]) if casper_user_mcp else []})
+            return
         elif self.path == "/api/graph":
             try:
                 self._json(graph_data())
             except Exception as e:
                 self._json({"error": str(e), "nodes": [], "links": []})
+            return
+        elif self.path == "/api/org":
+            try:
+                self._json(org_data())
+            except Exception as e:
+                self._json({"error": str(e), "nodes": [], "links": []})
+            return
+        elif self.path.startswith("/api/node"):
+            import urllib.parse as _up
+            nid = dict(_up.parse_qsl(_up.urlparse(self.path).query)).get("id", "")
+            try:
+                self._json(node_data(nid))
+            except Exception as e:
+                self._json({"error": str(e), "id": nid})
             return
         elif self.path == "/api/users":           # ログイン選択用の社員一覧
             try:
@@ -1133,6 +1654,12 @@ class H(BaseHTTPRequestHandler):
             import urllib.parse as _up
             tid = dict(_up.parse_qsl(_up.urlparse(self.path).query)).get("id", "")
             self._json(dm_messages(identify(self), tid))
+            return
+        elif self.path == "/api/briefing":         # 開門ブリーフィング(挨拶＋本日タスク＋新着DM＋逆IV1問)
+            try:
+                self._json({"text": open_briefing(identify(self))})
+            except Exception as e:
+                self._json({"text": "", "error": str(e)})
             return
         elif self.path == "/api/whoami":
             who = identify(self)
@@ -1227,6 +1754,26 @@ class H(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
+        if self.path.startswith("/api/mcp/"):     # 個人MCP管理(本人のみ・JWT検証済uid)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (who.get("uid") and casper_user_mcp):
+                self._json({"error": "ログインが必要"}); return
+            uid = who["uid"]
+            try:
+                if self.path == "/api/mcp/add":
+                    self._json(casper_user_mcp.add(uid, req.get("name", ""), req.get("url", ""),
+                                                   req.get("token", ""), req.get("transport", "http")))
+                elif self.path == "/api/mcp/remove":
+                    self._json(casper_user_mcp.remove(uid, req.get("name", "")))
+                elif self.path == "/api/mcp/toggle":
+                    self._json(casper_user_mcp.set_enabled(uid, req.get("name", ""), req.get("enabled", True)))
+                else:
+                    self._json({"error": "unknown"})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
         if self.path in ("/api/iv/next", "/api/iv/answer"):
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
@@ -1257,6 +1804,7 @@ class H(BaseHTTPRequestHandler):
                 try:
                     with urllib.request.urlopen(vr, timeout=8) as r:
                         ok = (r.status == 200)
+                        auth = json.load(r) if ok else {}
                 except urllib.error.HTTPError as he:
                     if he.code in (400, 401, 403):    # 認証失敗(email不一致 or パスワード違い)
                         self._json({"ok": False, "error": "ログインできません。Score と同じ『メールアドレス』と『パスワード』で入力してください（ユーザー名でなく Calendar 登録のメール）"}); return
@@ -1265,9 +1813,20 @@ class H(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "Calendar 認証サーバに接続できませぬ"}); return
                 if not ok:
                     self._json({"ok": False, "error": "メールまたはパスワードが違います"}); return
+                cal_uid, cal_name = "", email      # Calendar の現ユーザーから uid/name を確定→JWTに載せる
+                try:
+                    at = auth.get("access_token")
+                    if at:
+                        me = json.load(urllib.request.urlopen(urllib.request.Request(
+                            CAL_BASE + "/api/me", headers={"Authorization": f"Bearer {at}"}), timeout=8))
+                        cal_uid = str(me.get("id") or "")
+                        cal_name = me.get("name") or me.get("username") or email
+                except Exception:
+                    pass
                 import jwt as _jwt, time as _t
-                token = _jwt.encode({"sub": email, "exp": int(_t.time()) + 86400}, JWT_SECRET, algorithm="HS256")
-                uid = _email_to_uid(email)
+                token = _jwt.encode({"sub": email, "uid": cal_uid, "name": cal_name,
+                                     "exp": int(_t.time()) + 86400}, JWT_SECRET, algorithm="HS256")
+                uid = cal_uid or _email_to_uid(email)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Set-Cookie", f"casper_token={token}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax")
@@ -1302,6 +1861,55 @@ class H(BaseHTTPRequestHandler):
                     self._json(thread_delete(who, req.get("id")))
             except Exception as e:
                 self._json({"error": str(e)})
+            return
+        if self.path == "/api/vimeo/create":        # tus作成(本体はブラウザが直接Vimeoへ送る=大容量対応)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            try:
+                import casper_vimeo
+                r = casper_vimeo.create_upload(req.get("size", 0),
+                                               name=(req.get("title") or "upload.mp4"),
+                                               description=(req.get("description") or ""),
+                                               password=(req.get("password") or None))
+                self._json({"ok": True, **r})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)[:200]})
+            return
+        if self.path == "/api/vimeo/upload":        # 動画を Vimeo へアップ(Casper共有トークン=利用者の権限不問)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+
+            def _vlog(m):
+                try:
+                    with open(os.path.join(HERE, "vimeo_debug.log"), "a", encoding="utf-8") as f:
+                        f.write(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {m}\n")
+                except Exception:
+                    pass
+            try:
+                who = identify(self)
+                import base64 as _b64m, tempfile, casper_vimeo
+                raw = _b64m.b64decode((req.get("data_b64") or "").split(",")[-1])
+                fn = re.sub(r"[^A-Za-z0-9_.\-]", "_", req.get("filename") or "upload.mp4")
+                _vlog(f"start uid={who.get('uid')!r} authed={who.get('authed')} file={fn} bytes={len(raw)}")
+                if not raw:
+                    self._json({"ok": False, "error": "ファイルデータが空です。大容量だとブラウザで読めぬ場合あり(別方式が要るか確認します)"})
+                    _vlog("ERR empty data (大容量の可能性)")
+                    return
+                tmp = os.path.join(tempfile.gettempdir(), "casper_vimeo_" + fn)
+                with open(tmp, "wb") as f:
+                    f.write(raw)
+                r = casper_vimeo.upload(tmp, name=(req.get("title") or fn),
+                                        description=req.get("description") or "",
+                                        password=(req.get("password") or None))
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                _vlog(f"OK {r.get('link')}")
+                self._json({"ok": True, **r})
+            except Exception as e:
+                _vlog(f"ERR {e}")
+                self._json({"ok": False, "error": str(e)[:200]})
             return
         if self.path in ("/api/feed/ingest", "/api/feed/save"):
             n = int(self.headers.get("Content-Length", 0))
@@ -1362,6 +1970,112 @@ class H(BaseHTTPRequestHandler):
                                     "message": "🟡 確認のみ（QC/参照のCalendar登録はニブ/エルヴィス殿の書込許可後に接続）"})
             except Exception as e:
                 self._json({"error": str(e)})
+            return
+        if self.path == "/api/project_import/preview":   # Excel→新規PJ/shot/task 構造化プレビュー
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            try:
+                fn = req.get("filename", "import.xlsx"); b64 = req.get("data_b64", "")
+                grid = ""
+                if b64:
+                    os.makedirs(ASSET_FILES, exist_ok=True)
+                    safe = re.sub(r"[^\w.\-]", "_", os.path.basename(fn))[:60] or "import.xlsx"
+                    sp = os.path.join(ASSET_FILES, safe)
+                    with open(sp, "wb") as f:
+                        f.write(_b64.b64decode(b64.split(",")[-1]))
+                    grid = casper_extract.extract(sp) if casper_extract else "(抽出器なし)"
+                else:
+                    grid = req.get("grid", "")
+                prop = project_import_structure(grid, req.get("hint", ""))
+                self._json({"ok": "error" not in prop, "proposal": prop,
+                            "counts": {"shots": len(prop.get("shots", []) or []),
+                                       "tasks": len(prop.get("tasks", []) or [])},
+                            "grid_preview": (grid or "")[:600]})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/project_import/csv":       # 起票案 → Calendar公式CSV(ダウンロード用)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            try:
+                self._json({"ok": True, "csv": proposal_to_calendar_csv(req.get("proposal") or {})})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/project_import/refine":    # 起票案へチャット修正指示を適用
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            try:
+                rev = project_import_refine(req.get("proposal") or {}, req.get("instruction", ""))
+                self._json({"ok": "error" not in rev, "proposal": rev,
+                            "counts": {"shots": len(rev.get("shots", []) or []),
+                                       "tasks": len(rev.get("tasks", []) or [])}})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/project_import/commit":    # プレビュー承認→一括起票(create系MCP公開後に実発火)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            prop = req.get("proposal") or {}
+            avail = set()
+            if casper_mcp:
+                try:
+                    avail = {t["function"]["name"] for t in casper_mcp.list_tools(token=(WRITE_TOKEN or None))}
+                except Exception:
+                    pass
+            # 想定される create/import 系 MCP ツール名(ニブ公開待ち)
+            need = {"create_project", "create_shot", "create_shots", "import_shots",
+                    "create_task", "bulk_create_tasks", "ai_import_parse"}
+            pname = (prop.get("project") or {}).get("name", "?")
+            summary = (f"新規PJ一括起票「{pname}」 — shots {len(prop.get('shots',[]) or [])}件 / "
+                       f"tasks {len(prop.get('tasks',[]) or [])}件")
+            if not (WRITE_TOKEN and (avail & need)):
+                # create系未公開 → 提案を pending 登録(承認の記録)し、実起票は保留
+                pid = _register_pending("project_import", prop, who.get("uid"), summary)
+                self._json({"ok": False, "executed": False, "pending_id": pid, "summary": summary,
+                            "message": "create/import 系の Calendar MCP ツールが未公開のため、実起票は保留にござる"
+                                       "(ニブ殿の公開＋write token 更新後に即実行可)。プレビューは確定保存いたした。"})
+                return
+            # 公開済の将来パス: project→shots(import)→tasks の順で実行(actor=本人)
+            try:
+                actor = who.get("uid")
+                results = []
+                results.append(casper_mcp.call_tool("create_project", prop.get("project", {}),
+                                                    token=WRITE_TOKEN, actor=actor))
+                if prop.get("shots"):
+                    imp = "import_shots" if "import_shots" in avail else "create_shots"
+                    results.append(casper_mcp.call_tool(imp, {"shots": prop["shots"]}, token=WRITE_TOKEN, actor=actor))
+                if prop.get("tasks"):
+                    bt = "bulk_create_tasks" if "bulk_create_tasks" in avail else "create_task"
+                    results.append(casper_mcp.call_tool(bt, {"tasks": prop["tasks"]}, token=WRITE_TOKEN, actor=actor))
+                self._json({"ok": True, "executed": True, "summary": summary,
+                            "results": [str(r)[:500] for r in results]})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/confirm":            # Stage2: 承認待ち副作用操作の実行/却下
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            pid = req.get("id", ""); approve = bool(req.get("approve"))
+            pend = PENDING_ACTIONS.pop(pid, None)
+            if not pend:
+                self._json({"ok": False, "error": "提案が見つかりませぬ(期限切れか既処理)"}); return
+            if pend["uid"] and who.get("uid") and str(who["uid"]) != pend["uid"]:
+                self._json({"ok": False, "error": "本人のみ承認できまする"}); return
+            if not approve:
+                self._json({"ok": True, "executed": False, "message": "却下しました"}); return
+            if not WRITE_TOKEN:
+                self._json({"ok": False, "error": "write token 未設定のため実行できませぬ(ニブ殿の token 更新待ち)"}); return
+            try:
+                actor = who.get("uid") or pend["uid"]
+                result = (casper_mcp.call_tool(pend["tool"], pend["args"], token=WRITE_TOKEN, actor=actor)
+                          if casper_mcp else "(MCP無効)")
+                ok = not str(result).startswith("(MCP")
+                self._json({"ok": ok, "executed": True, "tool": pend["tool"], "result": str(result)[:2000]})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
             return
         if self.path == "/api/feedback":
             n = int(self.headers.get("Content-Length", 0))
@@ -1508,13 +2222,32 @@ class H(BaseHTTPRequestHandler):
         mcp_names = set()
         if casper_mcp:                              # MCP公開ツールを合流(同名は MCP 優先)
             try:
-                mt = casper_mcp.list_tools()
+                mt = casper_mcp.list_tools(token=(WRITE_TOKEN or None))   # write token で全6本を露出
+                if not mt and WRITE_TOKEN:                                # write token 不調なら read 権限で退避(読取2本を死守)
+                    mt = casper_mcp.list_tools()
                 mcp_names = {t["function"]["name"] for t in mt}
                 tools = mt + [t for t in tools if t["function"]["name"] not in mcp_names]
             except Exception:
                 pass
+        user_mcp_names = set()                      # ログイン中ユーザー個人の MCP ツール(本人権限)
+        if casper_user_mcp and who.get("uid"):
+            try:
+                ut = casper_user_mcp.tools(who["uid"])
+                user_mcp_names = {t["function"]["name"] for t in ut}
+                tools = ut + [t for t in tools if t["function"]["name"] not in user_mcp_names]
+            except Exception:
+                pass
+        tools = (tools or []) + [    # Vimeo ライブ検索 & パスワード設定(casper_vimeo)
+            {"type": "function", "function": {"name": "vimeo_search",
+             "description": "studio bokan の Vimeo ライブラリ(全動画・公開/非公開問わず)を名前で検索し、一致動画(タイトル・リンク・id)を返す。動画を探す/見せたい時に使う。",
+             "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "検索語(動画名やPJ名の一部)"}}, "required": ["query"]}}},
+            {"type": "function", "function": {"name": "vimeo_set_password",
+             "description": "指定 Vimeo 動画(video_id)にパスワード付き公開を設定し、共有リンクとパスワードを返す。video_id は vimeo_search の結果の id を使う。",
+             "parameters": {"type": "object", "properties": {"video_id": {"type": "string", "description": "動画のid(数値)またはURL"}, "password": {"type": "string", "description": "設定するパスワード"}}, "required": ["video_id", "password"]}}},
+        ]
         tools = tools or None
         final = ""
+        pending_actions = []                        # Stage2: 副作用操作の承認待ちキュー
         MAXIT = 6
         try:
             for it in range(MAXIT):
@@ -1533,8 +2266,27 @@ class H(BaseHTTPRequestHandler):
                                 args = json.loads(args)
                             except Exception:
                                 args = {}
-                        if fn in mcp_names and casper_mcp:    # MCP公開ツール
-                            result = casper_mcp.call_tool(fn, args, actor=who.get("uid"))
+                        if fn in user_mcp_names and casper_user_mcp:   # ユーザー個人MCP(本人権限)
+                            result = casper_user_mcp.call(who.get("uid"), fn, args, actor=who.get("uid"))
+                        elif fn in mcp_names and casper_mcp:           # MCP公開ツール(共通Calendar)
+                            if fn in MCP_ACTOR_TOOLS and who.get("uid") and isinstance(args, dict):
+                                args["actor_id"] = who["uid"]          # actor_id を本人uidで強制(qwen のspoof防止・schema必須対応)
+                            if fn in MCP_SIDE_EFFECT:                  # 副作用系=Stage2 承認ゲート(pending 登録・自動実行せず)
+                                summary = _action_summary(fn, args)
+                                pid = _register_pending(fn, args, who.get("uid"), summary)
+                                pending_actions.append({"id": pid, "tool": fn, "args": args, "summary": summary})
+                                result = (f"[承認待ち] 「{summary}」を提案として登録した(id={pid})。"
+                                          "副作用があるため、ユーザーが画面の承認ボタンを押すまで実行されぬ。"
+                                          "ユーザーには提案内容を1〜2文で説明し『下の承認ボタンで可否をご判断下され』と伝えよ。同じ操作を再呼出するな。")
+                            else:                                      # 読取系(get_messages 等)= write token+actor で実行
+                                result = casper_mcp.call_tool(fn, args, token=(WRITE_TOKEN or None),
+                                                              actor=who.get("uid"))
+                        elif fn in ("vimeo_search", "vimeo_set_password"):   # Vimeo ライブ検索/パスワード設定
+                            import casper_vimeo
+                            if fn == "vimeo_search":
+                                result = json.dumps(casper_vimeo.search(args.get("query", "")), ensure_ascii=False)
+                            else:
+                                result = json.dumps(casper_vimeo.set_password(args.get("video_id"), args.get("password", "")), ensure_ascii=False)
                         else:
                             result = casper_tools.execute(fn, args) if casper_tools else "(no tools)"
                         working.append({"role": "tool", "name": fn, "content": str(result)[:6000]})
@@ -1560,10 +2312,91 @@ class H(BaseHTTPRequestHandler):
         try:
             if diagram:
                 self.wfile.write((json.dumps({"diagram": diagram}) + "\n").encode())
+            for pa in pending_actions:              # Stage2: 承認待ち操作をUIへ
+                self.wfile.write((json.dumps({"confirm": pa}, ensure_ascii=False) + "\n").encode())
             self.wfile.write(b'{"done":true}\n')
         except Exception:
             pass
 
 
+def _warm_model_loop():
+    """qwen を常時温存(20分毎に1tokのpingでkeep_alive更新)→冷間再ロード(15〜40秒)を防ぐ。賢さは不変。"""
+    import time as _t
+    while True:
+        try:
+            wb = {"model": A.model, "messages": [{"role": "user", "content": "hi"}],
+                  "stream": False, "think": False, "keep_alive": "30m",
+                  "options": {"num_ctx": 24576, "num_predict": 1}}   # 実チャットと同 num_ctx(違うと積み直す)
+            urllib.request.urlopen(urllib.request.Request(OLLAMA, data=json.dumps(wb).encode(),
+                                   headers={"Content-Type": "application/json"}), timeout=120).read()
+        except Exception:
+            pass
+        _t.sleep(1200)
+
+
+def _build_profile(ukey):
+    """ukey ユーザーの会話履歴から個性プロファイルを合成→ vault/20_people/profile_<ukey>.md。"""
+    turns = []
+    try:
+        for line in open(CONVO_LOG, encoding="utf-8"):
+            r = json.loads(line)
+            if r.get("ukey") == ukey and r.get("content"):
+                lbl = "ユーザー" if r.get("role") == "user" else "Casper"
+                turns.append(f"{lbl}: {str(r['content'])[:280]}")
+    except Exception:
+        pass
+    turns = turns[-50:]
+    if len(turns) < 4:                       # 材料不足はスキップ(短期ノイズで人物像をブレさせない)
+        PROFILE_BUILT[ukey] = datetime.datetime.now(); DIRTY_USERS.pop(ukey, None); return False
+    m = re.match(r"u_(\d+)", ukey)
+    name = _uid_to_name(m.group(1)) if m else ukey
+    sysp = ("以下は社内ユーザーと Casper の会話履歴。この『ユーザー』本人の個性を、Casperが応対に活かすため簡潔にまとめよ。"
+            "観点: 性格・コミュニケーションの癖・関心/好み・働き方・避けたいこと。"
+            "**観察された事実のみ。憶測や決めつけは避け、根拠が薄いものは書かない**。3〜6行の箇条書き。"
+            "出力は必ず見出し『## Casper の理解』で始めること。")
+    usr = f"対象ユーザー: {name}\n\n## 会話履歴(直近)\n" + "\n".join(turns)
+    try:
+        out = strip_think(llm_text(sysp, usr, num_predict=900)).strip()
+    except Exception:
+        return False
+    if "## Casper の理解" not in out:
+        out = "## Casper の理解\n" + out
+    safe = re.sub(r"[^A-Za-z0-9_]", "", ukey)
+    p = os.path.join(VAULT, "20_people", f"profile_{safe}.md")
+    hdr = (f"---\nname: profile_{safe}\nuser: {name}\n"
+           f"updated: {datetime.datetime.now().isoformat(timespec='seconds')}\n---\n\n"
+           f"# {name} 個性プロファイル(Casper自動生成・アイドル便乗更新)\n\n")
+    try:
+        open(p, "w", encoding="utf-8").write(hdr + out + "\n")
+    except Exception:
+        return False
+    PROFILE_BUILT[ukey] = datetime.datetime.now(); DIRTY_USERS.pop(ukey, None)
+    return True
+
+
+def _profile_worker():
+    """リソース余力(アイドル)時に、変化のあったユーザーの個性プロファイルを1人ずつ更新。"""
+    import time as _t
+    while True:
+        _t.sleep(50)
+        try:
+            if (datetime.datetime.now() - LAST_CHAT_TS).total_seconds() < 90:
+                continue                                    # まだアイドルでない→本番チャットに譲る
+            now = datetime.datetime.now()
+            cand = None
+            for uk in list(DIRTY_USERS):
+                last = PROFILE_BUILT.get(uk)
+                if last and (now - last).total_seconds() < 6 * 3600:   # クールダウン6h
+                    DIRTY_USERS.pop(uk, None); continue
+                cand = uk; break
+            if cand:
+                _build_profile(cand)                        # 1巡で1人だけ(低負荷)
+        except Exception:
+            pass
+
+
+import threading as _threading
+_threading.Thread(target=_warm_model_loop, daemon=True).start()   # 起動直後からモデルを温め続ける
+_threading.Thread(target=_profile_worker, daemon=True).start()    # アイドル便乗で個性プロファイル育成
 print(f"Casper chat -> http://localhost:{A.port}  (model {A.model} @ {A.endpoint})", flush=True)
 ThreadingHTTPServer(("0.0.0.0", A.port), H).serve_forever()

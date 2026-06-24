@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casper — Excel から新規プロジェクト起票</title>
+<link rel="icon" type="image/jpeg" href="/icon">
+<style>
+  :root{--bg:#0b0f17;--card:#121826;--line:#1f2937;--txt:#e5e7eb;--mut:#94a3b8;--accent:#38bdf8;--ok:#22c55e;--warn:#f59e0b}
+  *{box-sizing:border-box}
+  body{margin:0;background:#070a10;color:var(--txt);font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:22px 18px 60px}
+  a.back{color:var(--mut);text-decoration:none;font-size:13px}
+  h1{font-size:20px;margin:10px 0 4px}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:14px 0}
+  .drop{border:1.5px dashed #334155;border-radius:12px;padding:26px;text-align:center;color:var(--mut);cursor:pointer}
+  .drop.hot{border-color:var(--accent);color:var(--txt)}
+  input[type=text]{width:100%;background:#0b1220;border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:9px 11px;font:inherit;margin-top:8px}
+  button{padding:9px 16px;border-radius:9px;border:1px solid var(--line);background:#1e293b;color:var(--txt);cursor:pointer;font:inherit}
+  button:hover{border-color:var(--accent)} button:disabled{opacity:.5;cursor:default}
+  button.primary{border-color:var(--accent)} button.go{border-color:var(--ok)}
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
+  th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+  th{background:#0b1220;color:var(--mut);font-weight:600}
+  .pill{display:inline-block;background:#0b1220;border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:12px;margin-right:6px}
+  .msg{margin-top:10px;font-size:13px}
+  .warn{color:var(--warn)} .ok{color:var(--ok)} .mut{color:var(--mut)}
+  pre{background:#0b1220;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;font-size:12px;color:var(--mut);max-height:160px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← Casper に戻る</a>
+  <h1>📥 Excel から新規プロジェクト起票</h1>
+  <div class="sub">Excel を渡すと、Casper が <b>プロジェクト / shot(seq) / task</b> を構造化して提案いたす。内容を確認のうえ一括起票(承認制)。</div>
+
+  <div class="card">
+    <div class="drop" id="drop">📄 ここに Excel(.xlsx)をドロップ、またはクリックして選択</div>
+    <input type="file" id="file" accept=".xlsx,.xls,.csv" style="display:none">
+    <input type="text" id="hint" placeholder="ヒント(任意): 例「○○案件のショットリスト。A列=カット番号、C列=担当」">
+    <div style="margin-top:10px"><button class="primary" id="prev" disabled>プレビュー生成</button> <span class="mut" id="fname"></span></div>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <div id="counts"></div>
+    <div id="proj"></div>
+    <div id="shots"></div>
+    <div id="tasks"></div>
+    <div style="background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:12px;margin:16px 0 0">
+      <div style="font-weight:600;margin-bottom:4px">💬 チャットで修正</div>
+      <div class="mut" style="font-size:12px;margin-bottom:8px">例:「C002 の担当を kohei に」「task の type を全部 lighting に」「shot を追加 C005 エンドロール」「期日を全部1週間後ろに」「説明を○○に直して」</div>
+      <div id="rlog"></div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input type="text" id="rin" placeholder="修正指示を入力して Enter…" style="flex:1;margin-top:0">
+        <button id="rsend">送信</button>
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+      <button id="csvdl">📥 Calendar用CSVをダウンロード</button>
+      <button class="go" id="commit">✅ この内容で確定・一括起票(アップ)</button>
+    </div>
+    <div class="msg" id="cmsg"></div>
+  </div>
+
+  <div class="card" id="raw" style="display:none">
+    <div class="mut" style="font-size:12px;margin-bottom:6px">抽出グリッド(先頭)</div>
+    <pre id="rawtext"></pre>
+  </div>
+</div>
+<script>
+let fileData=null, fileName='', proposal=null;
+const drop=document.getElementById('drop'), file=document.getElementById('file'),
+      prev=document.getElementById('prev'), fname=document.getElementById('fname');
+drop.onclick=()=>file.click();
+['dragover','dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();
+  drop.classList.toggle('hot',ev==='dragover');}));
+drop.addEventListener('drop',e=>{ if(e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+file.onchange=()=>{ if(file.files[0]) loadFile(file.files[0]); };
+function loadFile(f){ fileName=f.name; fname.textContent=f.name;
+  const rd=new FileReader(); rd.onload=()=>{ fileData=rd.result; prev.disabled=false; }; rd.readAsDataURL(f); }
+
+async function jpost(p,b){ const r=await fetch(p,{method:'POST',credentials:'same-origin',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); return r.json(); }
+
+prev.onclick=async()=>{
+  prev.disabled=true; prev.textContent='生成中…';
+  const res=await jpost('/api/project_import/preview',
+    {filename:fileName,data_b64:fileData,hint:document.getElementById('hint').value});
+  prev.textContent='プレビュー生成'; prev.disabled=false;
+  if(res.grid_preview){ document.getElementById('raw').style.display='block';
+    document.getElementById('rawtext').textContent=res.grid_preview; }
+  if(!res.ok){ alert('構造化に失敗: '+((res.proposal&&res.proposal.error)||res.error||'不明')); return; }
+  proposal=res.proposal; renderProposal();
+};
+
+function tbl(rows, cols){ if(!rows||!rows.length) return '<div class="mut" style="font-size:12px">（なし）</div>';
+  let h='<table><tr>'+cols.map(c=>'<th>'+c[1]+'</th>').join('')+'</tr>';
+  rows.forEach(r=>{ const inf=r._inferred||[];
+    h+='<tr>'+cols.map(c=>{ const v=String(r[c[0]]??'').replace(/</g,'&lt;');
+      const red=inf.indexOf(c[0])>=0;
+      return red ? '<td style="color:#f87171" title="Casperが社内知識から推測。要確認">'+(v||'—')+' ✎</td>'
+                 : '<td>'+v+'</td>'; }).join('')+'</tr>'; });
+  return h+'</table>'; }
+
+function renderProposal(){
+  document.getElementById('result').style.display='block';
+  const p=proposal.project||{};
+  const ns=(proposal.shots||[]).length, nt=(proposal.tasks||[]).length;
+  document.getElementById('counts').innerHTML=
+    '<span class="pill">PJ '+(p.name?1:0)+'</span><span class="pill">shots '+ns+'</span><span class="pill">tasks '+nt+'</span>'+
+    '<span style="color:#f87171;font-size:12px;margin-left:8px">🔴 赤字＋✎ = Casper が社内知識から推測(要確認)</span>';
+  const pinf=p._inferred||[];
+  const pf=(field,val)=>{ const red=pinf.indexOf(field)>=0;
+    return red?'<span style="color:#f87171" title="Casper推測">'+(val||'—')+' ✎</span>':(val||'');};
+  document.getElementById('proj').innerHTML='<h3 style="margin:14px 0 4px;font-size:15px">プロジェクト</h3>'+
+    '<div><b>'+pf('name',p.name||'(名称未抽出)')+'</b>'+
+    '<div class="mut">'+pf('description',p.description)+'</div>'+
+    '<div class="mut" style="font-size:12px">期間: '+pf('start_date',p.start_date)+' 〜 '+pf('end_date',p.end_date)+'</div>'+
+    (p._note?'<div class="warn" style="margin-top:4px">📝 Casper: '+p._note+'</div>':'')+'</div>';
+  document.getElementById('shots').innerHTML='<h3 style="margin:16px 0 4px;font-size:15px">shots (seq)</h3>'+
+    tbl(proposal.shots,[['code','code'],['name','name'],['note','note']]);
+  document.getElementById('tasks').innerHTML='<h3 style="margin:16px 0 4px;font-size:15px">tasks</h3>'+
+    tbl(proposal.tasks,[['shot','shot'],['type','type'],['assignee','担当'],['due','期日'],['estimate','工数'],['note','note']]);
+  document.getElementById('cmsg').textContent='';
+}
+
+const rin=document.getElementById('rin'), rsend=document.getElementById('rsend'), rlog=document.getElementById('rlog');
+async function refine(){
+  const instr=rin.value.trim(); if(!instr||!proposal) return;
+  rin.value=''; rsend.disabled=true;
+  const line=document.createElement('div'); line.style.cssText='font-size:13px;margin:4px 0;color:#94a3b8';
+  line.textContent='▶ '+instr+' …'; rlog.appendChild(line);
+  try{
+    const res=await jpost('/api/project_import/refine',{proposal:proposal,instruction:instr});
+    if(!res.ok){ const why=(res.proposal&&(res.proposal.raw||res.proposal.error))||res.error||'?';
+      line.style.color='#f59e0b'; line.textContent='▶ '+instr+' → Casper: '+why; return; }
+    proposal=res.proposal; renderProposal(); line.style.color='#22c55e'; line.textContent='✓ '+instr;
+  }catch(e){ line.style.color='#f87171'; line.textContent='▶ '+instr+' → 通信エラー(サーバ再起動中/タイムアウト?): '+(e&&e.message||e); }
+  finally{ rsend.disabled=false; rin.focus(); }
+}
+rsend.onclick=refine;
+rin.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); refine(); }});
+
+document.getElementById('csvdl').onclick=async()=>{
+  if(!proposal) return; const cm=document.getElementById('cmsg');
+  const res=await jpost('/api/project_import/csv',{proposal:proposal});
+  if(!res.ok){ cm.className='msg warn'; cm.textContent='CSV生成失敗: '+(res.error||'?'); return; }
+  const blob=new Blob([res.csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=((proposal.project&&proposal.project.name)||'project')+'_calendar.csv'; a.click();
+  URL.revokeObjectURL(a.href);
+  cm.className='msg ok'; cm.textContent='📥 Calendar用CSVをダウンロードしました(Calendarのインポートに使えまする)';
+};
+document.getElementById('commit').onclick=async()=>{
+  if(!proposal) return; const c=document.getElementById('commit'), cm=document.getElementById('cmsg');
+  c.disabled=true; cm.textContent='起票処理中…'; cm.className='msg mut';
+  const res=await jpost('/api/project_import/commit',{proposal:proposal});
+  if(res.executed){ cm.className='msg ok'; cm.textContent='✅ 一括起票しました: '+(res.results||[]).join(' / '); }
+  else { cm.className='msg warn'; cm.textContent='🟡 '+(res.message||res.error||'保留'); }
+  c.disabled=false;
+};
+</script>
+</body>
+</html>
