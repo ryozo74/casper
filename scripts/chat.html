@@ -329,7 +329,7 @@ async function ask(){
   let acc='',diagramUrl=null,pendingConfirms=[]; const t0=performance.now();
   try{
     const r=await fetch('/api/chat',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({messages:history})});
+      body:JSON.stringify({messages:history, thread:curThread})});
     const reader=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {value,done}=await reader.read(); if(done) break;
@@ -370,7 +370,16 @@ function renderConfirm(b, pa){
     rc.innerHTML='📨 宛先: <b style="font-size:18px;color:#fca5a5">'+esc(mto?mto[1].trim():'(不明)')+'</b> さん ← この方で間違いないですか？';
     rc.style.cssText='font-size:14px;margin-bottom:8px;padding:8px 10px;border:1px solid #ef4444;border-radius:8px;background:rgba(239,68,68,.12)';
   }
-  const s=document.createElement('div'); s.textContent=pa.summary||pa.tool; s.style.cssText='font-size:14px;margin-bottom:10px;white-space:pre-wrap';
+  const editable = pa.args && typeof pa.args.body==='string';   // 本文を持つ副作用(DM/Aurora)は編集可
+  const s=document.createElement('div');
+  s.textContent = editable ? (pa.summary||pa.tool).split('──')[0].trim() : (pa.summary||pa.tool);
+  s.style.cssText='font-size:14px;margin-bottom:8px;white-space:pre-wrap';
+  let ta=null, talb=null;
+  if(editable){
+    talb=document.createElement('div'); talb.textContent='本文（送信前に編集できます）:'; talb.style.cssText='font-size:12px;color:#94a3b8;margin-bottom:4px';
+    ta=document.createElement('textarea'); ta.value=pa.args.body||'';
+    ta.style.cssText='width:100%;box-sizing:border-box;min-height:84px;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;white-space:pre-wrap';
+  }
   const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px';
   const ok=document.createElement('button'); ok.textContent='✅ 承認して実行';
   const ng=document.createElement('button'); ng.textContent='却下';
@@ -378,11 +387,26 @@ function renderConfirm(b, pa){
   ok.style.borderColor='#22c55e';
   const rEl=document.createElement('div'); rEl.style.cssText='margin-top:8px;font-size:13px;color:#94a3b8';
   ok.onclick=async()=>{ ok.disabled=ng.disabled=true; rEl.textContent='実行中…';
-    const res=await jpost('/api/confirm',{id:pa.id,approve:true});
-    rEl.textContent=(res.ok&&res.executed)?('✅ 実行しました: '+(res.result||'')):('⚠️ '+(res.error||res.message||'失敗')); };
+    const res=await jpost('/api/confirm',{id:pa.id,approve:true, body: ta?ta.value:undefined});
+    if(res.ok&&res.executed){
+      if(pa.tool==='send_message'){
+        rEl.textContent='✅ 送信しました';
+        let tid=null; try{ tid=JSON.parse(res.result||'{}').thread_id; }catch(e){}
+        if(!tid){ const mm=String(res.result||'').match(/"thread_id"\s*:\s*(\d+)/); if(mm) tid=mm[1]; }
+        if(tid){ const mt=(pa.summary||'').match(/宛先[:：]\s*([^（(]+)（uid\s*(\d+)/);   // 自動で画面遷移せず、任意リンクに(混乱回避)
+          const lk=document.createElement('a'); lk.href='#'; lk.textContent='📨 この会話を開く';
+          lk.style.cssText='color:#38bdf8;margin-left:10px;text-decoration:underline';
+          lk.onclick=(e)=>{e.preventDefault();openDM({id:tid,peer:(mt?mt[1].trim():'DM'),peer_id:(mt?mt[2]:null)});};
+          rEl.appendChild(lk);
+        }
+      } else { rEl.textContent='✅ 実行しました: '+(res.result||''); }
+    } else { rEl.textContent='⚠️ '+(res.error||res.message||'失敗'); }
+  };
   ng.onclick=async()=>{ ok.disabled=ng.disabled=true; await jpost('/api/confirm',{id:pa.id,approve:false}); rEl.textContent='却下しました'; };
   bs.appendChild(ok); bs.appendChild(ng);
-  c.appendChild(h); if(rc) c.appendChild(rc); c.appendChild(s); c.appendChild(bs); c.appendChild(rEl);
+  c.appendChild(h); if(rc) c.appendChild(rc); c.appendChild(s);
+  if(ta){ c.appendChild(talb); c.appendChild(ta); }
+  c.appendChild(bs); c.appendChild(rEl);
   b.appendChild(c);
 }
 // ===== ユーザー & スレッド管理 =====
@@ -436,7 +460,10 @@ async function openDM(t){
   const b=el('bot'); b.classList.add('cursor');
   let r={messages:[]}; try{ r=await fetch('/api/dm/messages?id='+encodeURIComponent(t.id),{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
   b.classList.remove('cursor');
-  const lines=(r.messages||[]).map(m=>{
+  const lines=(r.messages||[])
+    .filter(m=>{ const b=String(m.body||m.content||'').trim();   // システムの初期化行等は隠す
+      return b && b!=='Task message thread initialized.'; })
+    .map(m=>{
     const nm=esc(m.sender_name||(m.sender_id==null?'システム':String(m.sender_id)));
     const ts=m.created_at?('（'+esc(String(m.created_at).slice(5,16).replace('T',' '))+'）'):'';
     return '**'+nm+'**'+ts+'：'+esc(String(m.body||m.content||''));

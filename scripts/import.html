@@ -157,6 +157,12 @@ document.getElementById('commit').onclick=async()=>{
   c.disabled=true; cm.textContent='起票処理中…'; cm.className='msg mut';
   const res=await jpost('/api/project_import/commit',{proposal:proposal});
   if(res.executed){ cm.className='msg ok'; cm.textContent='✅ 一括起票しました: '+(res.results||[]).join(' / '); }
+  else if(res.csv){ // 直接起票MCP未公開 → Calendar取込用CSVを自動DL(working path)
+    const blob=new Blob([res.csv],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    a.download=((proposal.project&&proposal.project.name)||'project')+'_calendar.csv'; a.click();
+    cm.className='msg ok'; cm.textContent='📥 '+(res.message||'Calendar取込用CSVをダウンロードしました(Calendarのインポートに通して起票)');
+  }
   else { cm.className='msg warn'; cm.textContent='🟡 '+(res.message||res.error||'保留'); }
   c.disabled=false;
 };

@@ -40,13 +40,13 @@ qwen が tool を自律呼出。左脳(Calendar)・右脳(vault RAG)・各種dig
 - **パスワード付き公開＋共有リンク**: hash付きリンク(`vimeo.com/ID/HASH`)を返却・チャットにプレイヤー埋め込み。`vimeo_set_password` ツール。
 - トークン: `.casper_vimeo_token`(scope: upload/edit/create/delete・git管理外)。
 
-### Aurora 連携(共有ノート図書館・準備中)
+### Aurora 連携(共有ノート図書館・**稼働中** 2026-06-25)
 **Aurora = ユーザー紐づきの会社の共有図書館。Casper はその司書。** 詳細設計: `docs/aurora_design_memo.md`。
-- **構成**: 棚=Elvis殿の HTML Archive Server(FastAPI/SQLite FTS5/HTMX/FastMCP 8100) / 筆=Aurora スキル(design_dataset)でHTML生成 / 司書=Casper(理解・サジェスト)。
-- **狙い**: 全ノートを Casper が理解し、会話中に「関連ノートがございます、読みますか?」と能動サジェスト。作成は双方向(Casper経由 / Aurora UI)。追記・編集・削除は **Git的に履歴**。
-- **すみ分け**: Elvis殿=棚と倉庫番(保存/履歴/検索基盤/書込口/認証)、こちら=司書と筆(理解/索引/サジェスト/HTML生成/結線)。
-- **こちら側 準備済**: `casper_aurora.py` — 接続層(MCP流用・config `.casper_aurora`)＋筆 `note_html`(整ったHTMLノート生成・動作確認済)。Elvis殿の URL/Bearer/書込MCP 到着で即結線。
-- **Elvis殿待ち(発注済 Q1〜Q5)**: 書込MCP(create/append/delete)・Git的履歴(編集/削除/diff/復元)・author/スコープ・更新検知API・Bearer発行。
+- **構成**: 棚=Elvis殿の HTML Archive Server(FastAPI/SQLite FTS5/FastMCP・`http://192.168.44.155:8100/mcp/`) / 筆=note整形(markdown→HTML) / 司書=Casper(検索・サジェスト・作成)。
+- **狙い**: 全ノートを Casper が検索・理解し、会話中に関連ノートを能動サジェスト。作成は双方向。追記・削除・復元は **Git的に履歴**。
+- **結線済ツール**: `aurora_search`(全文検索)/`aurora_get`(本文取得)/`aurora_create`(新規作成・**書込はStage2承認制**)。backend は計8ツール(read4+write4)。
+- **接続**: `.casper_aurora`(AURORA_MCP_URL＋write token・git管理外・600)。anti-spoof=Calendar同型(actor_idで実uid担保)。write token が read も兼ねる。
+- **すみ分け**: Elvis殿=棚と倉庫番(保存/履歴/検索基盤/書込口/認証)、こちら=司書と筆(検索/サジェスト/HTML生成/結線)。
 
 ### その他
 - **編集ロールバック**: 各ユーザー発言の「✏️編集」で、その地点まで巻き戻し→打ち直し→再生成。

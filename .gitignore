@@ -22,6 +22,9 @@ scripts/.casper_write_token
 scripts/casper_embed_index.json
 scripts/.casper_user_mcp.json
 scripts/.casper_user_mcp.json.tmp
+scripts/roster_cache.json
+scripts/events_store.jsonl
+scripts/.events_cursor*
 
 # === Casper 秘密/設定ファイル(全 .casper_ 系を遮断) ===
 scripts/.casper_*

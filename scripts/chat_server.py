@@ -29,6 +29,10 @@ try:
 except Exception:
     casper_user_mcp = None
 try:
+    import casper_aurora
+except Exception:
+    casper_aurora = None
+try:
     import casper_embed
 except Exception:
     casper_embed = None
@@ -132,33 +136,92 @@ if not WRITE_TOKEN:                                       # env 無ければロ�
             pass
 # 副作用のある MCP ツール(外向き/共有状態変更)= 自動実行せず確認ゲートに回す。
 # get_messages 等の読取系はゲート対象外(WRITE_TOKEN+actor で即実行)。
-MCP_SIDE_EFFECT = {"upload_asset", "add_reference_material", "send_message"}
+MCP_SIDE_EFFECT = {"upload_asset", "add_reference_material", "send_message", "update_task"}
 # actor_id(本人uid)を引数に要する MCP ツール。chat ループで本人uidを強制注入(spoof防止)。
-MCP_ACTOR_TOOLS = {"upload_asset", "add_reference_material", "send_message", "get_messages"}
+MCP_ACTOR_TOOLS = {"upload_asset", "add_reference_material", "send_message", "get_messages", "update_task"}
 
 # --- Stage2: 副作用ツールの「承認→実行」フロー(DM代筆・QC提出・参照登録) ---
 PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
+_AURORA_CUR = {}       # thread -> {doc_id, title}: 1スレッド=1資料の紐付け(更新はappend)
 
-_UID_NAME_CACHE = {}
+# --- 恒久 roster: token失効でも壊れぬ永続キャッシュ＋多源リフレッシュ(get_users優先→RO REST→DM収穫) ---
+ROSTER_FILE = os.path.join(HERE, "roster_cache.json")
+_ROSTER_MAP = {}                      # uid(str) -> username (ディスク永続)
+
+
+def _roster_save():
+    try:
+        json.dump(_ROSTER_MAP, open(ROSTER_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _roster_load():
+    try:
+        for k, v in json.load(open(ROSTER_FILE, encoding="utf-8")).items():
+            _ROSTER_MAP[str(k)] = v
+    except Exception:
+        pass
+
+
+def _roster_observe(participants):
+    """get_messages 等で見えた participants から uid->name を恒久キャッシュへ収穫(RO token不要)。"""
+    chg = False
+    for p in (participants or []):
+        uid, nm = p.get("user_id"), p.get("name")
+        if uid and nm and nm != "Me" and _ROSTER_MAP.get(str(uid)) != nm:
+            _ROSTER_MAP[str(uid)] = nm
+            chg = True
+    if chg:
+        _roster_save()
+        _ROSTER_CACHE["v"] = None      # 名簿テキストを作り直させる
+
+
+def _roster_refresh():
+    """全社名簿を集約: get_users(ニブ露出時・RO非依存)優先 → readonly REST。恒久キャッシュに合流。"""
+    got = {}
+    if casper_mcp and WRITE_TOKEN:
+        try:
+            avail = {t["function"]["name"] for t in casper_mcp.list_tools(token=WRITE_TOKEN)}
+        except Exception:
+            avail = set()
+        if "get_users" in avail:
+            try:
+                r = casper_mcp.call_tool("get_users", {}, token=WRITE_TOKEN)
+                d = json.loads(r) if isinstance(r, str) else r
+                items = d.get("items") or d.get("users") or (d if isinstance(d, list) else [])
+                for u in items:                       # ニブ get_users 返却: {uid, username, display_name}
+                    uid = u.get("uid") or u.get("id")
+                    nm = u.get("username") or u.get("display_name") or u.get("name")
+                    if uid and nm:
+                        got[str(uid)] = nm
+            except Exception:
+                pass
+    try:
+        for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []):
+            if u.get("id") and (u.get("username") or u.get("name")):
+                got[str(u["id"])] = u.get("username") or u.get("name")
+    except Exception:
+        pass
+    if got:
+        _ROSTER_MAP.update(got)
+        _roster_save()
+        _ROSTER_CACHE["v"] = None
+    return _ROSTER_MAP
+
+
+_roster_load()                       # 起動時に永続roster cacheを読み込む(token失効でも前回名簿を保持)
 
 
 def _uid_to_name(uid):
-    """uid → username に解決(承認カードで宛先を人が確認できるように)。"""
+    """uid → username。恒久 roster cache から引き、無ければリフレッシュ(RO非依存)。"""
     if not uid:
         return "?"
     uid = str(uid)
-    if uid in _UID_NAME_CACHE:
-        return _UID_NAME_CACHE[uid]
-    name = uid
-    try:
-        for u in (casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []):
-            if str(u.get("id")) == uid:
-                name = u.get("username") or u.get("name") or uid
-                break
-    except Exception:
-        pass
-    _UID_NAME_CACHE[uid] = name
-    return name
+    if uid in _ROSTER_MAP:
+        return _ROSTER_MAP[uid]
+    _roster_refresh()
+    return _ROSTER_MAP.get(uid, uid)
 
 
 def _action_summary(tool, args):
@@ -169,8 +232,21 @@ def _action_summary(tool, args):
             to = (a.get("to_user_id") or a.get("recipient_id") or a.get("to")
                   or a.get("user_id") or a.get("recipient") or "?")
             nm = _uid_to_name(to) if str(to).isdigit() else to
-            body = str(a.get("body") or a.get("content") or a.get("text") or a.get("message") or "")[:80]
-            return f"DM送信 → 宛先: {nm}（uid {to}）／ 本文: 「{body}」"
+            body = str(a.get("body") or a.get("content") or a.get("text") or a.get("message") or "")
+            return f"DM送信 → 宛先: {nm}（uid {to}）\n── 本文(全文) ──\n{body}"
+        if tool == "aurora_create":
+            return (f"Aurora ノート作成 → タイトル: {a.get('title') or '?'}\n"
+                    f"── 本文 ──\n{str(a.get('body') or '')}")
+        if tool == "aurora_append":
+            return (f"Aurora ノート修正(新版追加) → doc_id: {a.get('doc_id') or '?'}\n"
+                    f"── 修正後の本文 ──\n{str(a.get('body') or '')}")
+        if tool == "update_task":
+            ch = []
+            if a.get("assignee"): ch.append(f"担当 → {a['assignee']}")
+            if a.get("due"): ch.append(f"締切 → {a['due']}")
+            if a.get("status"): ch.append(f"状態 → {a['status']}")
+            if a.get("type"): ch.append(f"工程 → {a['type']}")
+            return f"タスク更新 → task[{a.get('task_id') or '?'}]\n── 変更 ──\n" + ("\n".join(ch) if ch else "(変更指定なし)")
         if tool == "upload_asset":
             return f"成果物アップロード(QC) → task[{a.get('task_id') or a.get('shot_id') or '?'}] / {a.get('filename') or a.get('file') or ''}"
         if tool == "add_reference_material":
@@ -186,6 +262,53 @@ def _register_pending(tool, args, uid, summary):
         for k in list(PENDING_ACTIONS)[:-50]:
             PENDING_ACTIONS.pop(k, None)
     return pid
+
+
+def _salvage_text_toolcall(final, who, pending_actions):
+    """qwenが send_message を呼ばず DM をテキストで書いた場合の救済(JSONブロック＋プロセ両対応)。
+    宛先uid/名＋本文を拾い pending 登録→承認カードを出す(ローカルqwenのfunction-calling不発対策)。"""
+    if pending_actions:                            # 既にツール呼出で pending 済なら不要
+        return final
+    f = final or ""
+    to = body = None
+    cut = None
+    # ① JSONブロック形 ```json {to_user_id, body}```
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", f, re.S)
+    if m:
+        try:
+            o = json.loads(m.group(1))
+            to = o.get("to_user_id") or o.get("recipient_id") or o.get("to") or o.get("user_id")
+            body = o.get("body") or o.get("content") or o.get("message") or o.get("text")
+            cut = (m.start(), m.end())
+        except Exception:
+            pass
+    # ② プロセ形 「宛先: 〇〇（uid31）… 本文: 〇〇」
+    if not (to and body):
+        mb = re.search(r"本文\**\s*[:：]\s*\**\s*(.+?)\s*(?:\n|$)", f)
+        if mb:
+            body = mb.group(1).strip().strip("*").strip()
+            um = re.search(r"uid\s*[:：]?\s*(\d+)", f)
+            if um:
+                to = um.group(1)
+            else:
+                mn = re.search(r"宛先\**\s*[:：]\s*\**\s*([^\n（(／/、 　]+)", f)
+                if mn:
+                    rev = {v: k for k, v in _ROSTER_MAP.items()}
+                    to = rev.get(mn.group(1).strip())
+    if not (to and body):
+        return final
+    args = {"to_user_id": to, "body": body}
+    if who.get("uid"):
+        args["actor_id"] = who["uid"]
+    summary = _action_summary("send_message", args)
+    pid = _register_pending("send_message", args, who.get("uid"), summary)
+    pending_actions.append({"id": pid, "tool": "send_message", "args": args, "summary": summary})
+    if cut:
+        f = (f[:cut[0]] + f[cut[1]:]).strip()
+    note = "（↓の承認カードで本文を確認・編集し、ボタンを押すと送信されます）"
+    return (f + "\n\n" + note) if f else note
+
+
 _EMAIL_UID_CACHE = {}
 
 
@@ -642,6 +765,8 @@ def dm_threads(who):
         raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
         data = json.loads(raw) if (raw or "").strip().startswith("{") else {}
         threads = sorted((data.get("threads") or []), key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:20]
+        for _t in threads:                              # DM participants から名簿を収穫(RO非依存で恒久cacheが育つ)
+            _roster_observe(_t.get("participants"))
 
         def _chk(t):                                   # 相手からの未読(read_at=None)があるスレッドか
             try:
@@ -776,24 +901,63 @@ _ROSTER_CACHE = {"v": None}
 
 
 def team_roster():
-    """社内メンバー username→uid 名簿(send_message の宛先取り違え防止)。一度だけ構築しキャッシュ。"""
-    if _ROSTER_CACHE["v"] is not None:
+    """社内メンバー username→uid 名簿(send_message の宛先取り違え防止)。恒久 roster cache 由来・RO非依存。"""
+    if not _ROSTER_MAP:
+        _roster_refresh()
+    n = len(_ROSTER_MAP)
+    if _ROSTER_CACHE["v"] is not None and _ROSTER_CACHE.get("n") == n:
         return _ROSTER_CACHE["v"]
+    pairs = [f"{nm}=uid{uid}" for uid, nm in
+             sorted(_ROSTER_MAP.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0)]
     out = ""
-    try:
-        items = casper_tools._get("/users?limit=200").get("items", []) if casper_tools else []
-        pairs = [f"{u.get('username')}=uid{u.get('id')}" for u in items if u.get("username")]
-        if pairs:
-            out = ("\n\n【社内メンバー名簿 — send_message の to_user_id は必ずこの対応で引け】\n"
-                   + " / ".join(pairs)
-                   + "\n【通称・別名】Elvis=ou(uid36)。通称で指示されたらこの対応で引け。"
-                   + "\n※宛先名に対応する uid を名簿/別名から**厳密に**引け。**推測・似た番号で代用するな**。"
-                   "名前が名簿にも別名にも無い/曖昧なら、**絶対に送信せず**『どなた宛でしょう？正式なお名前を』と確認せよ。"
-                   "send_message 提案時は宛先名を必ず明示し、送信後も『誰(名前)へ何を送ったか』を報告。")
-    except Exception:
-        out = ""
+    if pairs:
+        out = ("\n\n【社内メンバー名簿 — send_message の to_user_id は必ずこの対応で引け】\n"
+               + " / ".join(pairs)
+               + "\n【通称・別名】Elvis=ou(uid36)。通称で指示されたらこの対応で引け。"
+               + "\n※宛先名に対応する uid を名簿/別名から**厳密に**引け。**推測・似た番号で代用するな**。"
+               "名前が名簿にも別名にも無い/曖昧なら、**絶対に送信せず**『どなた宛でしょう？正式なお名前を』と確認せよ。"
+               "send_message 提案時は宛先名を必ず明示し、送信後も『誰(名前)へ何を送ったか』を報告。")
     _ROSTER_CACHE["v"] = out
+    _ROSTER_CACHE["n"] = n
     return out
+
+
+def _calendar_lookup_mcp(args, uid):
+    """calendar_lookup を MCP(write token・RO非依存)で実行。RO REST 401 の恒久回避。"""
+    if not (casper_mcp and WRITE_TOKEN):
+        return "(Calendar照会不可: MCP/token未設定)"
+    kind = (args or {}).get("kind") or "projects"
+    q = str((args or {}).get("query") or "").lower().strip()
+    actor = uid or 28
+    try:
+        if kind == "users":
+            d = json.loads(casper_mcp.call_tool("get_users", {"limit": 200}, token=WRITE_TOKEN))
+            items = d.get("items", [])
+            if q:
+                items = [u for u in items if q in (str(u.get("username") or "") + str(u.get("display_name") or "")).lower()]
+            return json.dumps({"total": len(items), "items": items[:40]}, ensure_ascii=False)
+        if kind == "tasks":
+            r = casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=actor)
+            d = json.loads(r) if isinstance(r, str) else r
+            items = d.get("items", d if isinstance(d, list) else [])
+            for k in ("query", "status", "assignee"):
+                v = str((args or {}).get(k) or "").lower()
+                if v:
+                    items = [t for t in items if v in json.dumps(t, ensure_ascii=False).lower()]
+            return json.dumps({"total": len(items), "items": items[:40],
+                               "note": "MCPの本日タスク中心(全期間照会は今後)"}, ensure_ascii=False)
+        # projects(既定)
+        r = casper_mcp.call_tool("get_projects", {}, token=WRITE_TOKEN, actor=actor)
+        d = json.loads(r) if isinstance(r, str) else r
+        items = d.get("items", d if isinstance(d, list) else [])
+        if q:
+            items = [p for p in items if q in (p.get("name") or "").lower()]
+        st = str((args or {}).get("status") or "").lower()
+        if st:
+            items = [p for p in items if st in (p.get("status") or "").lower()]
+        return json.dumps({"total": len(items), "items": items[:40]}, ensure_ascii=False)
+    except Exception as e:
+        return f"(calendar_lookup MCP失敗: {e})"
 
 
 def build_sys():
@@ -1229,6 +1393,12 @@ def project_import_structure(grid_text, hint=""):
             '{"project":{"name":"","description":"","start_date":"","end_date":"","_inferred":[]},'
             '"shots":[{"code":"","name":"","note":"","_inferred":[]}],'
             '"tasks":[{"shot":"","type":"","assignee":"","due":"","estimate":"","note":"","_inferred":[]}]}\n'
+            "■**最初に『ヘッダー行(列見出し)』を特定し、各列が何を表すかを解釈してから値を割り当てよ。**"
+            "原本の列の意味・順序・粒度を尊重し、列を取り違えるな。典型的な見積書の対応: "
+            "ショット/カット番号列→shot(code)、工程列(Lighting/Comp/FX/Animation/Layout/Asset/Modeling 等の語)→task.type、"
+            "人名/担当列→assignee、作業時間・人日・工数列→estimate、納期/期日/日付列→due、内容/制作指示/備考列→note。"
+            "**ヘッダーが無い/結合セル/縦持ち等で曖昧なら、列の値の中身(例: 'Lighting' という語が並ぶ列=type)から列の意味を推定**せよ。"
+            "**出力は読み込んだ原本に近い形(列対応・行構成が保たれた形)**にし、原本に無い行や列を勝手に作らぬこと。\n"
             "■原本に在る情報はそのまま入れよ(工数/作業時間/見積→estimate、納期→due、制作指示→note 等)。\n"
             "■**Calendar 起票に必要だが原本に無い項目**(担当者assignee・工程type・shot/seq・開始/期日 等)は、"
             "**vault の社内知識(各人の役割や専門・PJの工程慣習・納期感)から妥当に推測して補え**。"
@@ -2031,25 +2201,37 @@ class H(BaseHTTPRequestHandler):
             summary = (f"新規PJ一括起票「{pname}」 — shots {len(prop.get('shots',[]) or [])}件 / "
                        f"tasks {len(prop.get('tasks',[]) or [])}件")
             if not (WRITE_TOKEN and (avail & need)):
-                # create系未公開 → 提案を pending 登録(承認の記録)し、実起票は保留
+                # create系MCP未公開 → Calendar取込用CSVを返し『今すぐ起票できる』working pathに(承認は pending 登録)
                 pid = _register_pending("project_import", prop, who.get("uid"), summary)
-                self._json({"ok": False, "executed": False, "pending_id": pid, "summary": summary,
-                            "message": "create/import 系の Calendar MCP ツールが未公開のため、実起票は保留にござる"
-                                       "(ニブ殿の公開＋write token 更新後に即実行可)。プレビューは確定保存いたした。"})
+                try:
+                    csv_text = proposal_to_calendar_csv(prop)
+                except Exception:
+                    csv_text = ""
+                self._json({"ok": True, "executed": False, "via": "csv", "csv": csv_text,
+                            "pending_id": pid, "summary": summary,
+                            "message": "直接起票MCP(create系)は未公開のため、Calendar取込用CSVを用意いたした。"
+                                       "これを Calendar の CSV インポートに通せば今すぐ起票できまする"
+                                       "(create系MCP公開後は本ボタンから直接起票に切替わる)。プレビューは確定保存済。"})
                 return
             # 公開済の将来パス: project→shots(import)→tasks の順で実行(actor=本人)
             try:
+                import hashlib as _hl
                 actor = who.get("uid")
+                # client_ref=提案の安定ハッシュ(同一提案の再送→同キー→Nibu側で冪等dedup)
+                cref = "casper-" + _hl.sha1(json.dumps(prop, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
                 results = []
-                results.append(casper_mcp.call_tool("create_project", prop.get("project", {}),
+                results.append(casper_mcp.call_tool("create_project",
+                                                    {**prop.get("project", {}), "client_ref": cref + "-prj"},
                                                     token=WRITE_TOKEN, actor=actor))
                 if prop.get("shots"):
                     imp = "import_shots" if "import_shots" in avail else "create_shots"
-                    results.append(casper_mcp.call_tool(imp, {"shots": prop["shots"]}, token=WRITE_TOKEN, actor=actor))
+                    results.append(casper_mcp.call_tool(imp, {"shots": prop["shots"], "client_ref": cref + "-shots"},
+                                                        token=WRITE_TOKEN, actor=actor))
                 if prop.get("tasks"):
                     bt = "bulk_create_tasks" if "bulk_create_tasks" in avail else "create_task"
-                    results.append(casper_mcp.call_tool(bt, {"tasks": prop["tasks"]}, token=WRITE_TOKEN, actor=actor))
-                self._json({"ok": True, "executed": True, "summary": summary,
+                    results.append(casper_mcp.call_tool(bt, {"tasks": prop["tasks"], "client_ref": cref + "-tasks"},
+                                                        token=WRITE_TOKEN, actor=actor))
+                self._json({"ok": True, "executed": True, "summary": summary, "client_ref": cref,
                             "results": [str(r)[:500] for r in results]})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
@@ -2066,13 +2248,35 @@ class H(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "本人のみ承認できまする"}); return
             if not approve:
                 self._json({"ok": True, "executed": False, "message": "却下しました"}); return
+            if req.get("body") is not None and isinstance(pend.get("args"), dict):   # 承認カードで編集された本文を反映
+                pend["args"]["body"] = req["body"]
+                pend["summary"] = _action_summary(pend["tool"], pend["args"])
             if not WRITE_TOKEN:
                 self._json({"ok": False, "error": "write token 未設定のため実行できませぬ(ニブ殿の token 更新待ち)"}); return
             try:
                 actor = who.get("uid") or pend["uid"]
-                result = (casper_mcp.call_tool(pend["tool"], pend["args"], token=WRITE_TOKEN, actor=actor)
-                          if casper_mcp else "(MCP無効)")
-                ok = not str(result).startswith("(MCP")
+                if pend["tool"] in ("aurora_create", "aurora_append"):   # Aurora書込は casper_aurora 経由(write token・別endpoint)
+                    a = pend["args"] or {}
+                    uname = _uid_to_name(actor)            # 投稿者は username(casper でなく本人名)
+                    html = casper_aurora.make_note(a.get("title", ""), a.get("body", ""),
+                                                   author=uname, tags=a.get("tags"))
+                    if pend["tool"] == "aurora_create":
+                        result = casper_aurora.create(a.get("title", ""), html, author_id=uname, tags=a.get("tags"))
+                    else:                                  # aurora_append = 既存ノートの修正(新版)
+                        result = casper_aurora.append_version(a.get("doc_id", ""), html, author_id=uname)
+                    ok = bool(result) and not str(result).startswith("(")
+                    if ok and pend.get("thread"):          # 1スレ1資料: 作成/更新した資料をスレッドに束ねる
+                        try:
+                            rd = json.loads(result) if isinstance(result, str) else (result or {})
+                            did = rd.get("id") or a.get("doc_id")
+                            if did:
+                                _AURORA_CUR[pend["thread"]] = {"doc_id": did, "title": pend.get("title") or _AURORA_CUR.get(pend["thread"], {}).get("title", "")}
+                        except Exception:
+                            pass
+                else:
+                    result = (casper_mcp.call_tool(pend["tool"], pend["args"], token=WRITE_TOKEN, actor=actor)
+                              if casper_mcp else "(MCP無効)")
+                    ok = not str(result).startswith("(MCP")
                 self._json({"ok": ok, "executed": True, "tool": pend["tool"], "result": str(result)[:2000]})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
@@ -2100,6 +2304,7 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
         msgs = req.get("messages", [])
+        thr = str(req.get("thread", "") or "")          # 1スレ1資料 紐付け用
         fu = ("\n\n【選択式の回答】回答は『選んで深掘りできるリスト』で返すこと。"
               "回答が複数の候補(人物/プロジェクト/タスク/観点 等)になる場合は、本文は前置き1〜2文に抑え、"
               "候補それぞれを最後の行に次の形式で列挙せよ(装飾なし・これ以外を付けない):\n"
@@ -2245,6 +2450,21 @@ class H(BaseHTTPRequestHandler):
              "description": "指定 Vimeo 動画(video_id)にパスワード付き公開を設定し、共有リンクとパスワードを返す。video_id は vimeo_search の結果の id を使う。",
              "parameters": {"type": "object", "properties": {"video_id": {"type": "string", "description": "動画のid(数値)またはURL"}, "password": {"type": "string", "description": "設定するパスワード"}}, "required": ["video_id", "password"]}}},
         ]
+        if casper_aurora and casper_aurora.configured():   # Aurora 共有ノート図書館(司書)
+            tools = tools + [
+                {"type": "function", "function": {"name": "aurora_search",
+                 "description": "Aurora(全社共有ノート図書館: 議事録/レポート/分析等)を全文検索し、関連ノート(タイトル/id/抜粋/**閲覧url**)を返す。ユーザーが資料を探している時に使い、見つけたら**そのノートの url をクリックできるリンク [タイトル](url) としてユーザーに渡す**。",
+                 "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "検索語(日本語可)"}}, "required": ["query"]}}},
+                {"type": "function", "function": {"name": "aurora_get",
+                 "description": "Aurora のノート1件を id で取得し本文を返す。aurora_search の結果 id を使う。",
+                 "parameters": {"type": "object", "properties": {"doc_id": {"type": "string", "description": "ノートのid"}}, "required": ["doc_id"]}}},
+                {"type": "function", "function": {"name": "aurora_create",
+                 "description": "Aurora に新規ノートを作成する(会社の知識を文書化して共有書架へ)。本文は markdown 可。**書込=ユーザー承認が要る**。",
+                 "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string", "description": "ノート本文(markdown可)"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["title", "body"]}}},
+                {"type": "function", "function": {"name": "aurora_append",
+                 "description": "Aurora の既存ノートを修正(新しい版を追加・版履歴は backend が保持)。doc_id(aurora_search/get で得た id)と修正後の本文(markdown可・全文)を渡す。作成→修正→完成の『修正』はこれ。**書込=ユーザー承認が要る**。",
+                 "parameters": {"type": "object", "properties": {"doc_id": {"type": "string"}, "body": {"type": "string", "description": "修正後の本文 全文(markdown可)"}}, "required": ["doc_id", "body"]}}},
+            ]
         tools = tools or None
         final = ""
         pending_actions = []                        # Stage2: 副作用操作の承認待ちキュー
@@ -2275,9 +2495,10 @@ class H(BaseHTTPRequestHandler):
                                 summary = _action_summary(fn, args)
                                 pid = _register_pending(fn, args, who.get("uid"), summary)
                                 pending_actions.append({"id": pid, "tool": fn, "args": args, "summary": summary})
-                                result = (f"[承認待ち] 「{summary}」を提案として登録した(id={pid})。"
-                                          "副作用があるため、ユーザーが画面の承認ボタンを押すまで実行されぬ。"
-                                          "ユーザーには提案内容を1〜2文で説明し『下の承認ボタンで可否をご判断下され』と伝えよ。同じ操作を再呼出するな。")
+                                result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
+                                          "⚠️ **まだ実行しておらぬ**。ユーザーが画面下の承認ボタンを押すまで送信/実行されぬ。"
+                                          "**絶対に『送信しました/送りました/実行しました/作成しました』等の完了報告をするな**(嘘になる)。"
+                                          "正しくは『○○を下書きしました。下の承認ボタンを押すと実行されます』と案内せよ。同じ操作を再呼出するな。")
                             else:                                      # 読取系(get_messages 等)= write token+actor で実行
                                 result = casper_mcp.call_tool(fn, args, token=(WRITE_TOKEN or None),
                                                               actor=who.get("uid"))
@@ -2287,6 +2508,31 @@ class H(BaseHTTPRequestHandler):
                                 result = json.dumps(casper_vimeo.search(args.get("query", "")), ensure_ascii=False)
                             else:
                                 result = json.dumps(casper_vimeo.set_password(args.get("video_id"), args.get("password", "")), ensure_ascii=False)
+                        elif fn in ("aurora_search", "aurora_get", "aurora_create", "aurora_append"):   # Aurora 司書(read=直接 / 書込=Stage2)
+                            import casper_aurora as _au
+                            if fn == "aurora_search":
+                                result = str(_au.search(args.get("query", ""), limit=8))[:6000]
+                            elif fn == "aurora_get":
+                                result = str(_au.get(args.get("doc_id", "")))[:6000]
+                            else:                                  # aurora_create / aurora_append = 書込 → 承認ゲート(1スレ1資料 紐付け)
+                                cur = _AURORA_CUR.get(thr) if thr else None
+                                new_intent = bool(re.search(r"新規|新しく|新しい|別の|別に|もう[1一]つ|new doc", ll_user or ""))
+                                efn = fn
+                                if fn == "aurora_create" and cur and not new_intent:   # 既存資料あり&新規指定なし→同じ資料へ追記
+                                    efn = "aurora_append"; args = {"doc_id": cur["doc_id"], "body": args.get("body", "")}
+                                elif fn == "aurora_append" and not args.get("doc_id") and cur:
+                                    args["doc_id"] = cur["doc_id"]
+                                summary = _action_summary(efn, args)
+                                pid = _register_pending(efn, args, who.get("uid"), summary)
+                                PENDING_ACTIONS[pid]["thread"] = thr
+                                PENDING_ACTIONS[pid]["title"] = args.get("title", "")
+                                pending_actions.append({"id": pid, "tool": efn, "args": args, "summary": summary})
+                                result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
+                                          "⚠️ **まだ書き込んでおらぬ**。承認ボタンを押すまで実行されぬ。"
+                                          "**絶対に『作成しました/書きました/実行しました』等の完了報告をするな**(嘘になる)。"
+                                          "『○○を下書きしました。下の承認ボタンを押すと書き込まれます』と案内せよ。同じ操作を再呼出するな。")
+                        elif fn == "calendar_lookup":      # RO 401 恒久回避: MCP(write token)経由でライブ照会
+                            result = _calendar_lookup_mcp(args, who.get("uid"))
                         else:
                             result = casper_tools.execute(fn, args) if casper_tools else "(no tools)"
                         working.append({"role": "tool", "name": fn, "content": str(result)[:6000]})
@@ -2303,6 +2549,7 @@ class H(BaseHTTPRequestHandler):
         if not final:
             final = "(応答を得られませなんだ)"
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
+        final = _salvage_text_toolcall(final, who, pending_actions)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         final, diagram = render_diagram(final)
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
@@ -2349,12 +2596,24 @@ def _build_profile(ukey):
     if len(turns) < 4:                       # 材料不足はスキップ(短期ノイズで人物像をブレさせない)
         PROFILE_BUILT[ukey] = datetime.datetime.now(); DIRTY_USERS.pop(ukey, None); return False
     m = re.match(r"u_(\d+)", ukey)
-    name = _uid_to_name(m.group(1)) if m else ukey
-    sysp = ("以下は社内ユーザーと Casper の会話履歴。この『ユーザー』本人の個性を、Casperが応対に活かすため簡潔にまとめよ。"
-            "観点: 性格・コミュニケーションの癖・関心/好み・働き方・避けたいこと。"
-            "**観察された事実のみ。憶測や決めつけは避け、根拠が薄いものは書かない**。3〜6行の箇条書き。"
+    uid = m.group(1) if m else None
+    name = _uid_to_name(uid) if uid else ukey
+    # 動向: 本人の現在タスク(Calendarライブ・actor=本人)。トラックの"今"を先読みに合流。
+    doukou = ""
+    if uid and WRITE_TOKEN and casper_mcp:
+        try:
+            doukou = str(casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=int(uid)))[:800]
+        except Exception:
+            pass
+    sysp = ("以下は社内ユーザーと Casper の会話履歴＋本人の現在タスク(Calendar)。Casperが"
+            "**先読み応対**に活かすため、この『ユーザー』本人の人物像を簡潔にまとめよ。観点:\n"
+            "① 個性・コミュニケーションの癖・働き方・避けたいこと\n"
+            "② 関心/よく聞くこと(会話の頻出トピック・繰り返す懸念)\n"
+            "③ 現在の動向(担当・進行中の作業。タスクが在れば具体名で)\n"
+            "**観察された事実のみ。憶測・決めつけは避け、根拠が薄いものは書かない**。各観点1〜3行の箇条書き。"
             "出力は必ず見出し『## Casper の理解』で始めること。")
-    usr = f"対象ユーザー: {name}\n\n## 会話履歴(直近)\n" + "\n".join(turns)
+    usr = (f"対象ユーザー: {name}\n\n## 会話履歴(直近)\n" + "\n".join(turns)
+           + (f"\n\n## 現在のタスク(Calendar)\n{doukou}" if doukou else ""))
     try:
         out = strip_think(llm_text(sysp, usr, num_predict=900)).strip()
     except Exception:
@@ -2395,8 +2654,125 @@ def _profile_worker():
             pass
 
 
+# --- 全社ログ集約: get_events を定期 increment pull → 自前store(各人の動向/トラックの素) ---
+EVENTS_FILE = os.path.join(HERE, "events_store.jsonl")
+EVENTS_CURSOR = os.path.join(HERE, ".events_cursor")            # 後方互換(calendar 旧cursor)
+
+
+def _events_cursor_path(source):
+    return EVENTS_CURSOR if source == "calendar" else os.path.join(HERE, f".events_cursor_{source}")
+
+
+def _events_cursor_get(source="calendar"):
+    try:
+        return int(open(_events_cursor_path(source), encoding="utf-8").read().strip() or "0")
+    except Exception:
+        return 0
+
+
+def _events_pull_source(source, list_tools, call_get):
+    """1ソース(Calendar/Aurora/Score)の get_events を増分pull→events_store.jsonl 追記。
+    list_tools()→ツール名set / call_get(args)→結果。get_events 未露出なら 0(無害skip)。"""
+    try:
+        if "get_events" not in list_tools():
+            return 0
+    except Exception:
+        return 0
+    cur = _events_cursor_get(source)
+    try:
+        d = call_get({"actor_id": 28, "since": cur, "limit": 300})
+        d = json.loads(d) if isinstance(d, str) else d
+        evs = d.get("events") or []
+    except Exception:
+        return 0
+    if not evs:
+        return 0
+    mx = cur
+    with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+        for e in evs:
+            if not e.get("system"):
+                e["system"] = source
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            try:
+                mx = max(mx, int(e.get("seq", 0)))
+            except Exception:
+                pass
+    try:
+        open(_events_cursor_path(source), "w", encoding="utf-8").write(str(mx))
+    except Exception:
+        pass
+    return len(evs)
+
+
+def _events_pull_once():
+    """全社ログ集約: Calendar＋Aurora(＋将来Score)の get_events を多源pull。各源 get_events 未露出ならskip。"""
+    n = 0
+    if casper_mcp and WRITE_TOKEN:                              # ① Calendar
+        n += _events_pull_source(
+            "calendar",
+            lambda: {t["function"]["name"] for t in casper_mcp.list_tools(token=WRITE_TOKEN)},
+            lambda a: casper_mcp.call_tool("get_events", a, token=WRITE_TOKEN, actor=28))
+    try:                                                       # ② Aurora(Elvis殿 get_events 露出後 自動採用)
+        if casper_mcp and casper_aurora and casper_aurora.configured():
+            _u, _t = casper_aurora._conf()
+            n += _events_pull_source(
+                "aurora",
+                lambda: {t["function"]["name"] for t in casper_mcp.list_tools(token=_t, url=_u)},
+                lambda a: casper_mcp.call_tool("get_events", a, token=_t, url=_u))
+    except Exception:
+        pass
+    return n
+
+
+def _events_puller():
+    """5分ごとに全社イベントを増分集約(seq昇順・冪等)。各人の動向/トラックの一次データになる。"""
+    import time as _t
+    while True:
+        _t.sleep(300)
+        try:
+            n = _events_pull_once()
+            if n:
+                print(f"[events] +{n} (cursor={_events_cursor_get()})", flush=True)
+        except Exception:
+            pass
+
+
+def _digest_refresh_once():
+    """casper_context の元データ(projects/users)を MCP からライブ更新→digest再生成。RO非依存・恒久。"""
+    if not (casper_mcp and WRITE_TOKEN):
+        return
+    try:
+        pr = casper_mcp.call_tool("get_projects", {}, token=WRITE_TOKEN, actor=28)
+        pr = json.loads(pr) if isinstance(pr, str) else pr
+        json.dump({"items": pr.get("items", pr if isinstance(pr, list) else [])},
+                  open("/tmp/cal_projects.json", "w", encoding="utf-8"), ensure_ascii=False)
+        us = casper_mcp.call_tool("get_users", {"limit": 200}, token=WRITE_TOKEN)
+        us = json.loads(us) if isinstance(us, str) else us
+        json.dump({"items": [{"id": u.get("uid"), "username": u.get("username")} for u in us.get("items", [])]},
+                  open("/tmp/cal_users.json", "w", encoding="utf-8"), ensure_ascii=False)
+        import subprocess
+        subprocess.run(["python3", os.path.join(HERE, "build_brain_digest.py")],
+                       capture_output=True, timeout=90)
+    except Exception:
+        pass
+
+
+def _digest_refresh_loop():
+    """起動時＋30分ごとに digest をライブ更新(新規PJ/メンバーが先読み知識に即反映=V未表示の再発防止)。"""
+    import time as _t
+    _digest_refresh_once()
+    while True:
+        _t.sleep(1800)
+        try:
+            _digest_refresh_once()
+        except Exception:
+            pass
+
+
 import threading as _threading
 _threading.Thread(target=_warm_model_loop, daemon=True).start()   # 起動直後からモデルを温め続ける
 _threading.Thread(target=_profile_worker, daemon=True).start()    # アイドル便乗で個性プロファイル育成
+_threading.Thread(target=_events_puller, daemon=True).start()     # 全社ログ集約(get_events 増分pull)
+_threading.Thread(target=_digest_refresh_loop, daemon=True).start()  # digest をライブ自動更新(RO非依存・恒久)
 print(f"Casper chat -> http://localhost:{A.port}  (model {A.model} @ {A.endpoint})", flush=True)
 ThreadingHTTPServer(("0.0.0.0", A.port), H).serve_forever()
