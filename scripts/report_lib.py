@@ -117,6 +117,88 @@ def questions_for(rtype):
     return REPORT_TYPES.get(rtype, {}).get("questions", [])
 
 
+# ============ 整理術(思考フレーム)ライブラリ ============
+# Casper が「この資料にどの整理術が最適か」を判断 → その枠(slots)で構成＋質問を生やす。
+FRAMEWORKS = {
+    "skk": {
+        "label": "空・雨・傘",
+        "when": "現状→解釈→行動を導く（状況報告・判断を促す報告に最適）",
+        "slots": [
+            {"key": "sora", "title": "空（事実・現状）", "q": "いま起きている事実・現状は？"},
+            {"key": "ame", "title": "雨（解釈・示唆）", "q": "その事実をどう解釈する？リスク/示唆は？"},
+            {"key": "kasa", "title": "傘（行動・結論）", "q": "次にとる行動・結論は？"},
+        ],
+    },
+    "prep": {
+        "label": "PREP法",
+        "when": "主張を端的に伝え納得させる（提案・意見・説得に最適）",
+        "slots": [
+            {"key": "point", "title": "結論(Point)", "q": "いちばん伝えたい結論・主張は？"},
+            {"key": "reason", "title": "理由(Reason)", "q": "その理由は？"},
+            {"key": "example", "title": "具体例(Example)", "q": "裏付ける具体例・データは？"},
+            {"key": "point2", "title": "再結論(Point)", "q": "改めての結論・お願いは？（空欄可）"},
+        ],
+    },
+    "mece": {
+        "label": "MECE / 要素分解",
+        "when": "全体像を漏れなくダブりなく整理（分析・調査の整理に最適）",
+        "slots": [
+            {"key": "theme", "title": "論点", "q": "整理したい全体テーマ・問いは？"},
+            {"key": "axes", "title": "分解の切り口", "q": "どの切り口で分ける？（例: 要因別/部門別/時系列）"},
+            {"key": "elements", "title": "要素", "q": "各切り口の中身・要素は？"},
+            {"key": "insight", "title": "示唆", "q": "整理から見えた示唆は？"},
+        ],
+    },
+    "ksk": {
+        "label": "起承転結",
+        "when": "経緯を物語的に伝える（振り返り・経緯報告に最適）",
+        "slots": [
+            {"key": "ki", "title": "起（背景）", "q": "始まり・背景は？"},
+            {"key": "shou", "title": "承（展開）", "q": "どう進んだ？"},
+            {"key": "ten", "title": "転（転機・課題）", "q": "転機・課題・山場は？"},
+            {"key": "ketsu", "title": "結（結末・まとめ）", "q": "結末・まとめは？"},
+        ],
+    },
+}
+# 種別→既定の整理術(LLM判断のフォールバック)
+_FW_DEFAULT = {"research": "mece", "pj_final": "ksk"}
+
+
+def frameworks_list():
+    return [{"key": k, "label": v["label"], "when": v["when"]} for k, v in FRAMEWORKS.items()]
+
+
+def suggest_framework(goal, anchor="", rtype="", llm=None):
+    """この資料にどの整理術が最適かを判断。LLMに選ばせ、不発時は種別/既定でフォールバック。"""
+    keys = list(FRAMEWORKS.keys())
+    rec, rationale = _FW_DEFAULT.get(rtype, "skk"), ""
+    if llm:
+        try:
+            opts = "\n".join(f"- {k}: {FRAMEWORKS[k]['label']} — {FRAMEWORKS[k]['when']}" for k in keys)
+            sysp = ("あなたは資料設計のアドバイザー。作りたい資料に最適な『整理術』を1つ選ぶ。"
+                    "厳密なJSONのみ: {\"framework\":\"<key>\",\"rationale\":\"なぜ最適か1文\"}。key は与えた候補から。")
+            usr = f"作りたい資料の目的: {goal}\n対象: {anchor}\n種別: {rtype}\n\n候補:\n{opts}"
+            out = llm(sysp, usr, 300) or ""
+            m = re.search(r"\{.*\}", out, re.S)
+            if m:
+                d = json.loads(m.group(0))
+                if d.get("framework") in FRAMEWORKS:
+                    rec = d["framework"]; rationale = (d.get("rationale") or "")[:200]
+        except Exception:
+            pass
+    alts = [k for k in keys if k != rec]
+    return {"recommended": rec, "label": FRAMEWORKS[rec]["label"], "rationale": rationale, "alternatives": alts}
+
+
+def framework_plan(fw_key):
+    """整理術 → 構成(slots=章立て・既定1ページ)＋質問(slotの問い)。"""
+    fw = FRAMEWORKS.get(fw_key) or FRAMEWORKS["skk"]
+    sections = [{"key": s["key"], "title": s["title"], "hint": s["q"]} for s in fw["slots"]]
+    pages = [{"title": fw["label"], "sections": sections}]
+    questions = [{"key": s["key"], "q": s["q"], "type": "text"} for s in fw["slots"]]
+    return {"framework": fw_key, "framework_label": fw["label"], "pages": pages, "questions": questions}
+
+
 # ============ 第一稿生成(そぎ落とし) ============
 def generate_draft(rtype, structure, answers, context="", llm=None):
     """各章を簡潔に生成。LLMは {sections:{key:[blocks]}} のJSONを返す。block: {t:'p'|'ul'|'h3', text|items}。"""
@@ -126,7 +208,13 @@ def generate_draft(rtype, structure, answers, context="", llm=None):
     sec_keys = [s["key"] for p in structure.get("pages", []) for s in p["sections"]]
     if not sec_keys:
         sec_keys = [s["key"] for s in t["sections"]]
-    sched = {s["key"]: _sec(rtype, s["key"]) for s in t["sections"]}
+    # 章立て(title/hint)は構成から取得 → 整理術slots / 種別sections 両対応
+    sched = {}
+    for p in structure.get("pages", []):
+        for s in p["sections"]:
+            sched[s["key"]] = {"title": s.get("title", s["key"]), "hint": s.get("hint", "")}
+    for k in sec_keys:
+        sched.setdefault(k, _sec(rtype, k))
     plan = "\n".join(f"- {k}（{sched[k]['title']}）: {sched[k]['hint']}" for k in sec_keys)
     ans = "\n".join(f"- {k}: {v}" for k, v in (answers or {}).items() if v)
     schema = ('{"sections":{' + ",".join(f'"{k}":[]' for k in sec_keys) + '}}')

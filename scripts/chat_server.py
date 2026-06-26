@@ -2264,12 +2264,22 @@ class H(BaseHTTPRequestHandler):
                 pass
             self._json({"ok": bool(report_lib), "types": (report_lib.types_list() if report_lib else []), "projects": projs})
             return
-        if self.path == "/api/report/structure":   # 構成＋ページング提案(第一稿の主戦場)
+        if self.path == "/api/report/structure":   # 整理術判断→構成＋質問(第一稿の主戦場)
             n = int(self.headers.get("Content-Length", 0)); req = json.loads(self.rfile.read(n) or b"{}")
             try:
-                st = report_lib.propose_structure(req.get("rtype", ""), req.get("goal", ""), req.get("anchor", ""), llm=llm_text)
-                st["questions"] = report_lib.questions_for(req.get("rtype", ""))
-                self._json({"ok": "error" not in st, **st})
+                rtype = req.get("rtype", ""); goal = req.get("goal", ""); anchor = req.get("anchor", "")
+                fw = req.get("framework", "")
+                if fw in report_lib.FRAMEWORKS:    # ユーザーが整理術を切替えた場合
+                    sug = {"recommended": fw, "rationale": "", "alternatives": [k for k in report_lib.FRAMEWORKS if k != fw]}
+                else:                              # Casper が最適な整理術を判断
+                    sug = report_lib.suggest_framework(goal, anchor, rtype, llm=llm_text); fw = sug["recommended"]
+                plan = report_lib.framework_plan(fw)
+                self._json({"ok": True, "framework": fw, "framework_label": plan["framework_label"],
+                            "frameworks": report_lib.frameworks_list(),
+                            "rationale": sug.get("rationale", ""), "alternatives": sug.get("alternatives", []),
+                            "pages": plan["pages"], "questions": plan["questions"],
+                            "data_sources": report_lib.REPORT_TYPES.get(rtype, {}).get("data_sources", []),
+                            "label": report_lib.REPORT_TYPES.get(rtype, {}).get("label", "")})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return

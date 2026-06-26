@@ -735,21 +735,32 @@ function repTypeStep(types, projects){
   };
 }
 function repStructStep(r){
-  let h='<h3>② 構成案（第一稿の骨格）</h3>';
-  if(r.advice) h+='<div class="repadvice">💡 '+esc(r.advice)+'</div>';
-  h+=r.pages.map((p,i)=>`<div class="reppage"><b>ページ${i+1}: ${esc(p.title)}</b><ul>${p.sections.map(s=>`<li>${esc(s.title)}${s.hint?` <small>— ${esc(s.hint)}</small>`:''}</li>`).join('')}</ul></div>`).join('');
-  h+='<h3>③ 穴だけ教えて下さい</h3>';
+  repState.framework=r.framework; repState.structure={pages:r.pages};
+  let h='<h3>② Casperの整理術判断</h3>';
+  h+='<div class="repadvice">🧭 最適: <b>'+esc(r.framework_label||'')+'</b>'+(r.rationale?('<br><small>'+esc(r.rationale)+'</small>'):'')+'</div>';
+  if(r.frameworks&&r.frameworks.length){
+    h+='<div class="rephint">別の整理術に変える:</div><div class="repchoices" id="repFwSw">'+r.frameworks.map(f=>`<button class="repopt${f.key===r.framework?' sel':''}" data-fw="${f.key}" title="${esc(f.when||'')}">${esc(f.label)}</button>`).join('')+'</div>';
+  }
+  h+='<h3>構成（'+esc(r.framework_label||'')+'の枠）</h3>';
+  h+=r.pages.map(p=>`<div class="reppage"><b>${esc(p.title)}</b><ul>${p.sections.map(s=>`<li>${esc(s.title)}</li>`).join('')}</ul></div>`).join('');
+  h+='<h3>③ 穴だけ教えて下さい（'+esc(r.framework_label||'')+'の枠）</h3>';
   h+=(r.questions||[]).map(q=>{
     if(q.type==='choice'){ return `<label>${esc(q.q)}</label><div class="repchoices" data-qk="${q.key}">`+q.options.map(o=>`<button class="repopt" data-v="${esc(o)}">${esc(o)}</button>`).join('')+'</div>'; }
     return `<label>${esc(q.q)}</label><input class="repq" data-qk="${q.key}" placeholder="（任意・空欄可）">`;
   }).join('');
   h+='<button class="repbtn" id="repGen">第一稿を作る →</button>';
   repbody.innerHTML=h;
-  repbody.querySelectorAll('.repchoices').forEach(g=>g.querySelectorAll('.repopt').forEach(b=>b.onclick=()=>{ g.querySelectorAll('.repopt').forEach(x=>x.classList.remove('sel')); b.classList.add('sel'); }));
+  const sw=document.getElementById('repFwSw');
+  if(sw) sw.querySelectorAll('.repopt').forEach(b=>b.onclick=async()=>{
+    repbody.innerHTML='<div class="reploading">整理術を「'+esc(b.textContent)+'」に変えて組み直しています…</div>';
+    const rr=await jpost('/api/report/structure',{rtype:repState.rtype,goal:repState.goal,anchor:repState.anchor,framework:b.dataset.fw});
+    if(rr.ok) repStructStep(rr); else repbody.innerHTML='<div class="reperr">切替失敗</div>';
+  });
+  repbody.querySelectorAll('.repchoices[data-qk]').forEach(g=>g.querySelectorAll('.repopt').forEach(b=>b.onclick=()=>{ g.querySelectorAll('.repopt').forEach(x=>x.classList.remove('sel')); b.classList.add('sel'); }));
   document.getElementById('repGen').onclick=async()=>{
     const answers={};
     repbody.querySelectorAll('.repq').forEach(i=>{ if(i.value.trim()) answers[i.dataset.qk]=i.value.trim(); });
-    repbody.querySelectorAll('.repchoices').forEach(g=>{ const s=g.querySelector('.repopt.sel'); if(s) answers[g.dataset.qk]=s.dataset.v; });
+    repbody.querySelectorAll('.repchoices[data-qk]').forEach(g=>{ const s=g.querySelector('.repopt.sel'); if(s) answers[g.dataset.qk]=s.dataset.v; });
     repState.answers=answers;
     repbody.innerHTML='<div class="reploading">第一稿を生成しています…（数十秒お待ちを）</div>';
     const r2=await jpost('/api/report/draft',{rtype:repState.rtype,anchor:repState.anchor,structure:repState.structure,answers:answers});
