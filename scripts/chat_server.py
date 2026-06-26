@@ -2293,7 +2293,8 @@ class H(BaseHTTPRequestHandler):
                 dr = report_lib.generate_draft(rtype, structure, answers, context=ctx, llm=llm_text)
                 lbl = report_lib.REPORT_TYPES.get(rtype, {}).get("label", "報告書")
                 title = req.get("title") or (f"{anchor} {lbl}".strip())
-                uname = _uid_to_name(who.get("uid")) or "casper"
+                _uid = who.get("uid")   # 本人名優先(spoof不可)・未ログイン時のみ author 受理(_uid_to_name(None)='?'を避ける)
+                uname = (_uid_to_name(_uid) if _uid else None) or req.get("author") or "casper"
                 meta = f"著者: {uname} ／ 種別: {lbl} ／ 対象: {anchor or '—'}"
                 html = report_lib.render_blocks_html(title, meta, structure, dr["sections"])
                 res = casper_aurora.create(title, html, author_id=uname, project=(anchor or "報告書"),
