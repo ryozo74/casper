@@ -54,6 +54,36 @@
   #sidebar{position:fixed;top:0;left:0;bottom:0;width:280px;background:#0e1420;border-right:1px solid var(--line);z-index:30;transform:translateX(-100%);transition:.2s;display:flex;flex-direction:column;padding:14px}
   #sidebar.open{transform:translateX(0)}
   #sbmask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:29;display:none}
+  /* 報告書ビルダー(右スライドイン) */
+  #reppanel{position:fixed;top:0;right:0;bottom:0;width:min(560px,94vw);background:#0c1018;border-left:1px solid var(--line);z-index:40;transform:translateX(100%);transition:.22s;display:flex;flex-direction:column}
+  #reppanel.open{transform:translateX(0)}
+  #repmask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:39;display:none}
+  #rephead{display:flex;align-items:center;gap:8px;padding:13px 16px;border-bottom:1px solid var(--line);font-weight:700}
+  #rephead .x{margin-left:auto;cursor:pointer;font-size:18px;opacity:.7;background:none;border:none;color:inherit}
+  #repbody{flex:1;overflow:auto;padding:16px 18px;font-size:14px}
+  #repbody h3{margin:16px 0 8px;font-size:14px;color:#7dd3fc}
+  #repbody label{display:block;margin:12px 0 4px;font-size:12px;color:var(--mut)}
+  #repbody input,#repbody textarea{width:100%;box-sizing:border-box;background:#11182a;border:1px solid #243049;border-radius:8px;color:#e5e7eb;padding:8px 10px;font:inherit;font-size:13px}
+  .repcard{display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;background:#11182a;border:1px solid #243049;border-radius:10px;color:#e5e7eb;cursor:pointer;font:inherit}
+  .repcard.sel{border-color:#38bdf8;background:#15233a}
+  .repcard small{color:var(--mut)}
+  .reppage{background:#0f1828;border:1px solid #1f2c40;border-radius:10px;padding:8px 12px;margin:6px 0}
+  .reppage ul{margin:4px 0 0;padding-left:18px}.reppage small{color:var(--mut)}
+  .repadvice{background:linear-gradient(135deg,rgba(56,189,248,.12),rgba(167,139,250,.10));border:1px solid rgba(56,189,248,.3);border-radius:10px;padding:10px 12px;margin:8px 0;font-size:13px}
+  .repchoices{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
+  .repopt{padding:6px 12px;background:#11182a;border:1px solid #243049;border-radius:999px;color:#e5e7eb;cursor:pointer;font:inherit;font-size:12px}
+  .repopt.sel{border-color:#22c55e;background:#16321f}
+  #repbody .repbtn{margin-top:16px;padding:9px 16px;background:#1e293b;border:1px solid #38bdf8;border-radius:9px;color:#e5e7eb;cursor:pointer;font:inherit}
+  #repbody .repbtn:disabled{opacity:.4;cursor:default}
+  .reploading{padding:24px;text-align:center;color:var(--mut)}
+  .reperr{padding:12px;color:#fca5a5}
+  #reppreview{border:1px solid #1f2c40;border-radius:10px;padding:6px 14px;margin:8px 0;background:#0a0e16}
+  #reppreview .rblk{cursor:text;border-radius:6px;padding:1px 4px;transition:.1s}
+  #reppreview .rblk:hover{background:rgba(56,189,248,.08)}
+  #reppreview .repediting{background:rgba(56,189,248,.14);outline:1px solid #38bdf8}
+  #reppreview.drag{outline:2px dashed #38bdf8}
+  .rephd{display:flex;align-items:center;gap:8px;font-weight:700}.rephd a{color:#38bdf8;font-size:12px;text-decoration:none}
+  .rephint{font-size:12px;color:var(--mut);margin:4px 0}
   #sbmask.open{display:block}
   .sbhd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
   #newthread{height:32px;font-size:13px;padding:0 12px}
@@ -146,6 +176,11 @@
   <div id="threadlist"></div>
 </div>
 <div id="sbmask"></div>
+<div id="repmask"></div>
+<div id="reppanel">
+  <div id="rephead">📝 報告書を作る<button class="x" id="repClose">✕</button></div>
+  <div id="repbody"></div>
+</div>
 <div id="log"><div class="wrap" id="wrap"></div></div>
 <footer>
   <div id="attach"></div>
@@ -157,6 +192,7 @@
   </div>
   <div id="toolmenu" class="toolmenu" style="display:none">
     <div class="tmitem" data-tool="score_uploader">🎬 Score Uploader（成果物を投げる）</div>
+    <div class="tmitem" data-tool="report">📝 報告書を作る</div>
   </div>
   <input type="file" id="fileinp" accept="image/*,video/*" style="display:none">
   <div class="hint">応答に数秒〜十数秒かかることがあります。</div>
@@ -516,6 +552,7 @@ plus.onclick=()=>{ toolmenu.style.display = toolmenu.style.display==='none'?'blo
 document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
   toolmenu.style.display='none';
   if(it.dataset.tool==='score_uploader'){ uploaderOn=true; renderTools(); }
+  if(it.dataset.tool==='report'){ openReport(); }
 });
 function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
@@ -667,6 +704,98 @@ inp.addEventListener('keydown',e=>{
 });
 inp.addEventListener('input',()=>{ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,160)+'px';});
 inp.focus();
+
+// ===== 報告書ビルダー(構成助言→第一稿→プレビュー編集) =====
+const reppanel=document.getElementById('reppanel'), repbody=document.getElementById('repbody'), repmask=document.getElementById('repmask');
+let repState={};
+document.getElementById('repClose').onclick=repClose; repmask.onclick=repClose;
+function repClose(){ reppanel.classList.remove('open'); repmask.style.display='none'; }
+async function openReport(){
+  reppanel.classList.add('open'); repmask.style.display='block';
+  repState={}; repbody.innerHTML='<div class="reploading">読み込み中…</div>';
+  const r=await jpost('/api/report/types',{});
+  if(!r.ok){ repbody.innerHTML='<div class="reperr">報告書機能の読込に失敗</div>'; return; }
+  repTypeStep(r.types||[], r.projects||[]);
+}
+function repTypeStep(types, projects){
+  let h='<h3>① 何の報告書を作りますか？</h3>';
+  h+=types.map(t=>`<button class="repcard" data-rt="${t.key}"><b>${esc(t.label)}</b> <small>— ${esc(t.when)}</small><br><small>型: ${esc(t.framework)}</small></button>`).join('');
+  h+='<label>目的（ひとことで）</label><input id="repGoal" placeholder="例: marukomeレンダリング状況の最終報告">';
+  h+='<label>対象プロジェクト/出来事（アンカー）</label><input id="repAnchor" list="repPjs" placeholder="例: marukome">';
+  h+='<datalist id="repPjs">'+projects.map(p=>`<option value="${esc(p)}">`).join('')+'</datalist>';
+  h+='<button class="repbtn" id="repToStruct" disabled>構成を提案 →</button>';
+  repbody.innerHTML=h;
+  repbody.querySelectorAll('.repcard').forEach(c=>c.onclick=()=>{ repState.rtype=c.dataset.rt; repbody.querySelectorAll('.repcard').forEach(x=>x.classList.remove('sel')); c.classList.add('sel'); document.getElementById('repToStruct').disabled=false; });
+  document.getElementById('repToStruct').onclick=async()=>{
+    repState.goal=document.getElementById('repGoal').value.trim(); repState.anchor=document.getElementById('repAnchor').value.trim();
+    repbody.innerHTML='<div class="reploading">構成とページングを考えています…</div>';
+    const r=await jpost('/api/report/structure',{rtype:repState.rtype,goal:repState.goal,anchor:repState.anchor});
+    if(!r.ok){ repbody.innerHTML='<div class="reperr">構成提案に失敗: '+esc(r.error||'')+'</div>'; return; }
+    repState.structure={pages:r.pages,type:r.type}; repStructStep(r);
+  };
+}
+function repStructStep(r){
+  let h='<h3>② 構成案（第一稿の骨格）</h3>';
+  if(r.advice) h+='<div class="repadvice">💡 '+esc(r.advice)+'</div>';
+  h+=r.pages.map((p,i)=>`<div class="reppage"><b>ページ${i+1}: ${esc(p.title)}</b><ul>${p.sections.map(s=>`<li>${esc(s.title)}${s.hint?` <small>— ${esc(s.hint)}</small>`:''}</li>`).join('')}</ul></div>`).join('');
+  h+='<h3>③ 穴だけ教えて下さい</h3>';
+  h+=(r.questions||[]).map(q=>{
+    if(q.type==='choice'){ return `<label>${esc(q.q)}</label><div class="repchoices" data-qk="${q.key}">`+q.options.map(o=>`<button class="repopt" data-v="${esc(o)}">${esc(o)}</button>`).join('')+'</div>'; }
+    return `<label>${esc(q.q)}</label><input class="repq" data-qk="${q.key}" placeholder="（任意・空欄可）">`;
+  }).join('');
+  h+='<button class="repbtn" id="repGen">第一稿を作る →</button>';
+  repbody.innerHTML=h;
+  repbody.querySelectorAll('.repchoices').forEach(g=>g.querySelectorAll('.repopt').forEach(b=>b.onclick=()=>{ g.querySelectorAll('.repopt').forEach(x=>x.classList.remove('sel')); b.classList.add('sel'); }));
+  document.getElementById('repGen').onclick=async()=>{
+    const answers={};
+    repbody.querySelectorAll('.repq').forEach(i=>{ if(i.value.trim()) answers[i.dataset.qk]=i.value.trim(); });
+    repbody.querySelectorAll('.repchoices').forEach(g=>{ const s=g.querySelector('.repopt.sel'); if(s) answers[g.dataset.qk]=s.dataset.v; });
+    repState.answers=answers;
+    repbody.innerHTML='<div class="reploading">第一稿を生成しています…（数十秒お待ちを）</div>';
+    const r2=await jpost('/api/report/draft',{rtype:repState.rtype,anchor:repState.anchor,structure:repState.structure,answers:answers});
+    if(!r2.ok){ repbody.innerHTML='<div class="reperr">生成失敗: '+esc(r2.error||'')+'</div>'; return; }
+    repState.doc_id=r2.doc_id; repState.html=r2.html; repState.url=r2.url; repState.title=r2.title; repPreviewStep();
+  };
+}
+function repPreviewStep(){
+  let h='<div class="rephd">📄 '+esc(repState.title||'報告書')+' <a href="'+repState.url+'" target="_blank">↗ Aurora</a></div>';
+  h+='<div class="rephint">ブロックをクリック→その場で編集。画像はここにドロップで挿入。終えたら保存。</div>';
+  h+='<div id="reppreview"></div>';
+  h+='<button class="repbtn" id="repSave">💾 保存（新版）</button> <span id="repSaveMsg" style="font-size:12px;color:var(--mut)"></span><br>';
+  h+='<button class="repbtn" id="repNew" style="border-color:#243049">＋ 別の報告書</button>';
+  repbody.innerHTML=h;
+  const doc=new DOMParser().parseFromString(repState.html,'text/html');
+  const wrap=doc.querySelector('.wrap'); repState._doc=doc; repState._wrap=wrap;
+  const prev=document.getElementById('reppreview');
+  prev.innerHTML = wrap ? wrap.innerHTML : repState.html;
+  repWireEdit(prev); repWireDrop(prev);
+  document.getElementById('repSave').onclick=async()=>{
+    if(repState._wrap){ repState._wrap.innerHTML=prev.innerHTML; repState.html='<!DOCTYPE html>'+doc.documentElement.outerHTML; }
+    const msg=document.getElementById('repSaveMsg'); msg.textContent='保存中…';
+    const r=await jpost('/api/report/save',{doc_id:repState.doc_id,html:repState.html});
+    msg.textContent = r.ok ? ('✅ 保存しました（v'+(r.version||'?')+'）') : ('⚠️ '+(r.error||'失敗'));
+  };
+  document.getElementById('repNew').onclick=openReport;
+}
+function repWireEdit(root){
+  root.querySelectorAll('.rblk').forEach(el=>{
+    el.onclick=()=>{ if(el.getAttribute('contenteditable')==='true') return; el.setAttribute('contenteditable','true'); el.classList.add('repediting'); el.focus(); };
+    el.onblur=()=>{ el.removeAttribute('contenteditable'); el.classList.remove('repediting'); };
+  });
+}
+function repWireDrop(root){
+  root.addEventListener('dragover',e=>{ e.preventDefault(); root.classList.add('drag'); });
+  root.addEventListener('dragleave',()=>root.classList.remove('drag'));
+  root.addEventListener('drop',e=>{
+    e.preventDefault(); root.classList.remove('drag');
+    const f=(e.dataTransfer.files||[])[0]; if(!f||!f.type.startsWith('image/')) return;
+    if(f.size>500*1024){ alert('画像が大きいです（500KB以内を推奨）'); return; }
+    const rd=new FileReader();
+    rd.onload=()=>{ const img=document.createElement('img'); img.src=rd.result; img.style.maxWidth='100%'; img.alt=f.name;
+      const tgt=e.target.closest('.rblk'); if(tgt&&tgt.parentNode){ tgt.parentNode.insertBefore(img,tgt.nextSibling);} else { root.appendChild(img);} };
+    rd.readAsDataURL(f);
+  });
+}
 </script>
 </body>
 </html>

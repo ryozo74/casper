@@ -33,6 +33,10 @@ try:
 except Exception:
     casper_aurora = None
 try:
+    import report_lib
+except Exception:
+    report_lib = None
+try:
     import casper_embed
 except Exception:
     casper_embed = None
@@ -1144,6 +1148,22 @@ def llm_text(system, user, num_predict=1536):
     return strip_think(r.get("message", {}).get("content", ""))
 
 
+def _report_context(anchor, rtype=""):
+    """報告書の第一稿に渡す社内文脈。アンカーPJの status/期間 等を digest から拾う(先埋め)。"""
+    if not anchor:
+        return ""
+    lines = []
+    try:
+        for p in json.load(open("/tmp/cal_projects.json")).get("items", []):
+            nm = (p.get("name") or "")
+            if nm and (anchor.lower() in nm.lower() or nm.lower() in anchor.lower()):
+                lines.append(f"対象PJ: {nm} / status:{p.get('status')} / 期間:{p.get('start_date')}〜{p.get('end_date')}")
+                break
+    except Exception:
+        pass
+    return "\n".join(lines) or f"対象: {anchor}"
+
+
 # === 逆インタビュー (Casper が問い、答えを覚える) ===
 LEARN_LOG = os.path.join(HERE, "..", "vault", "00_inbox", "casper_learned.md")
 
@@ -2233,6 +2253,60 @@ class H(BaseHTTPRequestHandler):
                                                         token=WRITE_TOKEN, actor=actor))
                 self._json({"ok": True, "executed": True, "summary": summary, "client_ref": cref,
                             "results": [str(r)[:500] for r in results]})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/report/types":       # 報告書ビルダー: 種別一覧＋アンカーPJ候補
+            projs = []
+            try:
+                projs = [p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", []) if p.get("name")]
+            except Exception:
+                pass
+            self._json({"ok": bool(report_lib), "types": (report_lib.types_list() if report_lib else []), "projects": projs})
+            return
+        if self.path == "/api/report/structure":   # 構成＋ページング提案(第一稿の主戦場)
+            n = int(self.headers.get("Content-Length", 0)); req = json.loads(self.rfile.read(n) or b"{}")
+            try:
+                st = report_lib.propose_structure(req.get("rtype", ""), req.get("goal", ""), req.get("anchor", ""), llm=llm_text)
+                st["questions"] = report_lib.questions_for(req.get("rtype", ""))
+                self._json({"ok": "error" not in st, **st})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/report/draft":       # 第一稿生成→Aurora保存
+            n = int(self.headers.get("Content-Length", 0)); req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            try:
+                rtype = req.get("rtype", ""); structure = req.get("structure") or {}
+                answers = req.get("answers") or {}; anchor = req.get("anchor", "")
+                ctx = _report_context(anchor, rtype)
+                dr = report_lib.generate_draft(rtype, structure, answers, context=ctx, llm=llm_text)
+                lbl = report_lib.REPORT_TYPES.get(rtype, {}).get("label", "報告書")
+                title = req.get("title") or (f"{anchor} {lbl}".strip())
+                uname = _uid_to_name(who.get("uid")) or "casper"
+                meta = f"著者: {uname} ／ 種別: {lbl} ／ 対象: {anchor or '—'}"
+                html = report_lib.render_blocks_html(title, meta, structure, dr["sections"])
+                res = casper_aurora.create(title, html, author_id=uname, project=(anchor or "報告書"),
+                                           work="報告書", tags=["report", rtype])
+                rd = json.loads(res) if isinstance(res, str) else (res or {})
+                doc_id = rd.get("id")
+                url = (casper_aurora.doc_base().rstrip("/") + "/doc/" + doc_id + "/raw") if doc_id else ""
+                self._json({"ok": bool(doc_id), "doc_id": doc_id, "slug": rd.get("slug"), "url": url,
+                            "html": html, "draft_ok": dr.get("ok"), "title": title})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/report/save":        # 編集後の全文HTMLを新版保存(クリック編集の保存)
+            n = int(self.headers.get("Content-Length", 0)); req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            try:
+                doc_id = req.get("doc_id", ""); html = req.get("html", "")
+                if not (doc_id and html):
+                    self._json({"ok": False, "error": "doc_id/html 必須"}); return
+                uname = _uid_to_name(who.get("uid")) or "casper"
+                res = casper_aurora.append_version(doc_id, html, author_id=uname)
+                rd = json.loads(res) if isinstance(res, str) else (res or {})
+                self._json({"ok": bool(rd), "version": rd.get("version")})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
