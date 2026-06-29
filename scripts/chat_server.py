@@ -89,6 +89,13 @@ DIAG_HINT = ("\n\n【見せ方は内容に応じて自分で判断せよ】答�
     "・表/mermaid/数値で表せない独自のビジュアル(図形・レイアウト・簡単なインタラクション) → "
     "```html フェンスで**自己完結HTML/SVG**(外部依存なし・1ファイル完結・<style>同梱)。"
     "隔離サンドボックスで描画される。本当に必要な時だけ・多用するな。\n"
+    "・🚫**複数画像/カット一覧/ギャラリーの表示に ```html を使うな**。HTMLは冗長で出力上限に達し"
+    "途中で切れ、一部の画像しか表示されない(例:14カット中8枚で切断)。**必ず markdown で全画像を出せ**——"
+    "カット表なら上記の表形式(画像列に `![](/asset/ファイル名)` を全行)、単純な並べなら "
+    "`![](/asset/c01_xxx.png)` を画像の数だけ改行区切りで羅列。markdownは軽く全件が確実に収まる。"
+    "資料に列挙された画像ファイル名は1枚も省略せず全て出せ。\n"
+    "・⚠️**表や画像の markdown を ```markdown や ``` のコードフェンスで囲むな**。囲むと描画されず"
+    "生テキスト(| カット |...)のまま表示される。表・画像は**フェンス無しで直に**本文へ書け。\n"
     "・動画・実績映像を見せたい時 → 該当の **Vimeo URL(https://vimeo.com/ID)** をそのまま本文に書け"
     "(チャットにプレイヤーが埋め込まれ再生できる)。YouTube/.mp4 URL も同様。\n"
     "・短い事実確認・雑談・1〜2文で済む話 → 図解も表も不要。普通の文章で簡潔に。\n"
@@ -1164,6 +1171,44 @@ def _report_context(anchor, rtype=""):
     return "\n".join(lines) or f"対象: {anchor}"
 
 
+_REPORT_IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def _report_source_digest(sources, cap=6000):
+    """報告書の添付データ源(PPT/Excel/docx/図 等)を生の事実として抽出。
+    office/text は casper_extract で本文抽出、画像/図は Claude Sonnet vision で
+    『報告書に引用できる客観的説明』に変換(qwen 非依存ゆえ z8a 不達でも動く)。
+    返り値は draft の context に追記する digest 文字列。"""
+    if not sources:
+        return ""
+    os.makedirs(ASSET_FILES, exist_ok=True)
+    blocks = []
+    for s in (sources or [])[:8]:
+        fn = (s.get("filename") or "material") if isinstance(s, dict) else "material"
+        b64 = (s.get("data_b64") or "") if isinstance(s, dict) else ""
+        if not b64:
+            continue
+        safe = re.sub(r"[^\w.\-]", "_", os.path.basename(fn))[:60] or "material"
+        sp = os.path.join(ASSET_FILES, safe)
+        try:
+            with open(sp, "wb") as f:
+                f.write(_b64.b64decode(b64.split(",")[-1]))
+        except Exception as e:
+            blocks.append(f"【{safe}】(読込失敗: {e})")
+            continue
+        ext = os.path.splitext(safe)[1].lower()
+        if ext in _REPORT_IMG_EXT and VISION_BACKEND == "claude_cli":
+            vp = ("次の図/画像を報告書のデータ源として客観的に説明せよ。読み取れる数値・"
+                  "ラベル・傾向・構成を事実のみ箇条書きで。推測や脚色は禁止。3〜8項目。")
+            body = claude_cli_vision(sp, vp)
+            if body.startswith("[vision error]") or body.startswith("[vision]"):
+                body = (casper_extract.extract(sp) if casper_extract else "(抽出器なし)")
+        else:
+            body = casper_extract.extract(sp) if casper_extract else "(抽出器なし)"
+        blocks.append(f"【データ源: {safe}】\n{(body or '').strip()[:2500]}")
+    return ("\n\n".join(blocks))[:cap]
+
+
 # === 逆インタビュー (Casper が問い、答えを覚える) ===
 LEARN_LOG = os.path.join(HERE, "..", "vault", "00_inbox", "casper_learned.md")
 
@@ -1860,6 +1905,8 @@ class H(BaseHTTPRequestHandler):
                                  if str(u.get("id")) == str(who["uid"])), "") or name
                 except Exception:
                     pass
+            if not name and who.get("uid"):
+                name = _uid_to_name(who["uid"])   # live /users 不達時も堅牢 roster で本人名解決(ゲスト誤表示回避)
             self._json({"uid": who.get("uid", ""), "email": who.get("email", ""),
                         "authed": who.get("authed", False), "name": name})
             return
@@ -1891,8 +1938,15 @@ class H(BaseHTTPRequestHandler):
             return
         elif self.path.startswith("/asset/"):
             fn = os.path.basename(self.path.split("/asset/")[-1].split("?")[0])
-            ap = os.path.join(ASSETS_DIR, fn)
-            if fn and os.path.exists(ap) and os.path.abspath(ap).startswith(os.path.abspath(ASSETS_DIR)):
+            # 配信元2系統: scripts/assets(従来) と vault/50_asset_shadows/files(ingest保存先)。
+            # ingest/抽出した画像は ASSET_FILES に入るため両方を探さねば 404 になる(殿報告 2026-06-29)。
+            ap = ""
+            for _root in (ASSETS_DIR, ASSET_FILES):
+                _cand = os.path.join(_root, fn)
+                if fn and os.path.exists(_cand) and os.path.abspath(_cand).startswith(os.path.abspath(_root)):
+                    ap = _cand
+                    break
+            if ap:
                 ext = os.path.splitext(fn)[1].lower()
                 ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                          ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "application/octet-stream")
@@ -2290,6 +2344,9 @@ class H(BaseHTTPRequestHandler):
                 rtype = req.get("rtype", ""); structure = req.get("structure") or {}
                 answers = req.get("answers") or {}; anchor = req.get("anchor", "")
                 ctx = _report_context(anchor, rtype)
+                src_digest = _report_source_digest(req.get("sources") or [])
+                if src_digest:                       # 添付資料(PPT/Excel/図)を生の事実として参考データに合流
+                    ctx = (ctx + "\n\n■添付資料から読み取れる事実:\n" + src_digest).strip()
                 dr = report_lib.generate_draft(rtype, structure, answers, context=ctx, llm=llm_text)
                 lbl = report_lib.REPORT_TYPES.get(rtype, {}).get("label", "報告書")
                 title = req.get("title") or (f"{anchor} {lbl}".strip())

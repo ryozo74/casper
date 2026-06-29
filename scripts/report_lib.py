@@ -223,7 +223,7 @@ def generate_draft(rtype, structure, answers, context="", llm=None):
             "block種: {\"t\":\"p\",\"text\":\"...\"}(段落) / {\"t\":\"ul\",\"items\":[\"..\"]}(箇条書き) / {\"t\":\"h3\",\"text\":\"小見出し\"}。"
             "厳密なJSONのみ(説明・コードフェンス禁止)。未確定は推測せず『(要確認)』と置く。スキーマ:\n" + schema)
     usr = (f"種別: {t['label']}（型: {t['framework']}）\n\n■章立て(この順・keyで出力):\n{plan}\n\n"
-           f"■ユーザー回答:\n{ans or '(なし)'}\n\n■参考データ:\n{(context or '(なし)')[:2500]}")
+           f"■ユーザー回答:\n{ans or '(なし)'}\n\n■参考データ:\n{(context or '(なし)')[:8000]}")
     raw = ""
     if llm:
         try:

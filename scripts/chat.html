@@ -38,7 +38,7 @@
   header .dot b{width:8px;height:8px;border-radius:50%;background:#475569;display:inline-block}
   header .dot.ok b{background:#22c55e;box-shadow:0 0 8px #22c55e}
   #log{flex:1;overflow-y:auto;padding:22px;display:flex;flex-direction:column;gap:16px}
-  .wrap{max-width:820px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+  .wrap{max-width:1600px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:16px}
   .msg{display:flex;gap:12px;align-items:flex-start}
   .msg.user{flex-direction:row-reverse}                 /* ユーザーは右側 */
   .msg.user .bubble{max-width:78%}
@@ -47,7 +47,7 @@
   .msg.bot  .av{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f}
   .bubble{padding:11px 15px;border-radius:12px;white-space:pre-wrap;word-break:break-word;max-width:100%}
   .msg.user .bubble{background:var(--me);border:1px solid var(--line);text-align:left}
-  .msg.bot  .bubble{background:var(--panel);border:1px solid var(--line)}
+  .msg.bot  .bubble{background:var(--panel);border:1px solid var(--line);flex:1;min-width:0}
   .ptime{color:var(--mut);font-size:11px;margin-top:6px;opacity:.7}
   #menubtn{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cfe8ff;border-radius:9px;width:38px;height:38px;font-size:17px;cursor:pointer;padding:0}
   #who{cursor:pointer}
@@ -101,14 +101,14 @@
   .think{color:var(--mut);font-size:12.5px;font-style:italic;border-left:2px solid var(--line);
          padding-left:10px;margin:2px 0 6px;white-space:pre-wrap}
   footer{border-top:1px solid var(--line);padding:14px 20px;background:rgba(14,20,32,.7);backdrop-filter:blur(8px)}
-  .ic{max-width:820px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+  .ic{max-width:1600px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
   textarea{flex:1;resize:none;background:var(--panel2);color:var(--txt);border:1px solid var(--line);
            border-radius:12px;padding:11px 14px;font:inherit;max-height:160px;outline:none}
   textarea:focus{border-color:var(--accent)}
   button{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f;border:0;
          border-radius:12px;padding:0 18px;height:44px;font-weight:650;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
-  .hint{max-width:820px;margin:6px auto 0;color:var(--mut);font-size:11.5px;text-align:center}
+  .hint{max-width:1600px;margin:6px auto 0;color:var(--mut);font-size:11.5px;text-align:center}
   .cursor::after{content:"▍";color:var(--accent);animation:bl 1s steps(2) infinite}
   .diagbtn{display:inline-block;margin-top:10px;background:linear-gradient(135deg,var(--accent),#6366f1);
     color:#06121f;text-decoration:none;border-radius:10px;padding:8px 15px;font-weight:700;font-size:14px}
@@ -276,6 +276,7 @@ function mdToHtml(src){
       if(lang==='mermaid'){ out.push('<pre class="mermaid">'+esc(code)+'</pre>'); }
       else if(lang==='html'||lang==='svg'){ // Canvas: 自己完結HTML/SVGをサンドボックスiframeで描画
         out.push('<div class="canvas" data-html="'+btoa(unescape(encodeURIComponent(code)))+'"></div>'); }
+      else if(lang==='markdown'||lang==='md'){ out.push(mdToHtml(code)); } // ```markdown 囲みは中身を描画(表/画像が文字化けするのを防ぐ)
       else { out.push('<pre class="code"><code>'+esc(code)+'</code></pre>'); }
       i=(j<L.length)?j+1:j; continue;
     }
@@ -748,8 +749,22 @@ function repStructStep(r){
     if(q.type==='choice'){ return `<label>${esc(q.q)}</label><div class="repchoices" data-qk="${q.key}">`+q.options.map(o=>`<button class="repopt" data-v="${esc(o)}">${esc(o)}</button>`).join('')+'</div>'; }
     return `<label>${esc(q.q)}</label><input class="repq" data-qk="${q.key}" placeholder="（任意・空欄可）">`;
   }).join('');
+  h+='<h3>④ データ源を添付（任意）</h3>';
+  h+='<div class="rephint">PPT / Excel / Word / PDF / 図・画像を添付すると、その中身を読み取って報告書に反映します。</div>';
+  h+='<input type="file" id="repSrcFile" multiple accept=".pptx,.docx,.xlsx,.pdf,.html,.htm,.csv,.txt,.md,.png,.jpg,.jpeg,.gif,.webp,.bmp" style="font-size:12px">';
+  h+='<div id="repSrcList" style="font-size:12px;color:var(--mut);margin-top:6px"></div>';
   h+='<button class="repbtn" id="repGen">第一稿を作る →</button>';
   repbody.innerHTML=h;
+  if(!repState.sources) repState.sources=[];
+  const srcList=document.getElementById('repSrcList');
+  const renderSrc=()=>{ srcList.innerHTML=repState.sources.length?('📎 '+repState.sources.map(s=>esc(s.filename)).join(' / ')):''; };
+  renderSrc();
+  document.getElementById('repSrcFile').onchange=e=>{
+    [...e.target.files].forEach(f=>{ const rd=new FileReader();
+      rd.onload=()=>{ repState.sources.push({filename:f.name,data_b64:rd.result}); renderSrc(); };
+      rd.readAsDataURL(f); });
+    e.target.value='';
+  };
   const sw=document.getElementById('repFwSw');
   if(sw) sw.querySelectorAll('.repopt').forEach(b=>b.onclick=async()=>{
     repbody.innerHTML='<div class="reploading">整理術を「'+esc(b.textContent)+'」に変えて組み直しています…</div>';
@@ -762,8 +777,9 @@ function repStructStep(r){
     repbody.querySelectorAll('.repq').forEach(i=>{ if(i.value.trim()) answers[i.dataset.qk]=i.value.trim(); });
     repbody.querySelectorAll('.repchoices[data-qk]').forEach(g=>{ const s=g.querySelector('.repopt.sel'); if(s) answers[g.dataset.qk]=s.dataset.v; });
     repState.answers=answers;
-    repbody.innerHTML='<div class="reploading">第一稿を生成しています…（数十秒お待ちを）</div>';
-    const r2=await jpost('/api/report/draft',{rtype:repState.rtype,anchor:repState.anchor,structure:repState.structure,answers:answers});
+    const nsrc=(repState.sources||[]).length;
+    repbody.innerHTML='<div class="reploading">第一稿を生成しています…'+(nsrc?('（添付'+nsrc+'件を読取中）'):'（数十秒お待ちを）')+'</div>';
+    const r2=await jpost('/api/report/draft',{rtype:repState.rtype,anchor:repState.anchor,structure:repState.structure,answers:answers,sources:repState.sources||[]});
     if(!r2.ok){ repbody.innerHTML='<div class="reperr">生成失敗: '+esc(r2.error||'')+'</div>'; return; }
     repState.doc_id=r2.doc_id; repState.html=r2.html; repState.url=r2.url; repState.title=r2.title; repPreviewStep();
   };

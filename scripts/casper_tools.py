@@ -8,7 +8,28 @@ import json, os, sys, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import casper_rag
 
-RO_TOKEN = os.environ.get("CASPER_RO_TOKEN", "")
+RO_TOKEN = os.environ.get("CASPER_RO_TOKEN", "")   # 読取/議事録用(env優先)
+if not RO_TOKEN:                                    # env 無ければローカル秘匿ファイルから(gitignore済・write tokenと同方式)
+    for _fn in (".casper_ro_token", "CASPER_RO_TOKEN.txt"):
+        try:
+            _rtf = os.path.join(os.path.dirname(os.path.abspath(__file__)), _fn)
+            if not os.path.exists(_rtf):
+                continue
+            for _line in open(_rtf, encoding="utf-8").read().splitlines():
+                _line = _line.strip()
+                if not _line or _line.startswith("#"):
+                    continue
+                # bare token か KEY=VALUE 形式(SCORE_READONLY_TOKEN=... / CASPER_RO_TOKEN=...)両対応 → 値だけ抽出
+                if "=" in _line and _line.split("=", 1)[0].strip().upper().endswith("TOKEN"):
+                    RO_TOKEN = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                else:
+                    RO_TOKEN = _line.strip().strip('"').strip("'")
+                if RO_TOKEN:
+                    break
+            if RO_TOKEN:
+                break
+        except Exception:
+            pass
 CAL = "http://192.168.44.253:8001/api/readonly"
 
 TOOLS = [
