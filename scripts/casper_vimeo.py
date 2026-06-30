@@ -98,8 +98,10 @@ def _share_links(uri, fallback=None, token=None):
 def search(query, per_page=8, token=None):
     """studio bokan の Vimeo ライブラリ(全動画)を名前検索→[{name,link,id,uri,duration}]。"""
     import urllib.parse
+    # 注: /me/videos では sort=relevant は不可(Vimeo が 400 "The sort provided isn't valid")。
+    # query 指定時は API が既定で関連度順に返すため sort は省略する。
     q = urllib.parse.urlencode({"query": query, "per_page": per_page,
-                                "fields": "name,link,uri,duration,privacy.view,player_embed_url", "sort": "relevant"})
+                                "fields": "name,link,uri,duration,privacy.view,player_embed_url"})
     st, raw, _ = _api("GET", f"{API}/me/videos?{q}", token=token)
     d = json.loads(raw)
     out = []

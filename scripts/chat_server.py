@@ -758,6 +758,54 @@ def portfolio_digest(query):
     return ""
 
 
+def image_asset_digest(query):
+    """画像/静止画/カット系クエリ時、該当する asset_shadow の【実在する】画像URLを機械的に集めて注入。
+    ファイル名は実ファイル(vault/50_asset_shadows/files)から取るため捏造不能。RAGの取りこぼし/qwenの名前改変を断つ。"""
+    if not re.search(r"画像|静止画|イメージ|カット|サムネ|絵コンテ|ビジュアル|見せ|表示|一覧|image|cut|still", query or "", re.I):
+        return ""
+    try:
+        import glob
+        files_dir = os.path.join(ASSET_DIR, "files")
+        if not os.path.isdir(files_dir):
+            return ""
+        IMG = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+        # クエリの語(2文字以上の英数 + 日本語固有語)を抽出
+        ql = (query or "").lower()
+        qtok = set(re.findall(r"[a-z0-9]{2,}", ql)) | set(re.findall(r"[ぁ-んァ-ヶ一-龠]{2,}", query or ""))
+        rows = []   # (asset_md, image_filename, desc, score)
+        for md in sorted(glob.glob(os.path.join(ASSET_DIR, "*.md"))):
+            try:
+                t = open(md, encoding="utf-8").read()
+            except Exception:
+                continue
+            m = re.search(r'^asset:\s*(.+\.(?:png|jpg|jpeg|webp|gif))\s*$', t, re.M | re.I)
+            if not m:
+                continue
+            fname = os.path.basename(m.group(1).strip())
+            if not os.path.exists(os.path.join(files_dir, fname)):   # 実在するファイルのみ(捏造防止の核)
+                continue
+            blob = t.lower()
+            score = sum(1 for tok in qtok if tok in blob)            # クエリ語の一致数で関連度
+            # 説明文(提供者記入)を1行に
+            dm = re.search(r"##\s*説明.*?\n(.*?)(?=\n##|\Z)", t, re.S)
+            desc = re.sub(r"\s+", " ", (dm.group(1) if dm else "")).strip()[:80]
+            rows.append((fname, desc, score))
+        if not rows:
+            return ""
+        hits = [r for r in rows if r[2] > 0]
+        if not hits:
+            return ""
+        hits.sort(key=lambda r: -r[2])
+        hits = hits[:30]
+        lines = [f"- `![]( /asset/{fn} )` — {desc}".replace("( /asset/", "(/asset/").replace(" )", ")")
+                 for fn, desc, _ in hits]
+        return ("\n\n## 該当する画像アセット（実在確認済・URLは下記を一字一句そのまま使え／改変・接頭辞付与・拡張子変更を一切するな）\n"
+                + "\n".join(lines)
+                + "\n※ここに無いファイル名の画像URLを書くな（存在しない＝表示されない）。全件出すよう求められたら上記を省略せず全て出せ。")
+    except Exception:
+        return ""
+
+
 def dm_threads(who):
     """ログイン中ユーザーのDMスレッド一覧を取得(get_messages相当)。
     書込トークン(per-user)が要る→未発行時は空。{threads:[{id,peer,unread,last,ts}], available:bool}"""
@@ -2544,6 +2592,7 @@ class H(BaseHTTPRequestHandler):
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
+        sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
         sysadd += portfolio_digest(ll_user)             # 実績クエリは自社Vimeo実績を注入
         sysadd += cross_digest(ll_user)                 # 横断クエリは全PJ遅延サマリを注入
         try:

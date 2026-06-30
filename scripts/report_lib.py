@@ -199,6 +199,65 @@ def framework_plan(fw_key):
     return {"framework": fw_key, "framework_label": fw["label"], "pages": pages, "questions": questions}
 
 
+# ============ ビュー(重火器)カタログ＋要否判断 ============
+# 「重火器」= 構造化ビュー。flow(React Flow)のみ重量級で 1ページ1つまで。他は軽量HTML。
+VIEWS = {
+    "none":  {"label": "重火器なし（文章＋表）", "heavy": False,
+              "when": "工程・日程・一覧・画像対比が主役でない。普通の文章とmarkdown表で足りる"},
+    "flow":  {"label": "⚡ ワークフロー図 (React Flow)", "heavy": True,
+              "when": "工程の流れ・依存関係・パイプライン・進捗の全体像を“動かして”見せたい（重火器・1ページ1つ）"},
+    "gantt": {"label": "📅 ガントチャート", "heavy": False,
+              "when": "日程・スケジュール・期間と進捗率が主役"},
+    "list":  {"label": "📋 リスト（絞り込み＋詳細展開）", "heavy": False,
+              "when": "工程/仕様/成果物の一覧を、ステータス絞り込み＋アコーディオン詳細で見せたい"},
+    "image": {"label": "🖼️ 画像＆注釈（スプリット）", "heavy": False,
+              "when": "生成イメージ（波形/絵コンテ/4K等）と注釈・QCコメントを左右対比で見せたい"},
+}
+# 各ビューを描くのに最低限ほしいデータを、質問形式で集めるための問い
+VIEW_QUESTIONS = {
+    "flow":  [{"key": "steps", "q": "工程（ノード）を順に挙げてください（例: 音声入力→物語構成→…）", "type": "text"},
+              {"key": "deps",  "q": "工程間の依存・並行で特記があれば（無ければ空欄）", "type": "text"}],
+    "gantt": [{"key": "steps", "q": "タスク／工程を挙げてください", "type": "text"},
+              {"key": "period","q": "各タスクの期間（例: N0=W1-2, N1=W2-4 …）。Calendarに在れば自動取得", "type": "text"}],
+    "list":  [{"key": "items", "q": "一覧にする項目を挙げてください", "type": "text"},
+              {"key": "fields","q": "各項目で見せたい属性（仕様/成果物/担当/リンク等）", "type": "text"}],
+    "image": [{"key": "shots", "q": "対比する生成イメージ（カット/波形等）を挙げてください", "type": "text"},
+              {"key": "notes", "q": "各イメージへの注釈・QCコメントの出どころ（議事録/Dir指示等）", "type": "text"}],
+    "none":  [],
+}
+
+
+def views_list():
+    return [{"key": k, "label": v["label"], "heavy": v["heavy"], "when": v["when"]} for k, v in VIEWS.items()]
+
+
+def suggest_view(rtype, goal, story="", framework="", llm=None):
+    """この資料に『重火器（構造化ビュー）』が要るか・どれかを判断。
+    LLMに選ばせ、不発時は none。flow は重火器ゆえ本当に流れ可視化が主役の時のみ。"""
+    keys = list(VIEWS.keys())
+    rec, rationale = "none", ""
+    if llm:
+        try:
+            opts = "\n".join(f"- {k}: {VIEWS[k]['label']} — {VIEWS[k]['when']}" for k in keys)
+            sysp = ("あなたは資料設計のアドバイザー。資料に最適な『ビュー（重火器）』を1つ選ぶ。"
+                    "原則は“そぎ落とす”——文章/表で足りるなら none を選ぶ。"
+                    "flow(React Flow)は重量級ゆえ、工程の流れ・依存の可視化が本当に主役の時だけ。"
+                    "厳密なJSONのみ: {\"view\":\"<key>\",\"rationale\":\"なぜそれが最適か1文\"}。key は候補から。")
+            usr = (f"作りたい資料の種別: {rtype}\n目的: {goal}\nストーリー/背景: {story}\n"
+                   f"採用した整理術: {framework}\n\n候補:\n{opts}")
+            out = llm(sysp, usr, 300) or ""
+            m = re.search(r"\{.*\}", out, re.S)
+            if m:
+                d = json.loads(m.group(0))
+                if d.get("view") in VIEWS:
+                    rec = d["view"]; rationale = (d.get("rationale") or "")[:200]
+        except Exception:
+            pass
+    alts = [k for k in keys if k != rec]
+    return {"recommended": rec, "label": VIEWS[rec]["label"], "heavy": VIEWS[rec]["heavy"],
+            "rationale": rationale, "alternatives": alts, "questions": VIEW_QUESTIONS.get(rec, [])}
+
+
 # ============ 第一稿生成(そぎ落とし) ============
 def generate_draft(rtype, structure, answers, context="", llm=None):
     """各章を簡潔に生成。LLMは {sections:{key:[blocks]}} のJSONを返す。block: {t:'p'|'ul'|'h3', text|items}。"""
