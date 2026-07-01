@@ -423,7 +423,9 @@ function renderConfirm(b, pa){
   [ok,ng].forEach(x=>x.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit');
   ok.style.borderColor='#22c55e';
   const rEl=document.createElement('div'); rEl.style.cssText='margin-top:8px;font-size:13px;color:#94a3b8';
-  ok.onclick=async()=>{ ok.disabled=ng.disabled=true; rEl.textContent='実行中…';
+  // DM送信は誤送信防止のため二段確認(1回目=確認を促すだけ・2回目で実送信)。流れで押しても飛ばない。
+  let _armed=false;
+  const doExec=async()=>{ ok.disabled=ng.disabled=true; rEl.textContent='実行中…';
     const res=await jpost('/api/confirm',{id:pa.id,approve:true, body: ta?ta.value:undefined});
     if(res.ok&&res.executed){
       if(pa.tool==='send_message'){
@@ -439,6 +441,7 @@ function renderConfirm(b, pa){
       } else { rEl.textContent='✅ 実行しました: '+(res.result||''); }
     } else { rEl.textContent='⚠️ '+(res.error||res.message||'失敗'); }
   };
+  ok.onclick=()=>doExec();
   ng.onclick=async()=>{ ok.disabled=ng.disabled=true; await jpost('/api/confirm',{id:pa.id,approve:false}); rEl.textContent='却下しました'; };
   bs.appendChild(ok); bs.appendChild(ng);
   c.appendChild(h); if(rc) c.appendChild(rc); c.appendChild(s);
@@ -549,7 +552,13 @@ document.getElementById('who').onclick=async()=>{
 const plus=document.getElementById('plus'), toolmenu=document.getElementById('toolmenu');
 const fileinp=document.getElementById('fileinp'), toolsEl=document.getElementById('tools'), attachEl=document.getElementById('attach');
 let uploaderOn=false, pendingFile=null;  // {name, b64, dataurl, isImage}
-plus.onclick=()=>{ toolmenu.style.display = toolmenu.style.display==='none'?'block':'none'; };
+plus.onclick=(e)=>{ e.stopPropagation(); toolmenu.style.display = toolmenu.style.display==='none'?'block':'none'; };
+// メニュー外をクリックしたら閉じる(選択せずとも閉じられる)
+document.addEventListener('click',(e)=>{
+  if(toolmenu.style.display!=='none' && !toolmenu.contains(e.target) && e.target!==plus){
+    toolmenu.style.display='none';
+  }
+});
 document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
   toolmenu.style.display='none';
   if(it.dataset.tool==='score_uploader'){ uploaderOn=true; renderTools(); }
@@ -575,13 +584,26 @@ function vimeoUpload(){
   b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:14px;background:rgba(255,255,255,.03)">'
     +'<div style="font-weight:700;margin-bottom:10px">🎬 Vimeo アップ設定 — '+esc(f.name)+'</div>'
     +'<label style="'+lbS+'">タイトル</label><input id="vmTitle" style="'+inS+'" value="'+esc(base)+'">'
-    +'<label style="'+lbS+'">説明（任意）</label><textarea id="vmDesc" rows="2" style="'+inS+'"></textarea>'
+    +'<label style="'+lbS+'">説明 <span style="color:#22c55e">（後でCasperが検索できるよう推奨）</span></label><textarea id="vmDesc" rows="2" placeholder="この動画は何か・どのPJ/案件か・要点。例: marukome 80tタンクCG c05 味噌熟成カット v3" style="'+inS+'"></textarea>'
     +'<label style="'+lbS+'">パスワード（任意・空欄なら無し）</label><input id="vmPw" style="'+inS+'" placeholder="例: bokan2026">'
     +'<div style="display:flex;gap:8px"><button id="vmGo" style="'+btS+';border-color:#22c55e">アップロード</button>'
     +'<button id="vmCancel" style="'+btS+'">キャンセル</button></div></div>';
-  document.getElementById('vmGo').onclick=()=>doVimeoUpload(f,
-    document.getElementById('vmTitle').value, document.getElementById('vmDesc').value,
-    document.getElementById('vmPw').value, b);
+  document.getElementById('vmGo').onclick=()=>{
+    const desc=document.getElementById('vmDesc').value.trim();
+    // 説明が薄いと別会話から探せない→アップ前に一度だけ確認(必要なら書き足してもらう)
+    if(desc.length<8 && !document.getElementById('vmDesc').dataset.confirmed){
+      const dd=document.getElementById('vmDesc');
+      dd.dataset.confirmed='1';
+      dd.style.borderColor='#22c55e';
+      const warn=document.createElement('div');
+      warn.style.cssText='font-size:12px;color:#fbbf24;margin:-6px 0 8px';
+      warn.textContent='💡 説明があると、後でCasperが「あの動画」と探せます。書き足すか、このままアップなら再度ボタンを押してください。';
+      dd.parentNode.insertBefore(warn, dd.nextSibling);
+      return;
+    }
+    doVimeoUpload(f, document.getElementById('vmTitle').value,
+      document.getElementById('vmDesc').value, document.getElementById('vmPw').value, b);
+  };
   document.getElementById('vmCancel').onclick=()=>{ b.textContent='（アップロードを中止しました）'; };
   log.scrollTop=log.scrollHeight;
 }

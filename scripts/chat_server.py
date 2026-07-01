@@ -306,6 +306,16 @@ def _salvage_text_toolcall(final, who, pending_actions):
                 if mn:
                     rev = {v: k for k, v in _ROSTER_MAP.items()}
                     to = rev.get(mn.group(1).strip())
+    # ③ 送信表明＋引用ブロック形「〇〇さんへ…送信しました\n> 本文…」(qwenが完了報告調で書く頻出形)
+    if not (to and body):
+        ms = re.search(r"([^\s、。：:（(]+)\s*さん.{0,40}?(?:送信しました|送りました|お送りしました|送ります|送信します|DMしました|DMします|連絡しました)", f)
+        quotes = re.findall(r"(?m)^\s*[>＞]\s*(.+)$", f)
+        if ms and quotes:
+            nm = ms.group(1).strip()
+            rev = {v: k for k, v in _ROSTER_MAP.items()}
+            to = rev.get(nm) or rev.get(nm.replace("さん", ""))
+            body = " ".join(q.strip() for q in quotes).strip()
+            body = re.sub(r"^" + re.escape(nm) + r"\s*さん[、,：:]?\s*", "", body)
     if not (to and body):
         return final
     args = {"to_user_id": to, "body": body}
@@ -316,6 +326,11 @@ def _salvage_text_toolcall(final, who, pending_actions):
     pending_actions.append({"id": pid, "tool": "send_message", "args": args, "summary": summary})
     if cut:
         f = (f[:cut[0]] + f[cut[1]:]).strip()
+    else:
+        f = re.sub(r"(?m)^\s*[>＞]\s*.+$", "", f)          # 本文はカードに出すので引用ブロックを除去
+    f = re.sub(r"(送信しました|送りました|お送りしました|DMしました|連絡しました)", "下書きしました", f)
+    f = re.sub(r"(送信します|送ります|DMします)", "下書きします", f)
+    f = re.sub(r"\n{3,}", "\n\n", f).strip()
     note = "（↓の承認カードで本文を確認・編集し、ボタンを押すと送信されます）"
     return (f + "\n\n" + note) if f else note
 
@@ -1593,6 +1608,36 @@ def open_briefing(who):
     return "\n".join(lines)
 
 
+def vimeo_kb_save(title, description, link, vid="", uploader="", extra=None):
+    """Vimeoにアップした動画の『説明』を vault(asset_shadow) へ知識化し、別会話から検索可能にする。
+    説明はそのまま検索用本文として保存。RAG索引も更新。返り値=保存パス。"""
+    os.makedirs(ASSET_DIR, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d")
+    base = re.sub(r"[^\w\-]", "_", (title or "vimeo"))[:40] or "vimeo"
+    slug = f"vimeo_{base}_{vid}" if vid else f"vimeo_{base}_{stamp}"
+    path = os.path.join(ASSET_DIR, f"asset_{slug}.md")
+    L = ["---", "type: asset_shadow", "media: vimeo", f"vimeo_id: {vid}",
+         f"vimeo_link: {link}", f"uploaded: {stamp}", f"uploaded_by: {uploader}",
+         "tags: [casper, vimeo, video]", "---", "",
+         f"# 🎬 動画 — {title or '(無題)'}", "",
+         f"> Vimeo: {link} / アップ {stamp}" + (f" / by {uploader}" if uploader else ""), "",
+         "## 説明 (アップ時に付与・検索対象)", (description or "(説明なし)"), ""]
+    for k, v in (extra or {}).items():
+        if v:
+            L.append(f"- {k}: {v}")
+    L += ["", "## ニュアンス・教訓 (運用で追記)", "> "]
+    try:
+        open(path, "w", encoding="utf-8").write("\n".join(L))
+    except Exception as e:
+        return f"(知識化失敗: {e})"
+    try:                                  # 即・検索可能にするため索引更新
+        if casper_rag:
+            casper_rag.build_index(); casper_rag._CACHE = None
+    except Exception:
+        pass
+    return path
+
+
 def proposal_to_calendar_csv(prop):
     """起票案 → Calendar 公式CSV(『プロジェクト情報』＋『タスク情報』の2セクション・テンプレ準拠)。"""
     import csv, io, re as _re
@@ -2163,6 +2208,16 @@ class H(BaseHTTPRequestHandler):
                                                name=(req.get("title") or "upload.mp4"),
                                                description=(req.get("description") or ""),
                                                password=(req.get("password") or None))
+                try:                                  # 説明を vault へ知識化(別会話から検索可能に)
+                    who = identify(self)
+                    _desc = req.get("description") or ""
+                    if _desc.strip():                 # 説明が在る時のみKB化(空説明は質問でフロント側が促す)
+                        _vid = (r.get("uri") or "").split("/")[-1]
+                        kb = vimeo_kb_save(req.get("title") or "upload", _desc, r.get("link") or "",
+                                           vid=_vid, uploader=_uid_to_name(who.get("uid")) or "")
+                        r["kb_saved"] = isinstance(kb, str) and kb.endswith(".md")
+                except Exception:
+                    pass
                 self._json({"ok": True, **r})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)[:200]})
@@ -2198,6 +2253,15 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 _vlog(f"OK {r.get('link')}")
+                try:                                  # 説明を vault へ知識化(別会話から検索可能に)
+                    _desc = req.get("description") or ""
+                    _vid = (r.get("uri") or "").split("/")[-1]
+                    kb = vimeo_kb_save(req.get("title") or fn, _desc, r.get("link") or "",
+                                       vid=_vid, uploader=_uid_to_name(who.get("uid")) or "")
+                    _vlog(f"KB saved: {kb}")
+                    r["kb_saved"] = isinstance(kb, str) and kb.endswith(".md")
+                except Exception as _ke:
+                    _vlog(f"KB ERR {_ke}")
                 self._json({"ok": True, **r})
             except Exception as e:
                 _vlog(f"ERR {e}")
