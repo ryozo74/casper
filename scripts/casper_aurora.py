@@ -73,7 +73,8 @@ def search(query, limit=8):
 
 
 def get(doc_id):
-    return _call("get_document", {"doc_id": doc_id})
+    # Elvis Aurora の get_document は引数 id を要求（append_version は doc_id ゆえ非対称・要注意）
+    return _call("get_document", {"id": doc_id})
 
 
 def create(title, html_body, author_id="casper", project="社内", work="ノート", tags=None, scope="public"):
