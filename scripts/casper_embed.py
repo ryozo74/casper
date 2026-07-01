@@ -77,6 +77,41 @@ def build(batch=32):
     return len(out)
 
 
+def reindex():
+    """差分再index(帯更新後の連動用)。
+    ① トライグラム索引を全再構築(安価・字面検索は常に最新)。
+    ② 埋込は未変更chunkのベクトルを再利用し、新規/変更chunkのみ再埋込(高価な全再埋込を回避)。
+    ③ bge-m3 未導入なら埋込はskip(旧埋込index温存・字面索引のみ最新)。
+    戻り: {"chunks":総数,"reembedded":再埋込数,"embed":状態}。"""
+    import casper_rag
+    casper_rag.build_index()                                   # 安価: 全トライグラム再構築
+    casper_rag._CACHE = None                                   # 次の検索で再読込
+    chunks = json.load(open(casper_rag.INDEX, encoding="utf-8"))
+    old = {}
+    if os.path.exists(EMB_INDEX):
+        for e in json.load(open(EMB_INDEX, encoding="utf-8")):
+            old[(e["src"], e["t"])] = e.get("v")
+    out, miss_idx, miss_txt = [], [], []
+    for e in chunks:                                           # 未変更は旧ベクトル再利用
+        v = old.get((e["src"], e["t"]))
+        out.append({"src": e["src"], "title": e.get("title", ""), "t": e["t"], "v": v})
+        if v is None:
+            miss_idx.append(len(out) - 1); miss_txt.append(e["t"])
+    reembedded = 0
+    for i in range(0, len(miss_txt), 32):                      # 変更/新規分のみバッチ埋込
+        gi, gt = miss_idx[i:i + 32], miss_txt[i:i + 32]
+        vecs = embed_batch(gt)
+        if not vecs:                                           # bge-m3 未導入 → 埋込skip(旧index温存)
+            return {"chunks": len(chunks), "reembedded": 0, "embed": "skipped(bge-m3不在・字面索引のみ最新)"}
+        for j, v in zip(gi, vecs):
+            out[j]["v"] = v; reembedded += 1
+    out = [e for e in out if e.get("v") is not None]
+    json.dump(out, open(EMB_INDEX, "w", encoding="utf-8"), ensure_ascii=False)
+    global _VEC
+    _VEC = None
+    return {"chunks": len(chunks), "reembedded": reembedded, "embed": "ok"}
+
+
 def _load():
     global _VEC
     if _VEC is None:

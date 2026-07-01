@@ -30,3 +30,4 @@ scripts/.events_cursor*
 scripts/.casper_*
 *vimeo_token*
 *.casper_aurora
+CASPER_WRITE_TOKEN.txt.bak*

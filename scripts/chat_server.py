@@ -915,6 +915,45 @@ def user_profile_digest(who):
     return ""
 
 
+def activity_digest(who):
+    """ログイン中ユーザーの『動向帯』(25_activity/u_<uid>.md)を先読み注入=動向層＝経験層。
+    静的プロファイル(個性)が"何者か"なら、こちらは"今どうしているか"(筋/未決/乗り替わり)。
+    掟(推測は明示/状態は文面でなく実物照会/語は串刺し/人の癖)つきで渡す。設計=Aurora動向層設計メモ。"""
+    try:
+        if not who.get("authed"):
+            return ""
+        p = os.path.join(VAULT, "25_activity", f"{_user_key(who)}.md")
+        if not os.path.exists(p):
+            return ""
+        t = open(p, encoding="utf-8").read()
+        # 未決(open loop)=結末が出ていない継続中の筋を拾う(解決済み=クローズ/完了 行は除外)
+        opens = [ln.strip() for ln in t.splitlines()
+                 if ("OPEN LOOP" in ln or "未了" in ln or "待ち" in ln)
+                 and ln.strip().startswith("-")
+                 and not any(k in ln for k in ("クローズ", "完了", "問題ない", "解消"))][:6]
+        # 先読み候補セクション(既に「(推測)」明示済)を抜く
+        yomi = ""
+        if "### 先読み候補" in t:
+            yomi = t.split("### 先読み候補", 1)[1]
+            yomi = re.split(r"\n#{2,3} ", yomi, maxsplit=1)[0].strip()[:1000]
+        if not opens and not yomi:
+            return ""
+        out = "\n\n## 話し相手の直近の動向(動向層＝経験層・先読み材料)\n"
+        if opens:
+            out += "未決/継続中(open loop):\n" + "\n".join(opens) + "\n"
+        if yomi:
+            out += "\n先読み候補:\n" + yomi + "\n"
+        out += ("\n【この動向の使い方=掟】黙って先回りの材料に使え(押し付けず)。"
+                "①ここから述べる見立ては必ず『(推測)』と明示せよ(捏造禁止＞人格)。"
+                "②『〜された?/終わった?/上がった?』等 状態を問われたら、この帯の古い記述を鵜呑みにせず"
+                "実物(Calendar/Vimeo/Score)を確認してから答えよ(『作業中』報告を結末と誤認するな)。"
+                "③『資料/データ/動画/静止画』等 揺れる語は同一対象へ串刺しで解釈せよ。"
+                "④相手ごとの伝え方の癖を踏まえて新しい問いを読め。")
+        return out
+    except Exception:
+        return ""
+
+
 def log_convo(who, role, content, extra=None):
     """会話を発信元ごとの順序付きスレッドとして記録(文脈=流れ を資産化)。"""
     try:
@@ -2399,26 +2438,61 @@ class H(BaseHTTPRequestHandler):
                                        "これを Calendar の CSV インポートに通せば今すぐ起票できまする"
                                        "(create系MCP公開後は本ボタンから直接起票に切替わる)。プレビューは確定保存済。"})
                 return
-            # 公開済の将来パス: project→shots(import)→tasks の順で実行(actor=本人)
+            # 公開済パス: project→shots(import)→tasks の順で実行(actor=本人)
+            # 2026-07-01 Fuji_test重複+欠落の真因修理: ①スキーマ外フィールド(_接頭辞メタ/client_ref)除去
+            # ②actor_id/project_id を正しく付与(import_shots は project_id 必須) ③同名PJ重複ガード。
             try:
-                import hashlib as _hl
                 actor = who.get("uid")
-                # client_ref=提案の安定ハッシュ(同一提案の再送→同キー→Nibu側で冪等dedup)
-                cref = "casper-" + _hl.sha1(json.dumps(prop, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+                aid = int(actor) if str(actor).isdigit() else actor
+
+                def _clean(d):
+                    """Casper内部メタ(_inferred/_note等 _接頭辞)と client_ref を除去。
+                    Calendar create系はスキーマ外フィールドで起票失敗/フィールド欠落を招くため。"""
+                    return {k: v for k, v in (d or {}).items()
+                            if not str(k).startswith("_") and k != "client_ref"}
+
+                def _extract_id(r):
+                    try:
+                        j = json.loads(r) if isinstance(r, str) else r
+                        if isinstance(j, dict):
+                            return j.get("id") or (j.get("project") or {}).get("id")
+                    except Exception:
+                        pass
+                    return None
+
+                # 重複ガード: 同名PJ(非archived)が既存なら起票せず警告(Calendar側に冪等keyが無く二重起票が起きるため)
+                try:
+                    ex = json.loads(casper_mcp.call_tool("get_projects", {"actor_id": aid},
+                                                         token=WRITE_TOKEN, actor=actor))
+                    dups = [p for p in (ex.get("projects") or ex.get("items") or [])
+                            if str(p.get("name", "")).strip() == str(pname).strip()
+                            and str(p.get("display_status", "online")) != "archived"]
+                except Exception:
+                    dups = []
+                if dups:
+                    self._json({"ok": False, "executed": False, "duplicate": True,
+                                "existing": [{"id": p.get("id"), "name": p.get("name")} for p in dups],
+                                "message": f"同名PJ「{pname}」が既に存在いたす(id {', '.join(str(p.get('id')) for p in dups)})。"
+                                           "二重起票を避けるため中止。別名にするか、既存PJへの追加起票を御指示くだされ。"})
+                    return
+
                 results = []
-                results.append(casper_mcp.call_tool("create_project",
-                                                    {**prop.get("project", {}), "client_ref": cref + "-prj"},
-                                                    token=WRITE_TOKEN, actor=actor))
-                if prop.get("shots"):
-                    imp = "import_shots" if "import_shots" in avail else "create_shots"
-                    results.append(casper_mcp.call_tool(imp, {"shots": prop["shots"], "client_ref": cref + "-shots"},
-                                                        token=WRITE_TOKEN, actor=actor))
-                if prop.get("tasks"):
-                    bt = "bulk_create_tasks" if "bulk_create_tasks" in avail else "create_task"
-                    results.append(casper_mcp.call_tool(bt, {"tasks": prop["tasks"], "client_ref": cref + "-tasks"},
-                                                        token=WRITE_TOKEN, actor=actor))
-                self._json({"ok": True, "executed": True, "summary": summary, "client_ref": cref,
-                            "results": [str(r)[:500] for r in results]})
+                pr = casper_mcp.call_tool("create_project",
+                                          _clean({"actor_id": aid, **(prop.get("project") or {})}),
+                                          token=WRITE_TOKEN, actor=actor)
+                results.append(pr)
+                new_pid = _extract_id(pr)
+                if prop.get("shots") and new_pid and "import_shots" in avail:
+                    results.append(casper_mcp.call_tool("import_shots",
+                        {"actor_id": aid, "project_id": new_pid,
+                         "shots": [_clean(s) for s in prop["shots"]]},
+                        token=WRITE_TOKEN, actor=actor))
+                if prop.get("tasks") and "bulk_create_tasks" in avail:
+                    results.append(casper_mcp.call_tool("bulk_create_tasks",
+                        {"actor_id": aid, "tasks": [_clean(t) for t in prop["tasks"]]},
+                        token=WRITE_TOKEN, actor=actor))
+                self._json({"ok": True, "executed": True, "summary": summary,
+                            "project_id": new_pid, "results": [str(r)[:500] for r in results]})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
@@ -2589,6 +2663,7 @@ class H(BaseHTTPRequestHandler):
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
+            cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
@@ -2654,6 +2729,7 @@ class H(BaseHTTPRequestHandler):
         # 出力指針(表/mermaid/Canvas/動画)を system に追記。
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
+        sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
         sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
@@ -2853,22 +2929,16 @@ def _build_profile(ukey):
     m = re.match(r"u_(\d+)", ukey)
     uid = m.group(1) if m else None
     name = _uid_to_name(uid) if uid else ukey
-    # 動向: 本人の現在タスク(Calendarライブ・actor=本人)。トラックの"今"を先読みに合流。
-    doukou = ""
-    if uid and WRITE_TOKEN and casper_mcp:
-        try:
-            doukou = str(casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=int(uid)))[:800]
-        except Exception:
-            pass
-    sysp = ("以下は社内ユーザーと Casper の会話履歴＋本人の現在タスク(Calendar)。Casperが"
-            "**先読み応対**に活かすため、この『ユーザー』本人の人物像を簡潔にまとめよ。観点:\n"
+    # 個性(静止画=不変の人物像)のみ蒸留。動向(現在の担当/進行中=動画)は 25_activity(動向層)の担当ゆえ
+    # ここでは扱わぬ — 二重蒸留・chat時の二重注入・記述ドリフトを避ける(個性≠動向の分離)。
+    sysp = ("以下は社内ユーザーと Casper の会話履歴。Casperが**先読み応対**に活かすため、"
+            "この『ユーザー』本人の《不変の人物像(個性)》を簡潔にまとめよ。観点:\n"
             "① 個性・コミュニケーションの癖・働き方・避けたいこと\n"
             "② 関心/よく聞くこと(会話の頻出トピック・繰り返す懸念)\n"
-            "③ 現在の動向(担当・進行中の作業。タスクが在れば具体名で)\n"
             "**観察された事実のみ。憶測・決めつけは避け、根拠が薄いものは書かない**。各観点1〜3行の箇条書き。"
+            "※『現在の担当・進行中の作業(動向)』は別層(動向層)が扱うゆえ、ここには書かぬこと。"
             "出力は必ず見出し『## Casper の理解』で始めること。")
-    usr = (f"対象ユーザー: {name}\n\n## 会話履歴(直近)\n" + "\n".join(turns)
-           + (f"\n\n## 現在のタスク(Calendar)\n{doukou}" if doukou else ""))
+    usr = f"対象ユーザー: {name}\n\n## 会話履歴(直近)\n" + "\n".join(turns)
     try:
         out = strip_think(llm_text(sysp, usr, num_predict=900)).strip()
     except Exception:

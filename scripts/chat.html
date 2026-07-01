@@ -501,14 +501,17 @@ async function openDM(t){
   let r={messages:[]}; try{ r=await fetch('/api/dm/messages?id='+encodeURIComponent(t.id),{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
   b.classList.remove('cursor');
   const lines=(r.messages||[])
-    .filter(m=>{ const b=String(m.body||m.content||'').trim();   // システムの初期化行等は隠す
-      return b && b!=='Task message thread initialized.'; })
-    .map(m=>{
-    const nm=esc(m.sender_name||(m.sender_id==null?'システム':String(m.sender_id)));
-    const ts=m.created_at?('（'+esc(String(m.created_at).slice(5,16).replace('T',' '))+'）'):'';
-    return '**'+nm+'**'+ts+'：'+esc(String(m.body||m.content||''));
-  }).join('\n\n');
-  let md='### 💬 '+esc(t.peer||'DM')+' との会話\n\n'+(lines||'(本文取得不可)');
+    .map(m=>({m, b:String(m.body||m.content||'').trim()}))
+    // 無駄行を除去: システム初期化行 / 「@名前」だけのメンション単独行
+    .filter(x=> x.b && x.b!=='Task message thread initialized.' && !/^@\S+$/.test(x.b))
+    .map(({m,b})=>{
+      const nm=esc(m.sender_name||(m.sender_id==null?'システム':String(m.sender_id)));
+      const ts=m.created_at?('（'+esc(String(m.created_at).slice(5,16).replace('T',' '))+'）'):'';
+      // 先頭メンション(@名前 )を除去し、改行を詰めて1メッセージ=1行に
+      const body=esc(b.replace(/^@\S+[\s　]+/,'').replace(/\s*\n\s*/g,' ').trim());
+      return '- **'+nm+'**'+ts+'：'+body;   // リスト描画=行間が詰まって読みやすい
+    }).join('\n');
+  let md='### 💬 '+esc(t.peer||'DM')+' との会話\n'+(lines||'(本文取得不可)');
   render(b,md);
   // DM文脈を履歴に仕込む(返信/質問の土台＋代筆の宛先)。次の発言でこのスレッドが保存される。
   history.push({role:'assistant',content:md+'\n[DM文脈] 相手='+(t.peer||'')+' / uid='+(t.peer_id||'')+' / thread='+t.id+
