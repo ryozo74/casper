@@ -1641,6 +1641,7 @@ def open_briefing(who):
     uid = who.get("uid")
     task_n = None                                          # 事実を集め→末尾でCasperが"考えて"挨拶
     task_lines = []
+    task_ctx = ""
     dm_lines = []
     unread_n = 0
     if uid and WRITE_TOKEN and casper_mcp:
@@ -1654,12 +1655,15 @@ def open_briefing(who):
                     break
             if isinstance(items, list):
                 task_n = len(items)
+                _tctx = []
                 for it in items[:12]:                     # フィールド名の揺れに頑健(name/title/task_name)
                     nm = it.get("name") or it.get("title") or it.get("task_name") or ("task#%s" % it.get("id"))
                     st = it.get("status") or ""
                     due = str(it.get("due_date") or "")[:10]
                     tail = (f"　[{st}]" if st else "") + (f"　〆{due}" if due else "")
-                    task_lines.append(f"・{nm}{tail}")
+                    task_lines.append(f"- {nm}{tail}")    # markdown bullet=詰まったリスト(<p>の空行を避ける)
+                    _tctx.append(f"{nm}({st or '状態不明'})")
+                task_ctx = "、".join(_tctx)
         except Exception:
             pass
         try:
@@ -1694,18 +1698,20 @@ def open_briefing(who):
                     dm_lines.append(f"🔴 {ts}　[{nm}：{snip}](casper-dm:{t.get('thread_id')}:{pid})")
         except Exception:
             pass
-    # 挨拶は Casper が"考える"(定型テンプレ廃止)。状況(タスク/DM件数)に即した気の利いた一言をLLM生成。
-    ctx = (f"時間帯の挨拶語: {g}。本日のタスク: "
-           f"{('%d件' % task_n) if task_n is not None else '未取得'}。新着未読DM: {unread_n}件。相手: 殿。")
+    # 挨拶は Casper が"考える"(定型テンプレ廃止)。タスクの中身まで踏まえ、気の利いた一言をLLM生成。
+    ctx = (f"時間帯の挨拶語: {g}。本日のタスク {('%d件' % task_n) if task_n is not None else '未取得'}"
+           + (f"(内訳: {task_ctx})" if task_ctx else "")
+           + f"。新着未読DM: {unread_n}件。相手: 殿。")
     def _gen_greet():
         return strip_think(llm_text(
             "あなたは studio bokan の伴走AI『Casper』。殿への開門の一言を、下記の状況を踏まえ述べよ。"
             "【最優先=分かりやすさ】平明で自然な現代日本語で書く。凝った比喩・詩的な飾り(『午後の光が差し込む』等)・"
             "回りくどい古語は使わない。口調は軽く——**文末を必ず『〜にござる』か『〜でござる』で締める**"
             "(『ですね』等の現代語尾で終えない)。この語尾だけで十分で、他に大げさな戦国調・古語は使わない。"
-            "定型挨拶でなく、状況(本日のタスク件数・未読DM件数)を一読で分かる形で織り込んだ気の利いた一言に。"
-            "締め文句・末尾の定型的な誘い(『お申し付けを』等)は付けない。改行を入れず1〜2文で。一人称で。",
-            ctx, num_predict=160)).strip().replace("\n", " ")
+            "定型挨拶でなく、**本日のタスクの内訳に具体的に触れよ**(完了済みは実質除いて数える・どれから着手すべきか等の"
+            "気づきを一言添える)。未読DMがあればそれも織り込む。改行を入れず1〜2文で。"
+            "締め文句・末尾の定型的な誘い(『お申し付けを』等)は付けない。一人称で。",
+            ctx, num_predict=200)).strip().replace("\n", " ")
     greet = ""
     try:                                                  # 8秒cap: qwen多忙でブリーフィングをhangさせぬ→テンプレ退避
         import concurrent.futures as _cf2
@@ -1717,8 +1723,9 @@ def open_briefing(who):
             _ex2.shutdown(wait=False)
     except Exception:
         greet = ""
-    if not greet:
-        greet = f"{g}、殿。Casper にござる。"
+    if not greet:                                         # テンプレ退避時もタスク件数入りで味気なくせぬ
+        greet = (f"{g}、殿。本日のタスクは{task_n}件にござる。" if task_n
+                 else f"{g}、殿。Casper にござる。")
     lines = [greet]
     if task_lines:
         lines.append(f"📋 本日のタスク {task_n}件")
