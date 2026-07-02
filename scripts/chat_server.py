@@ -1769,10 +1769,22 @@ def open_briefing(who):
 SEIRI_DIR = os.path.join(HERE, "..", "vault", "60_projects")
 
 
+def _seiri_done_slugs():
+    """既に結晶化済み(vault/60_projects/proj_<slug>.md 有り)の slug 集合。"""
+    done = set()
+    try:
+        for f in os.listdir(SEIRI_DIR):
+            if f.startswith("proj_") and f.endswith(".md"):
+                done.add(f[5:-3])
+    except Exception:
+        pass
+    return done
+
+
 def seiri_projects(who):
-    """① 整理対象PJ一覧。online(これから offline 予定)＋ offline(儀式未了の可能性・遡って結晶化可)。
-    archived(別HD移送済)は除く。online を先頭に。"""
+    """① 整理対象PJ一覧。online(これから offline 予定)＋ offline(儀式未了)。archived と『蒸留完了済』は除く。"""
     uid = who.get("uid"); out = []
+    done = _seiri_done_slugs()
     if uid and WRITE_TOKEN and casper_mcp:
         try:
             pj = casper_mcp.call_tool("get_projects", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
@@ -1781,6 +1793,9 @@ def seiri_projects(who):
                 for p in (items or []):
                     ds = str(p.get("display_status") or "online")
                     if ds == "archived":
+                        continue
+                    slug = re.sub(r"[^\w\-]", "_", (p.get("name") or "project"))[:40] or "project"
+                    if slug in done:                  # 蒸留完了済はリストから外す(殿指示)
                         continue
                     out.append({"id": p.get("id"), "name": p.get("name"),
                                 "description": (p.get("description") or "")[:120],
