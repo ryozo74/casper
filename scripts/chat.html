@@ -237,7 +237,7 @@ function attachEdit(msgDiv, idx, text){
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function inlineMd(s){
   s=esc(s);
-  s=s.replace(/!\[[^\]]*\]\((\/asset\/[A-Za-z0-9_.\-]+)\)/g,'<img class="thumb" src="$1" loading="lazy" onclick="this.classList.toggle(\'big\')">');
+  s=s.replace(/!\[[^\]]*\]\((\/asset\/[A-Za-z0-9_.\-]+)\)/g,'<img class="thumb" src="$1" loading="lazy" onerror="this.replaceWith(document.createTextNode(\'⚠画像なし:\'+this.src.split(\'/\').pop()))" onclick="this.classList.toggle(\'big\')">');
   s=s.replace(/\[([^\]]+)\]\(casper-dm:(\d+):(\d*)\)/g,'<a href="#" class="dmlink" data-dm="$2" data-pid="$3" onclick="openDMById(this);return false">$1</a>');
   s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank">$1</a>');
   s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
