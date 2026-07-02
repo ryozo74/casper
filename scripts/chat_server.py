@@ -1752,6 +1752,100 @@ def open_briefing(who):
     return "\n".join(lines)
 
 
+# ===== Casper 整理(offboarding): 知識を結晶化してから offline する儀式 =====
+SEIRI_DIR = os.path.join(HERE, "..", "vault", "60_projects")
+
+
+def seiri_projects(who):
+    """① online なプロジェクト一覧(チェックボックス用)。offline/archived は除く。"""
+    uid = who.get("uid"); out = []
+    if uid and WRITE_TOKEN and casper_mcp:
+        try:
+            pj = casper_mcp.call_tool("get_projects", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
+            if (pj or "").strip().startswith(("{", "[")):
+                d = json.loads(pj); items = d.get("items") if isinstance(d, dict) else d
+                for p in (items or []):
+                    if str(p.get("display_status") or "online") == "online":
+                        out.append({"id": p.get("id"), "name": p.get("name"),
+                                    "description": (p.get("description") or "")[:120],
+                                    "status": p.get("status") or ""})
+        except Exception:
+            pass
+    return out
+
+
+def seiri_ask(who, project_name, materials):
+    """③ 選ばれたPJ＋投入資料について、Casperが理解を深める質問を生成。"""
+    sysp = ("あなたは studio bokan の伴走AI『Casper』。完了プロジェクトの『整理(offboarding)』の最中。"
+            "下記PJと、人が投入した参考資料(観測外のLINE/Slack等含む)について、知識を永続結晶化する為に"
+            "『まだ分からない要点』を突く質問を2〜3個、簡潔に挙げよ。各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
+    user = f"プロジェクト: {project_name}\n\n投入資料:\n{materials or '(資料なし・PJ名のみ)'}"
+    return strip_think(llm_text(sysp, user, num_predict=400)).strip()
+
+
+def seiri_crystallize(who, project_name, materials, qa):
+    """④ 知識化: 段取り/落とし穴/見積/判断根拠/外部やりとり/引き継ぎ を vault に永続結晶化。"""
+    sysp = ("あなたは Casper。完了PJの知識を次の類似案件で使える形に結晶化せよ。以下の見出しを必ず立て、"
+            "分かる範囲で埋め、不明は『(未取得)』と明記(捏造禁止・推測は(推測)と明示):\n"
+            "## 段取り(工程の実際)\n## 落とし穴・トラブル\n## 見積 vs 実際\n## 判断の根拠\n"
+            "## 外部やりとり(観測外含む)\n## 引き継ぎ要点\n平明な日本語で。")
+    user = f"プロジェクト: {project_name}\n\n投入資料:\n{materials or '(なし)'}\n\n質疑応答:\n{qa or '(なし)'}"
+    body = strip_think(llm_text(sysp, user, num_predict=1400)).strip()
+    try:
+        os.makedirs(SEIRI_DIR, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d")
+        slug = re.sub(r"[^\w\-]", "_", project_name or "project")[:40] or "project"
+        path = os.path.join(SEIRI_DIR, f"proj_{slug}.md")
+        head = (f"---\ntype: project_knowledge\nproject: {project_name}\ncrystallized: {stamp}\n"
+                f"tags: [casper, offboarding, project]\n---\n\n# 🗂 {project_name} — 完了知識(結晶化)\n\n")
+        open(path, "w", encoding="utf-8").write(head + body + "\n")
+        if casper_embed:
+            try: casper_embed.reindex()
+            except Exception: pass
+    except Exception:
+        pass
+    return body
+
+
+def seiri_interview(who, project_name, knowledge, answers):
+    """⑤ 有用性ゲート(採点ルーブリック=Fable5指摘の主観vibe克服)＋不足を埋める逆インタビュー3問。"""
+    sys_j = ("完了PJの結晶化知識が『会社に有用な状態』かを採点せよ。次の5項目それぞれに出所つきの実質的記述が"
+             "1つ以上あるか true/false で判定し JSONのみ返せ: "
+             "{\"rubric\":{\"段取り\":bool,\"落とし穴\":bool,\"見積\":bool,\"判断根拠\":bool,\"外部やりとり\":bool},"
+             "\"ready\":bool,\"missing\":[\"...\"]}。ready は5項目中4つ以上 true の時 true。")
+    verdict = strip_think(llm_text(sys_j,
+              f"PJ: {project_name}\n\n結晶化知識:\n{knowledge}\n\n直近の回答:\n{answers or '(なし)'}", num_predict=300)).strip()
+    ready = False; missing = []; rubric = {}
+    try:
+        m = re.search(r"\{.*\}", verdict, re.S)
+        if m:
+            v = json.loads(m.group(0)); ready = bool(v.get("ready")); missing = v.get("missing") or []; rubric = v.get("rubric") or {}
+    except Exception:
+        pass
+    questions = ""
+    if not ready:
+        sys_q = ("あなたは Casper。下記『不足項目』を埋める逆インタビュー質問を最大3個、簡潔に挙げよ。"
+                 "各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
+        questions = strip_think(llm_text(sys_q,
+                    f"PJ: {project_name}\n不足: {missing or '全般の精度向上'}\n\n現在の知識:\n{knowledge[:1500]}", num_predict=300)).strip()
+    return {"ready": ready, "rubric": rubric, "missing": missing, "questions": questions}
+
+
+def seiri_offline(who, project_id):
+    """⑥ Calendar で offline 化(人の承認後)。update_project(display_status='offline')。"""
+    uid = who.get("uid")
+    if not (uid and WRITE_TOKEN and casper_mcp and project_id):
+        return {"ok": False, "error": "未ログイン/PJ未指定"}
+    try:
+        r = casper_mcp.call_tool("update_project",
+            {"actor_id": int(uid), "project_id": int(project_id), "display_status": "offline"},
+            token=WRITE_TOKEN, actor=uid)
+        ok = (r or "").strip().startswith("{") and "error" not in (r or "")[:40]
+        return {"ok": ok, "result": str(r)[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def vimeo_kb_save(title, description, link, vid="", uploader="", extra=None):
     """Vimeoにアップした動画の『説明』を vault(asset_shadow) へ知識化し、別会話から検索可能にする。
     説明はそのまま検索用本文として保存。RAG索引も更新。返り値=保存パス。"""
@@ -2078,6 +2172,14 @@ class H(BaseHTTPRequestHandler):
             page = "learn.html"
         elif self.path in ("/play", "/play.html"):
             page = "play.html"
+        elif self.path in ("/seiri", "/seiri.html"):
+            page = "seiri.html"
+        elif self.path == "/api/seiri/projects":       # ① online PJ 一覧(整理対象の候補)
+            try:
+                self._json({"projects": seiri_projects(identify(self))})
+            except Exception as e:
+                self._json({"projects": [], "error": str(e)})
+            return
         elif self.path in ("/peek", "/peek.html", "/graph"):
             page = "graph.html"
         elif self.path in ("/mcp", "/mcp.html"):
@@ -2271,6 +2373,26 @@ class H(BaseHTTPRequestHandler):
                 if self.path == "/api/iv/answer":
                     out["recorded"] = True
                 self._json(out)
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if self.path.startswith("/api/seiri/"):    # Casper 整理(offboarding): ③質問/④知識化/⑤逆IV/⑥offline
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            try:
+                if self.path == "/api/seiri/ask":            # ③ 資料について質問
+                    self._json({"questions": seiri_ask(who, req.get("project", ""), req.get("materials", ""))})
+                elif self.path == "/api/seiri/crystallize":  # ④ 知識化(vault結晶化)
+                    self._json({"knowledge": seiri_crystallize(who, req.get("project", ""),
+                                req.get("materials", ""), req.get("qa", ""))})
+                elif self.path == "/api/seiri/interview":    # ⑤ 逆IV＋有用性ゲート
+                    self._json(seiri_interview(who, req.get("project", ""),
+                                req.get("knowledge", ""), req.get("answers", "")))
+                elif self.path == "/api/seiri/offline":      # ⑥ Calendar offline(人承認後)
+                    self._json(seiri_offline(who, req.get("project_id")))
+                else:
+                    self._json({"error": "unknown seiri endpoint"})
             except Exception as e:
                 self._json({"error": str(e)})
             return

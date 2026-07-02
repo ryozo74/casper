@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Casperで整理 — プロジェクト offboarding</title>
+<style>
+  :root{--bg:#0b0f17;--panel:#111826;--line:#1f2937;--txt:#e5e7eb;--mut:#8ea0b5;--accent:#38bdf8;--good:#34d399;--warn:#fbbf24;--bad:#f87171}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;line-height:1.7}
+  header{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--line);background:#0d1420;position:sticky;top:0;z-index:5}
+  header h1{font-size:16px;margin:0}
+  header .nav{display:flex;gap:8px;margin-left:auto}
+  header .nav a{font-size:12.5px;color:var(--mut);text-decoration:none;border:1px solid var(--line);padding:4px 10px;border-radius:8px}
+  header .nav a:hover{border-color:var(--accent);color:var(--txt)}
+  .wrap{max-width:860px;margin:0 auto;padding:22px 20px 80px}
+  .intro{background:#132238;border-left:4px solid var(--accent);padding:12px 16px;border-radius:10px;color:#cbd5e1;font-size:14px;margin-bottom:20px}
+  .step{border:1px solid var(--line);border-radius:14px;margin:16px 0;overflow:hidden;opacity:.5;transition:.2s}
+  .step.on{opacity:1;border-color:#2b3a55}
+  .step>.sh{background:#16233b;padding:11px 18px;font-weight:700;font-size:15px;display:flex;align-items:center;gap:10px}
+  .step>.sh .no{width:24px;height:24px;border-radius:50%;background:var(--accent);color:#04121e;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;flex:none}
+  .step>.sh .done{margin-left:auto;color:var(--good);font-size:13px}
+  .step>.sb{padding:14px 18px}
+  .pj{display:flex;align-items:flex-start;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;margin:6px 0;cursor:pointer}
+  .pj:hover{border-color:var(--accent)}
+  .pj.sel{border-color:var(--accent);background:rgba(56,189,248,.08)}
+  .pj input{margin-top:4px}
+  .pj .nm{font-weight:700}
+  .pj .ds{font-size:12px;color:var(--mut)}
+  textarea{width:100%;background:#0c131f;border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:10px 12px;font-family:inherit;font-size:14px;resize:vertical;min-height:76px}
+  .drop{border:1.5px dashed #2b3a55;border-radius:10px;padding:14px;text-align:center;color:var(--mut);font-size:13px;margin:8px 0}
+  .drop.over{border-color:var(--accent);background:rgba(56,189,248,.06)}
+  button{background:var(--accent);color:#04121e;border:0;border-radius:9px;padding:9px 16px;font-weight:700;font-size:14px;cursor:pointer;margin-top:10px}
+  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  button:disabled{opacity:.4;cursor:default}
+  .out{background:#0c131f;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-top:10px;white-space:pre-wrap;font-size:13.5px}
+  .q{background:rgba(56,189,248,.07);border:1px solid rgba(56,189,248,.3);border-radius:9px;padding:8px 12px;margin:7px 0;font-size:14px}
+  .rubric{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}
+  .rubric .ri{font-size:12px;border-radius:999px;padding:3px 11px;border:1px solid var(--line)}
+  .rubric .ri.ok{color:var(--good);border-color:rgba(52,211,153,.5)}
+  .rubric .ri.ng{color:var(--bad);border-color:rgba(248,113,113,.45)}
+  .ready{background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:11px 15px;margin:12px 0;color:#a7f3d0;font-size:14px}
+  .spin{color:var(--mut);font-size:13px}
+  .mut{color:var(--mut);font-size:12.5px}
+</style></head>
+<body>
+<header>
+  <h1>🧹 Casperで整理</h1>
+  <span class="mut">知識を結晶化してから offline する儀式</span>
+  <nav class="nav"><a href="/">← 会話へ</a><a href="/play">🎲 遊ぶ</a></nav>
+</header>
+<div class="wrap">
+  <div class="intro">プロジェクト完了時、生データ(タスク/決定/議事録/DM)が offline で消える前に、Casper が知識を永続結晶化する儀式にござる。人が両端(選定・承認)を握り、Casper が中間(質問→知識化→有用性判定)を担う。<br><span class="mut">※TVCM 等を選び ②〜⑤ を通せます。⑥ offline は承認後に実行。</span></div>
+
+  <!-- ① 対象PJ選択 -->
+  <div class="step on" id="s1"><div class="sh"><span class="no">1</span>整理するプロジェクトを選ぶ<span class="done" id="d1"></span></div>
+    <div class="sb"><div id="pjlist" class="spin">online プロジェクトを読み込み中…</div></div></div>
+
+  <!-- ② 資料投入 -->
+  <div class="step" id="s2"><div class="sh"><span class="no">2</span>追加資料を投入(観測外の LINE/Slack 等)<span class="done" id="d2"></span></div>
+    <div class="sb">
+      <div class="drop" id="drop">ここにテキストファイルをドラッグ、または下へ貼り付け</div>
+      <textarea id="materials" placeholder="プロジェクトの補足・外部やりとり・決定の背景などを貼り付け（無くても可）"></textarea>
+      <button id="b2" onclick="doAsk()">③ Casper に理解させる →</button>
+    </div></div>
+
+  <!-- ③ Casperの質問 -->
+  <div class="step" id="s3"><div class="sh"><span class="no">3</span>Casper が資料について問う<span class="done" id="d3"></span></div>
+    <div class="sb"><div id="askout"></div>
+      <textarea id="askans" placeholder="Casper の問いに答える（分かる範囲で）"></textarea>
+      <button id="b3" onclick="doLearn()">④ 知識化する →</button></div></div>
+
+  <!-- ④ 知識化 -->
+  <div class="step" id="s4"><div class="sh"><span class="no">4</span>知識化(vault へ結晶化)<span class="done" id="d4"></span></div>
+    <div class="sb"><div id="learnout"></div>
+      <button id="b4" onclick="doInterview('')">⑤ 逆インタビューで詰める →</button></div></div>
+
+  <!-- ⑤ 逆インタビュー＋有用性ゲート -->
+  <div class="step" id="s5"><div class="sh"><span class="no">5</span>逆インタビュー → 有用性ゲート<span class="done" id="d5"></span></div>
+    <div class="sb"><div id="ivout"></div>
+      <textarea id="ivans" placeholder="Casper の逆インタビューに答える"></textarea>
+      <button id="b5" onclick="answerInterview()">回答して再判定</button></div></div>
+
+  <!-- ⑥ offline -->
+  <div class="step" id="s6"><div class="sh"><span class="no">6</span>Calendar で offline(承認)<span class="done" id="d6"></span></div>
+    <div class="sb"><div id="offout" class="mut">⑤で「有用な状態」に達すると解放されまする。</div>
+      <button id="b6" onclick="doOffline()" disabled>Calendar で offline 化する</button></div></div>
+</div>
+
+<script>
+let SEL=null, KNOW='';
+const $=id=>document.getElementById(id);
+function on(n){$('s'+n).classList.add('on');}
+function done(n,t){$('d'+n).textContent=t||'✓ 完了';}
+
+// ① PJ 一覧
+fetch('/api/seiri/projects',{credentials:'same-origin'}).then(r=>r.json()).then(d=>{
+  const box=$('pjlist'); box.className='';
+  if(!d.projects||!d.projects.length){box.innerHTML='<span class="mut">online のプロジェクトがありませぬ（またはログインが要る）。</span>';return;}
+  box.innerHTML='';
+  d.projects.forEach(p=>{
+    const el=document.createElement('label'); el.className='pj';
+    el.innerHTML='<input type="radio" name="pj"><span><span class="nm">'+esc(p.name)+'</span> <span class="ds">'+esc(p.status||'')+(p.description?(' — '+esc(p.description)):'')+'</span></span>';
+    el.querySelector('input').onchange=()=>{document.querySelectorAll('.pj').forEach(x=>x.classList.remove('sel'));el.classList.add('sel');SEL=p;done(1,'✓ '+p.name);on(2);};
+    box.appendChild(el);
+  });
+}).catch(e=>{$('pjlist').className='';$('pjlist').textContent='読み込み失敗: '+e;});
+
+// ② ドラッグ投入
+const drop=$('drop');
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$('materials').value+=(($('materials').value?'\n\n':'')+'['+f.name+']\n'+r.result);};r.readAsText(f);});
+
+function busy(b,t){b.disabled=true;b.dataset.t=b.textContent;b.textContent=t;}
+function free(b){b.disabled=false;b.textContent=b.dataset.t;}
+
+// ③ 質問
+function doAsk(){
+  if(!SEL)return alert('プロジェクトを選んでくだされ');
+  busy($('b2'),'Casper 思案中…');
+  fetch('/api/seiri/ask',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:SEL.name,materials:$('materials').value})}).then(r=>r.json()).then(d=>{
+    free($('b2'));$('askout').innerHTML=(d.questions||'(質問生成に失敗)').split('\n').filter(x=>x.trim()).map(q=>'<div class="q">'+esc(q)+'</div>').join('');
+    done(2);on(3);
+  }).catch(e=>{free($('b2'));$('askout').textContent='失敗: '+e;});
+}
+// ④ 知識化
+function doLearn(){
+  busy($('b3'),'結晶化中…');
+  fetch('/api/seiri/crystallize',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:SEL.name,materials:$('materials').value,qa:$('askans').value})}).then(r=>r.json()).then(d=>{
+    free($('b3'));KNOW=d.knowledge||'';$('learnout').innerHTML='<div class="out">'+esc(KNOW)+'</div>';
+    done(3);done(4,'✓ vault へ保存');on(4);on(5);
+  }).catch(e=>{free($('b3'));$('learnout').textContent='失敗: '+e;});
+}
+// ⑤ 逆インタビュー＋有用性ゲート
+function doInterview(ans){
+  busy($('b4'),'有用性を判定中…');
+  fetch('/api/seiri/interview',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:SEL.name,knowledge:KNOW,answers:ans})}).then(r=>r.json()).then(d=>{
+    free($('b4'));renderIV(d);
+  }).catch(e=>{free($('b4'));$('ivout').textContent='失敗: '+e;});
+}
+function answerInterview(){
+  const a=$('ivans').value.trim(); if(!a)return alert('回答を入れてくだされ');
+  // 回答を知識へ足し、再結晶化してから再判定(有用な状態に近づける)
+  busy($('b5'),'反映中…');
+  fetch('/api/seiri/crystallize',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:SEL.name,materials:$('materials').value,qa:$('askans').value+'\n\n[追加回答]\n'+a})}).then(r=>r.json()).then(d=>{
+    KNOW=d.knowledge||KNOW;$('learnout').innerHTML='<div class="out">'+esc(KNOW)+'</div>';$('ivans').value='';free($('b5'));doInterview(a);
+  }).catch(e=>{free($('b5'));$('ivout').textContent='失敗: '+e;});
+}
+function renderIV(d){
+  const R=d.rubric||{};const keys=['段取り','落とし穴','見積','判断根拠','外部やりとり'];
+  let h='<div class="rubric">'+keys.map(k=>'<span class="ri '+(R[k]?'ok':'ng')+'">'+(R[k]?'✓':'×')+' '+k+'</span>').join('')+'</div>';
+  if(d.ready){
+    h+='<div class="ready">✓ 会社に有用な状態に達し申した。offline化してよろしゅうござる。</div>';
+    $('b6').disabled=false;$('offout').textContent='承認をお願いいたす。offline 化すると Calendar 上で不可視になり申す（生データは保全）。';
+    done(5,'✓ 有用性 到達');on(6);
+  }else{
+    h+=(d.questions||'').split('\n').filter(x=>x.trim()).map(q=>'<div class="q">'+esc(q)+'</div>').join('');
+    if(d.missing&&d.missing.length)h+='<div class="mut">不足: '+d.missing.map(esc).join('・')+'</div>';
+  }
+  $('ivout').innerHTML=h;
+}
+// ⑥ offline
+function doOffline(){
+  if(!confirm(SEL.name+' を offline 化しまする。よろしいか？'))return;
+  busy($('b6'),'offline 化中…');
+  fetch('/api/seiri/offline',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project_id:SEL.id})}).then(r=>r.json()).then(d=>{
+    if(d.ok){$('offout').innerHTML='<div class="ready">✓ '+esc(SEL.name)+' を offline 化いたした。儀式 完了にござる。</div>';done(6);$('b6').style.display='none';}
+    else{free($('b6'));$('offout').textContent='offline 失敗: '+(d.error||d.result||'');}
+  }).catch(e=>{free($('b6'));$('offout').textContent='失敗: '+e;});
+}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+</script>
+</body></html>
