@@ -1655,14 +1655,29 @@ def open_briefing(who):
                     break
             if isinstance(items, list):
                 task_n = len(items)
+                pmap = {}                                 # project_id→PJ名(高精細表示に必須)
+                try:
+                    pj = casper_mcp.call_tool("get_projects", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
+                    if (pj or "").strip().startswith(("{", "[")):
+                        pd = _j.loads(pj); pit = pd.get("items") if isinstance(pd, dict) else pd
+                        pmap = {str(p.get("id")): p.get("name") for p in (pit or [])}
+                except Exception:
+                    pass
+                _ST = {"in-progress": "🔵進行中", "todo": "⚪未着手", "completed": "✅完了",
+                       "done": "✅完了", "review": "🟡レビュー", "blocked": "🔴停滞"}
+                _PR = {"HIGH": "優先高", "MEDIUM": "優先中", "LOW": ""}
                 _tctx = []
                 for it in items[:12]:                     # フィールド名の揺れに頑健(name/title/task_name)
                     nm = it.get("name") or it.get("title") or it.get("task_name") or ("task#%s" % it.get("id"))
                     st = it.get("status") or ""
+                    stj = _ST.get(st, st)
+                    pjn = pmap.get(str(it.get("project_id")), "")
                     due = str(it.get("due_date") or "")[:10]
-                    tail = (f"　[{st}]" if st else "") + (f"　〆{due}" if due else "")
-                    task_lines.append(f"- {nm}{tail}")    # markdown bullet=詰まったリスト(<p>の空行を避ける)
-                    _tctx.append(f"{nm}({st or '状態不明'})")
+                    prj = _PR.get((it.get("priority") or "").upper(), "")
+                    meta = " · ".join(x for x in [stj, prj, (f"〆{due[5:]}" if due else "")] if x)
+                    pjtag = f"**[{pjn}]** " if pjn else ""
+                    task_lines.append(f"- {pjtag}{nm}" + (f" · {meta}" if meta else ""))
+                    _tctx.append(f"{(pjn+'/') if pjn else ''}{nm}({stj})")
                 task_ctx = "、".join(_tctx)
         except Exception:
             pass
@@ -1727,8 +1742,7 @@ def open_briefing(who):
         greet = (f"{g}、殿。本日のタスクは{task_n}件にござる。" if task_n
                  else f"{g}、殿。Casper にござる。")
     lines = [greet]
-    if task_lines:
-        lines.append(f"📋 本日のタスク {task_n}件")
+    if task_lines:                                        # 見出しは挨拶が件数を述べる為 省く(上下の空行を作らぬ)
         lines += task_lines
     if dm_lines:
         lines.append(f"💬 新着DM {unread_n}件（クリックで開く・「○○さんに返信」で代筆可）")
