@@ -56,6 +56,16 @@ def embed_batch(texts):
         return None
 
 
+def _atomic_dump(obj, path):
+    """一時ファイルへ書いてから rename(=アトミック置換)。並行 reindex による半端書き込み破損を防ぐ。"""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)                                  # 同一FS内 rename はアトミック
+
+
 def build(batch=32):
     """casper_rag の全chunkをバッチでベクトル化して保存。"""
     if casper_rag._CACHE is None:
@@ -73,7 +83,7 @@ def build(batch=32):
             out.append({"src": e["src"], "title": e.get("title", ""), "t": e["t"], "v": v})
         if (i + batch) % 320 == 0 or i + batch >= len(chunks):
             print(f"  {min(i+batch,len(chunks))}/{len(chunks)} ...", flush=True)
-    json.dump(out, open(EMB_INDEX, "w", encoding="utf-8"), ensure_ascii=False)
+    _atomic_dump(out, EMB_INDEX)
     return len(out)
 
 
@@ -89,8 +99,11 @@ def reindex():
     chunks = json.load(open(casper_rag.INDEX, encoding="utf-8"))
     old = {}
     if os.path.exists(EMB_INDEX):
-        for e in json.load(open(EMB_INDEX, encoding="utf-8")):
-            old[(e["src"], e["t"])] = e.get("v")
+        try:
+            for e in json.load(open(EMB_INDEX, encoding="utf-8")):
+                old[(e["src"], e["t"])] = e.get("v")
+        except Exception:
+            old = {}                                           # 破損時は空扱い→全再埋込で自己修復
     out, miss_idx, miss_txt = [], [], []
     for e in chunks:                                           # 未変更は旧ベクトル再利用
         v = old.get((e["src"], e["t"]))
@@ -106,7 +119,7 @@ def reindex():
         for j, v in zip(gi, vecs):
             out[j]["v"] = v; reembedded += 1
     out = [e for e in out if e.get("v") is not None]
-    json.dump(out, open(EMB_INDEX, "w", encoding="utf-8"), ensure_ascii=False)
+    _atomic_dump(out, EMB_INDEX)
     global _VEC
     _VEC = None
     return {"chunks": len(chunks), "reembedded": reembedded, "embed": "ok"}
@@ -115,7 +128,10 @@ def reindex():
 def _load():
     global _VEC
     if _VEC is None:
-        _VEC = json.load(open(EMB_INDEX, encoding="utf-8")) if os.path.exists(EMB_INDEX) else []
+        try:
+            _VEC = json.load(open(EMB_INDEX, encoding="utf-8")) if os.path.exists(EMB_INDEX) else []
+        except Exception:
+            _VEC = []                                          # 破損時は空=字面検索へ退避(crashさせぬ)
     return _VEC
 
 
