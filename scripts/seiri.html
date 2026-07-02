@@ -52,7 +52,14 @@
 
   <!-- ① 対象PJ選択 -->
   <div class="step on" id="s1"><div class="sh"><span class="no">1</span>整理するプロジェクトを選ぶ<span class="done" id="d1"></span></div>
-    <div class="sb"><div id="pjlist" class="spin">online プロジェクトを読み込み中…</div></div></div>
+    <div class="sb"><div id="pjlist" class="spin">online プロジェクトを読み込み中…</div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+        <div class="mut" style="margin-bottom:6px">一覧に無いPJは名前を直接入力（例: TVCM）:</div>
+        <div style="display:flex;gap:8px">
+          <input id="pjname" type="text" placeholder="プロジェクト名" style="flex:1;background:#0c131f;border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:8px 11px;font-size:14px">
+          <button style="margin-top:0" onclick="pickManual()">この名前で始める →</button>
+        </div>
+      </div></div></div>
 
   <!-- ② 資料投入 -->
   <div class="step" id="s2"><div class="sh"><span class="no">2</span>追加資料を投入(観測外の LINE/Slack 等)<span class="done" id="d2"></span></div>
@@ -103,6 +110,13 @@ fetch('/api/seiri/projects',{credentials:'same-origin'}).then(r=>r.json()).then(
     box.appendChild(el);
   });
 }).catch(e=>{$('pjlist').className='';$('pjlist').textContent='読み込み失敗: '+e;});
+
+// ① 直接入力(一覧に無いPJ・TVCM等) — 選択を経ず②へ
+function pickManual(){
+  const nm=$('pjname').value.trim(); if(!nm)return alert('プロジェクト名を入れてくだされ');
+  document.querySelectorAll('.pj').forEach(x=>x.classList.remove('sel'));
+  SEL={id:null,name:nm}; done(1,'✓ '+nm+'（直接入力）'); on(2);
+}
 
 // ② ドラッグ投入
 const drop=$('drop');
@@ -164,6 +178,7 @@ function renderIV(d){
 }
 // ⑥ offline
 function doOffline(){
+  if(!SEL.id){alert('直接入力のプロジェクト（例: TVCM）は Calendar 上に無いため offline 化できませぬ。②〜⑤の知識結晶化まではテスト可能にござる。');return;}
   if(!confirm(SEL.name+' を offline 化しまする。よろしいか？'))return;
   busy($('b6'),'offline 化中…');
   fetch('/api/seiri/offline',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
