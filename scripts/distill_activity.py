@@ -131,6 +131,34 @@ def org_dm(uid, tok):
         return []
 
 
+EVENTS_STORE = os.path.join(HERE, "events_store.jsonl")
+
+
+def calendar_events(uid):
+    """events_store.jsonl(全社 get_events 集約)から本人(actor_uid)の最近の活動を集める。
+    chat/DM に現れぬメンバーも含む『全社活動』の源(Fable5=組織コミットメントグラフ)。"""
+    if not os.path.exists(EVENTS_STORE):
+        return []
+    out = []
+    try:
+        for ln in open(EVENTS_STORE, encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                e = json.loads(ln)
+            except Exception:
+                continue
+            if str(e.get("actor_uid")) == str(uid):
+                d = f" ({e.get('detail')})" if e.get("detail") else ""
+                out.append((str(e.get("ts", "")),
+                            f"[{e.get('system')}] {e.get('action')} {e.get('target_type')}#{e.get('target_id')}{d}"))
+    except Exception:
+        pass
+    out.sort(key=lambda x: x[0])
+    return out[-40:]
+
+
 def gather(uid, tok):
     """1uid分の全素材を時系列テキストに。"""
     parts = [f"# 素材 uid={uid} ({uname(uid)})", "", "## org DM 逐語(get_messages)"]
@@ -139,10 +167,13 @@ def gather(uid, tok):
     parts += ["", "## 会話・dev ログ(時系列)"]
     ev = sorted(local_events().get(uid, []), key=lambda x: x[0])
     parts += [f"[{ts[:16]}] {txt}" for ts, txt in ev[-80:]] or ["(なし)"]
+    parts += ["", "## Calendar活動(get_events集約・全社イベント)"]
+    ce = calendar_events(uid)
+    parts += [f"[{ts[:16]}] {txt}" for ts, txt in ce] or ["(なし)"]
     parts += ["", "## Score現場ログ"]
     sc = score_rows().get(uid, [])
     parts += sc if sc else ["(なし)"]
-    return "\n".join(parts), len(ev) + len(dm)
+    return "\n".join(parts), len(ev) + len(dm) + len(ce)
 
 
 PROMPT_TMPL = (
@@ -179,11 +210,26 @@ def distill(uid, material, prev="", asof=""):
         return f"(蒸留失敗 opus: {e})"
 
 
+def _event_actors():
+    """events_store の actor_uid 一覧(chat/DM外の全社メンバーも帯対象に=全社動向拡張)。"""
+    s = set()
+    if os.path.exists(EVENTS_STORE):
+        for ln in open(EVENTS_STORE, encoding="utf-8"):
+            try:
+                a = str(json.loads(ln).get("actor_uid") or "")
+                if a and a != "None":
+                    s.add(a)
+            except Exception:
+                pass
+    return s
+
+
 def main():
     only = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else None
     tok = _write_token()
     os.makedirs(ACTIVITY, exist_ok=True)
-    uids = [only] if only else sorted(set(local_events().keys()) | set(score_rows().keys()))
+    # uid源: 会話+Score+**全社イベント(events_store)** の和集合=chat外メンバーも対象に
+    uids = [only] if only else sorted(set(local_events().keys()) | set(score_rows().keys()) | _event_actors())
     n = 0
     for uid in uids:
         if not uid:

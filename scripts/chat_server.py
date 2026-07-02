@@ -954,6 +954,47 @@ def activity_digest(who):
         return ""
 
 
+# 状態を問う問い(〜された?/上がった?/どうなってる?/進捗?)を機械的に検知する関門。
+_STATE_Q_RE = re.compile(
+    r"(され(た|てる|てます|ました)|終わ(った|り|りました)|上が(った|ってる|りました)|"
+    r"完了|できた|反映(され|した)|届い(た|てる)|返信.*(来|きた|あった)|アップ.*(済|した|された)|"
+    r"どうなっ(て|た)|進捗|状況|現状|状態|もう.{0,6}(？|\?)|終わってる|できてる)", re.I)
+
+
+def verify_digest(who, query):
+    """【検証ゲート=pre_verify機構】状態を問う問いには、応答前に live照会を強制し、
+    出所タグ(live/帯/推測)を義務づける。掟②が"促す"だけだったのを"通さねば"の機構へ格上げ。
+    (Fable5 診断 #1: 裏取りを掟から機構へ / 2026-07-02)。状態質問でなければ空。"""
+    try:
+        if not query or not _STATE_Q_RE.search(query):
+            return ""
+        uid = who.get("uid")
+        live = ""
+        if uid and WRITE_TOKEN and casper_mcp:
+            try:                                          # get_events(Nibu改修で稼働)=最新の状態変化
+                ev = casper_mcp.call_tool("get_events", {"actor_id": int(uid), "since": 0, "limit": 30},
+                                          token=WRITE_TOKEN, actor=int(uid))
+                if isinstance(ev, str) and ev.strip().startswith("{") and "error" not in ev[:40]:
+                    live += "\n【live: Calendar 最新イベント(get_events)】\n" + ev[:1500]
+            except Exception:
+                pass
+            try:
+                tt = casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=int(uid))
+                if isinstance(tt, str) and tt.strip().startswith(("{", "[")):
+                    live += "\n【live: 本日タスク】\n" + tt[:900]
+            except Exception:
+                pass
+        return ("\n\n## 【検証ゲート】状態確認の問い — 応答前の裏取り必須\n"
+                "この問いは『状態(〜された?/上がった?/どうなってる?/進捗)』を尋ねている。掟②に従い:\n"
+                "・動向層の帯は as-of 時点のスナップショットゆえ、その古い記述を『結末』と誤認して断定するな。\n"
+                "・下記の live 照会を最優先の根拠にせよ。live に無ければ『現時点では確認できておらぬ』と正直に述べよ。\n"
+                "・**回答の各事実に出所を明示せよ**: 【live】(今照会した実状態)／【帯】(動向層の過去記述)／【推測】。\n"
+                "・**出所タグの無い状態断定は禁止**。"
+                + (live or "\n(live照会は取得できず＝『未確認』として答えよ)"))
+    except Exception:
+        return ""
+
+
 def log_convo(who, role, content, extra=None):
     """会話を発信元ごとの順序付きスレッドとして記録(文脈=流れ を資産化)。"""
     try:
@@ -1599,15 +1640,26 @@ def open_briefing(who):
     g = "おはようございます" if h < 11 else ("こんにちは" if h < 18 else "こんばんは")
     uid = who.get("uid")
     task_n = None                                          # 事実を集め→末尾でCasperが"考えて"挨拶
+    task_lines = []
     dm_lines = []
     unread_n = 0
     if uid and WRITE_TOKEN and casper_mcp:
-        try:
-            tt = casper_mcp.call_tool("get_today_tasks", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
-            d = _j.loads(tt) if (tt or "").strip().startswith(("{", "[")) else None
-            items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
+        try:                                              # get_today_tasks は時々timeout/500→軽く再試行(再現性)
+            items = None
+            for _att in range(2):
+                tt = casper_mcp.call_tool("get_today_tasks", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
+                if (tt or "").strip().startswith(("{", "[")):
+                    d = _j.loads(tt)
+                    items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
+                    break
             if isinstance(items, list):
                 task_n = len(items)
+                for it in items[:12]:                     # フィールド名の揺れに頑健(name/title/task_name)
+                    nm = it.get("name") or it.get("title") or it.get("task_name") or ("task#%s" % it.get("id"))
+                    st = it.get("status") or ""
+                    due = str(it.get("due_date") or "")[:10]
+                    tail = (f"　[{st}]" if st else "") + (f"　〆{due}" if due else "")
+                    task_lines.append(f"・{nm}{tail}")
         except Exception:
             pass
         try:
@@ -1647,9 +1699,12 @@ def open_briefing(who):
            f"{('%d件' % task_n) if task_n is not None else '未取得'}。新着未読DM: {unread_n}件。相手: 殿。")
     def _gen_greet():
         return strip_think(llm_text(
-            "あなたは studio bokan の伴走AI『Casper』。殿への開門の一言を、下記の状況を踏まえ戦国口調で簡潔に述べよ。"
-            "定型の挨拶文でなく、状況(タスク/DMの有無・件数)に即した気の利いた一言に。"
-            "締め文句・末尾の定型的な誘い(『お申し付けを』等)は付けるな。改行を入れず1〜2文で。",
+            "あなたは studio bokan の伴走AI『Casper』。殿への開門の一言を、下記の状況を踏まえ述べよ。"
+            "【最優先=分かりやすさ】平明で自然な現代日本語で書く。凝った比喩・詩的な飾り(『午後の光が差し込む』等)・"
+            "回りくどい古語は使わない。口調は軽く——**文末を必ず『〜にござる』か『〜でござる』で締める**"
+            "(『ですね』等の現代語尾で終えない)。この語尾だけで十分で、他に大げさな戦国調・古語は使わない。"
+            "定型挨拶でなく、状況(本日のタスク件数・未読DM件数)を一読で分かる形で織り込んだ気の利いた一言に。"
+            "締め文句・末尾の定型的な誘い(『お申し付けを』等)は付けない。改行を入れず1〜2文で。一人称で。",
             ctx, num_predict=160)).strip().replace("\n", " ")
     greet = ""
     try:                                                  # 8秒cap: qwen多忙でブリーフィングをhangさせぬ→テンプレ退避
@@ -1665,6 +1720,9 @@ def open_briefing(who):
     if not greet:
         greet = f"{g}、殿。Casper にござる。"
     lines = [greet]
+    if task_lines:
+        lines.append(f"📋 本日のタスク {task_n}件")
+        lines += task_lines
     if dm_lines:
         lines.append(f"💬 新着DM {unread_n}件（クリックで開く・「○○さんに返信」で代筆可）")
         lines += dm_lines
@@ -2696,6 +2754,7 @@ class H(BaseHTTPRequestHandler):
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
             cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
+            cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
@@ -2762,6 +2821,7 @@ class H(BaseHTTPRequestHandler):
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
         sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
+        sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
         sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
