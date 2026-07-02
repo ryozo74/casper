@@ -387,6 +387,32 @@ def _validate_assets(text):
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+def _validate_report_html(html):
+    """【報告書の出口検問=Fable5 #4】報告書HTMLの /asset リンク(img src / a href)を台帳照合し、
+    実在せぬ捏造リンクを除去/注記化してから Aurora保存。報告書は数値・固有名・リンクの捏造面ゆえ最終防壁を置く。"""
+    if not html or "/asset/" not in html or not casper_manifest:
+        return html
+    try:
+        real = casper_manifest.real_names()
+    except Exception:
+        return html
+    if not real:
+        return html
+    import urllib.parse as _up
+
+    def _fn(u):
+        return os.path.basename(_up.unquote(u.split("?")[0].split("#")[0]))
+
+    def _img(m):                                            # <img src=/asset/x>: 実在せぬなら注記に置換
+        return m.group(0) if _fn(m.group(1)) in real else "<span style=\"color:#b91c1c\">[未確認画像]</span>"
+    html = re.sub(r'<img[^>]*\bsrc=["\'](/asset/[^"\']+)["\'][^>]*>', _img, html)
+
+    def _a(m):                                             # <a href=/asset/x>txt</a>: 実在せぬならリンク剥がしテキストのみ
+        return m.group(0) if _fn(m.group(1)) in real else m.group(2)
+    html = re.sub(r'<a[^>]*\bhref=["\'](/asset/[^"\']+)["\'][^>]*>(.*?)</a>', _a, html, flags=re.S)
+    return html
+
+
 _EMAIL_UID_CACHE = {}
 
 
@@ -3110,6 +3136,7 @@ class H(BaseHTTPRequestHandler):
                 uname = (_uid_to_name(_uid) if _uid else None) or req.get("author") or "casper"
                 meta = f"著者: {uname} ／ 種別: {lbl} ／ 対象: {anchor or '—'}"
                 html = report_lib.render_blocks_html(title, meta, structure, dr["sections"])
+                html = _validate_report_html(html)          # 稿の出口検問: 捏造/assetリンクを除去(Fable5 #4)
                 res = casper_aurora.create(title, html, author_id=uname, project=(anchor or "報告書"),
                                            work="報告書", tags=["report", rtype])
                 rd = json.loads(res) if isinstance(res, str) else (res or {})
@@ -3127,6 +3154,7 @@ class H(BaseHTTPRequestHandler):
                 doc_id = req.get("doc_id", ""); html = req.get("html", "")
                 if not (doc_id and html):
                     self._json({"ok": False, "error": "doc_id/html 必須"}); return
+                html = _validate_report_html(html)           # 編集保存も出口検問(Fable5 #4)
                 uname = _uid_to_name(who.get("uid")) or "casper"
                 res = casper_aurora.append_version(doc_id, html, author_id=uname)
                 rd = json.loads(res) if isinstance(res, str) else (res or {})
