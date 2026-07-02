@@ -1054,30 +1054,45 @@ _EXIST_Q_RE = re.compile(
 
 
 def existence_digest(who, query):
-    """【存在断定ゲート】資料/データの"存在"を問う問いには、応答前に RAG 検索を強制注入し、
-    網羅検索なき『無い/存在しない』の断定を禁ずる(掟②・TKP LED_A 誤断 2026-07-02 の再発防止)。"""
+    """【存在ゲート=retrieve-then-render/Fable5 #2】資料/データの有無を問う問いには、RAGの散文でなく
+    資産台帳(決定的)を引き、実在ファイルの構造化リスト＋総数を注入。モデルは"このリストを語るだけ"に縮み、
+    実名を与えられるので捏造せず、COUNTで網羅漏れ・『在るのに無い』誤断が構造的に消える。"""
     try:
         if not query or not _EXIST_Q_RE.search(query):
             return ""
-        hits = []
-        if casper_embed:                                  # 意味検索(bge-m3)を最優先
+        rows = []
+        if casper_manifest:                               # 台帳=決定的真実源(存在は"事実")
             try:
-                hits = [str(h)[:280] for h in (casper_embed.hybrid(query, k=7) or [])]
+                rows = casper_manifest.search(query, limit=80)
             except Exception:
-                hits = []
-        if not hits and casper_rag:                       # フォールバック=字面検索
+                rows = []
+        rag = []                                          # RAGは"説明の文脈"用の補助(識別子は台帳が正)
+        if casper_embed:
             try:
-                hits = [str(h)[:280] for h in (casper_rag.search(query, k=7) or [])]
+                rag = [str(h)[:200] for h in (casper_embed.hybrid(query, k=4) or [])]
             except Exception:
-                hits = []
-        block = "\n".join(f"- {h}" for h in hits[:7]) if hits else "(RAG検索ヒットなし)"
+                rag = []
+        if rows:
+            shown = rows[:45]
+            lines = []
+            for m in shown:
+                d = (m.get("desc") or "").replace("\n", " ").strip()[:70]
+                lines.append(f"- {m['name']}" + (f" — {d}" if d else ""))
+            more = f"\n(ほか {len(rows) - len(shown)} 件)" if len(rows) > len(shown) else ""
+            return ("\n\n## 【存在確認=資産台帳の照会結果(決定的・唯一の真実源)】\n"
+                    f"この問い『〜はあるか』に対し、資産台帳を引いた実在ファイル **計{len(rows)}件**(下記が全件):\n"
+                    + "\n".join(lines) + more +
+                    "\n──\n・**上記の実ファイル名だけを使え**。ここに無い名を推測で書くな(＝捏造・存在しない)。\n"
+                    f"・件数は上記の**{len(rows)}件が全て**。『これで全部』と言うなら台帳件数と一致させよ。一部だけ見て断定するな。\n"
+                    "・画像を見せるなら `![](/asset/実ファイル名)` を上記から選んで書け。\n"
+                    "・『無い』と言えるのは台帳が0件を返した時だけ。上記があるなら『在る』と答えよ。"
+                    + (("\n【補助: 説明の文脈(RAG)】\n" + "\n".join(f"- {r}" for r in rag)) if rag else ""))
+        # 台帳0件 → RAG補助で留保付き回答(捏造も断定もさせぬ)
+        block = "\n".join(f"- {h}" for h in rag[:5]) if rag else "(台帳・RAG共にヒットなし)"
         return ("\n\n## 【存在確認ゲート】資料/データの有無を問う問い\n"
-                "この問いは『〜の資料/データ/画像はあるか』を尋ねている。下記は vault の RAG 検索結果:\n"
-                + block +
-                "\n・上記に該当があれば、それを根拠に『在る』と**出所(ファイル名)つき**で答えよ。\n"
-                "・**網羅的に探さぬ限り『無い/存在しない/登録されていない』と断定するな**(掟②)。"
-                "見当たらねば『確認できた範囲では見当たらぬ(別の探し方があれば)』と留保付きで述べよ。\n"
-                "・**別名・略称(例: TKP↔Nina、コンテ↔絵コンテ、動画↔ムービー)も考慮**し、狭い検索語や一部の資料だけ見て早合点するな。")
+                "資産台帳を引いたが該当ファイルは0件。参考(RAG):\n" + block +
+                "\n・別名(TKP↔Nina等)を変えて再照会せよ。それでも無ければ『確認できた範囲では見当たらぬ』と"
+                "留保付きで述べよ——**存在せぬファイル名を推測で書くな**。")
     except Exception:
         return ""
 

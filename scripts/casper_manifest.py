@@ -75,32 +75,42 @@ def exists(filename):
     return os.path.basename(filename or "") in _load()
 
 
+# 汎用語(意図語・種別語・助詞)は識別性ゼロゆえ検索語から除く(これらで全件マッチする雑音を防ぐ)
+_STOP = {
+    "ある", "あります", "ありますか", "ありませんか", "ない", "無い", "どこ", "見せて", "見せ", "見たい",
+    "探して", "探し", "教えて", "教え", "欲しい", "ほしい", "全部", "全て", "すべて", "これ", "それ",
+    "この", "その", "です", "ます", "など", "とか", "って", "一覧", "リスト", "情報", "もの", "こと",
+    "資料", "画像", "動画", "データ", "ファイル", "素材", "静止画", "映像", "写真", "ドキュメント", "議事録",
+    "について", "関する", "たい", "して", "した", "から", "まで",
+}
+
+
 def _terms(query):
     q = (query or "").lower()
-    terms = [t for t in re.split(r"[\s、,　。・]+", q) if len(t) >= 2]
-    exp = set(terms)
+    raw = [t for t in re.split(r"[\s、,　。・？\?！!の（）()「」]+", q) if len(t) >= 2]
+    terms = [t for t in raw if t not in _STOP]
     for t in list(terms):
         for k, vs in ALIASES.items():
             if k in t:
-                exp.update(vs)
-    return exp
+                terms.extend(vs)
+    return terms or raw                                    # 全て除かれたら生語で退避
 
 
 def search(query, exts=None, limit=60):
-    """決定的検索: ファイル名＋説明に対する語の部分一致(別名展開込み)。該当資産を全件(上限内)返す。
-    exts=('.png','.jpg') 等で種別を絞れる。返り値=[{name,path,ext,desc,md}, ...]。"""
+    """決定的検索: ファイル名＋説明への語の部分一致を"一致語数"でランク付け(別名展開込み)。
+    汎用語は除外し distinctive な語(TKP/LED等)を重視。exts で種別を絞れる。返り値=[{name,...}]。"""
     files = _load()
     terms = _terms(query)
-    out = []
+    scored = []
     for fn, meta in files.items():
         if exts and meta["ext"] not in exts:
             continue
         hay = (fn + " " + meta.get("desc", "")).lower()
-        # 語のいずれかを含めば候補(存在確認=網羅重視ゆえ OR)
-        if not terms or any(t in hay for t in terms):
-            out.append(meta)
-    out.sort(key=lambda m: m["name"])
-    return out[:limit]
+        score = sum(1 for t in set(terms) if t in hay)
+        if not terms or score > 0:
+            scored.append((score, meta))
+    scored.sort(key=lambda x: (-x[0], x[1]["name"]))
+    return [m for _, m in scored][:limit]
 
 
 def count(query="", exts=None):
