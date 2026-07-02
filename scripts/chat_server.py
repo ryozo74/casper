@@ -1114,9 +1114,10 @@ def existence_digest(who, query):
                     f"この問い『〜はあるか』に対し、資産台帳を引いた実在ファイル **計{len(rows)}件**(下記が全件):\n"
                     + "\n".join(lines) + more +
                     "\n──\n・**上記の実ファイル名だけを使え**。ここに無い名を推測で書くな(＝捏造・存在しない)。\n"
-                    f"・件数は上記の**{len(rows)}件が全て**。『これで全部』と言うなら台帳件数と一致させよ。一部だけ見て断定するな。\n"
+                    f"・この台帳の件数は上記の**{len(rows)}件が全て**(vault内の資産ファイルについて)。一部だけ見て断定するな。\n"
                     "・画像を見せるなら `![](/asset/実ファイル名)` を上記から選んで書け。\n"
-                    "・『無い』と言えるのは台帳が0件を返した時だけ。上記があるなら『在る』と答えよ。"
+                    "・注意: この台帳は**vault内の資産ファイル**の真実源であり、**Vimeo動画・Aurora資料・Calendar記録**の有無は"
+                    "別物。台帳が0件でもそれらに在り得るゆえ、『世界に存在しない』とは断ずるな(必要なら別途照会)。"
                     + (("\n【補助: 説明の文脈(RAG)】\n" + "\n".join(f"- {r}" for r in rag)) if rag else ""))
         # 台帳0件 → RAG補助で留保付き回答(捏造も断定もさせぬ)
         block = "\n".join(f"- {h}" for h in rag[:5]) if rag else "(台帳・RAG共にヒットなし)"
@@ -2163,6 +2164,13 @@ def seiri_interview(who, project_name, knowledge, answers):
             v = json.loads(m.group(0)); rubric = v.get("rubric") or {}; evidence = v.get("evidence") or {}
     except Exception:
         pass
+    # evidence検証(Fable指摘): trueの各項は引用が結晶化知識中に実在せねば false へ降格(引用の捏造を弾く)
+    _kn = re.sub(r"\s+", "", knowledge or "")
+    for _k in list(rubric.keys()):
+        if rubric.get(_k):
+            _ev = re.sub(r"\s+", "", str(evidence.get(_k, "")))[:30]
+            if not _ev or (len(_ev) >= 6 and _ev not in _kn):
+                rubric[_k] = False                         # 引用なし/知識に不在=自己申告捏造→false
     # ready をコードで決定的判定(LLMの自己申告readyを信じない): 必須コア＋残り3中2
     core = bool(rubric.get("判断根拠")) and bool(rubric.get("落とし穴"))
     rest = sum(1 for k in ("段取り", "見積", "外部やりとり") if rubric.get(k))
@@ -2186,17 +2194,26 @@ def _seiri_raw_snapshot(uid, project_id):
     try:
         pj = casper_mcp.call_tool("get_projects", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
         items = (json.loads(pj).get("items") if (pj or "").strip().startswith("{") else []) or []
-        prec = next((p for p in items if str(p.get("id")) == str(project_id)), {})
+        prec = next((p for p in items if str(p.get("id")) == str(project_id)), None)
+        if not prec:                                       # project記録が取れねば保険は不成立→None(嘘の安心を残さぬ)
+            return None
         name = prec.get("name") or f"project_{project_id}"
-        ev = casper_mcp.call_tool("get_events", {"actor_id": int(uid), "since": 0, "limit": 500},
-                                  token=WRITE_TOKEN, actor=uid)
-        evd = json.loads(ev) if (ev or "").strip().startswith("{") else {}
-        pev = [e for e in (evd.get("events") or []) if str(e.get("target_id")) and prec]
-        snap = {"snapshot_at": datetime.datetime.now().isoformat(timespec="seconds"),
-                "project": prec, "events_sample": pev[:200],
-                "note": "offline直前の生データ保険(Fable5硬化)。offlineは不可逆圧縮ゆえ蒸留の再検証用に保存。"}
-        os.makedirs(SEIRI_DIR, exist_ok=True)
         slug = re.sub(r"[^\w\-]", "_", name)[:40] or "project"
+        cryst = ""
+        cpath = os.path.join(SEIRI_DIR, f"proj_{slug}.md")   # 結晶化本文(あれば)
+        if os.path.exists(cpath):
+            cryst = open(cpath, encoding="utf-8").read()
+        sources = []                                        # 蒸留に使った vault素材の一覧(復元の手がかり)
+        if casper_manifest:
+            try:
+                sources = [m["name"] for m in casper_manifest.search(name)]
+            except Exception:
+                pass
+        snap = {"snapshot_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "project": prec, "crystallization": cryst, "vault_sources": sources,
+                "note": "offline前の復元手がかり(Fable硬化)。project記録＋結晶化本文＋蒸留に使ったvault素材一覧。"
+                        "注: Calendarのタスク/決定/DMの完全raw取得はAPI未対応ゆえ含まぬ(今後の課題)。"}
+        os.makedirs(SEIRI_DIR, exist_ok=True)
         path = os.path.join(SEIRI_DIR, f"proj_{slug}_raw.json")
         json.dump(snap, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         return path

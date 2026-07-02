@@ -48,11 +48,19 @@ def for_uid(uid):
 
 
 def for_text(text, name_to_uid):
-    """text中に名が現れる人物のtraitを集める。name_to_uid={名:uid}(roster)。返り=[(name, [traits])]。"""
+    """text中に名が現れる人物のtraitを集める。name_to_uid={名:uid}(roster)。返り=[(name, [traits])]。
+    ASCII名(ou/tim/li 等)は語境界で照合(about/timing/list への部分一致誤爆を防ぐ・Fable指摘)。日本語名は部分一致。"""
+    import re
     out = []
     t = text or ""
     for name, uid in (name_to_uid or {}).items():
-        if name and len(name) >= 2 and name in t:
+        if not name or len(name) < 2:
+            continue
+        if name.isascii():
+            hit = re.search(r"(?<![A-Za-z0-9])" + re.escape(name) + r"(?![A-Za-z0-9])", t, re.I)
+        else:
+            hit = name in t
+        if hit:
             tr = for_uid(uid)
             if tr:
                 out.append((name, tr))
