@@ -1770,7 +1770,8 @@ SEIRI_DIR = os.path.join(HERE, "..", "vault", "60_projects")
 
 
 def seiri_projects(who):
-    """① online なプロジェクト一覧(チェックボックス用)。offline/archived は除く。"""
+    """① 整理対象PJ一覧。online(これから offline 予定)＋ offline(儀式未了の可能性・遡って結晶化可)。
+    archived(別HD移送済)は除く。online を先頭に。"""
     uid = who.get("uid"); out = []
     if uid and WRITE_TOKEN and casper_mcp:
         try:
@@ -1778,10 +1779,13 @@ def seiri_projects(who):
             if (pj or "").strip().startswith(("{", "[")):
                 d = json.loads(pj); items = d.get("items") if isinstance(d, dict) else d
                 for p in (items or []):
-                    if str(p.get("display_status") or "online") == "online":
-                        out.append({"id": p.get("id"), "name": p.get("name"),
-                                    "description": (p.get("description") or "")[:120],
-                                    "status": p.get("status") or ""})
+                    ds = str(p.get("display_status") or "online")
+                    if ds == "archived":
+                        continue
+                    out.append({"id": p.get("id"), "name": p.get("name"),
+                                "description": (p.get("description") or "")[:120],
+                                "status": p.get("status") or "", "display_status": ds})
+                out.sort(key=lambda x: (x["display_status"] != "online", x["name"] or ""))
         except Exception:
             pass
     return out
