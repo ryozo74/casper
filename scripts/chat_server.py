@@ -1522,8 +1522,30 @@ def route_to_people(question, answer, stamp):
     return routed
 
 
+VENV_PY = os.path.join(HERE, "..", "..", "..", ".venv", "bin", "python")   # fitz(PyMuPDF)入りvenv
+
+
+def pdf_to_page_images(pdf_path, max_pages=5, dpi=100):
+    """PDF各ページをPNG化(VENV_PY fitz経由)。画像PDF(コンテ等)の vision 読解／サムネ用。返り値=画像パスlist。"""
+    if not os.path.exists(VENV_PY):
+        return []
+    base = re.sub(r"[^\w.\-]", "_", os.path.splitext(os.path.basename(pdf_path))[0])[:40] or "pdf"
+    code = ("import fitz,sys,os\n"
+            "pdf,out,base,mx,dpi=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4]),int(sys.argv[5])\n"
+            "d=fitz.open(pdf)\n"
+            "for i in range(min(len(d),mx)):\n"
+            "    fp=os.path.join(out,f'{base}_p{i+1}.png')\n"
+            "    d[i].get_pixmap(dpi=dpi).save(fp); print(fp)\n")
+    try:
+        r = subprocess.run([VENV_PY, "-c", code, pdf_path, ASSET_FILES, base, str(max_pages), str(dpi)],
+                           capture_output=True, text=True, timeout=120)
+        return [ln for ln in (r.stdout or "").splitlines() if ln.strip() and os.path.exists(ln)]
+    except Exception:
+        return []
+
+
 def feed_ingest(filename, description, data_b64):
-    """資料を保存→テキスト抽出→Casper が要約＋確認質問を作る。"""
+    """資料を保存→テキスト抽出/vision→Casper が要約＋確認質問を作る。画像PDF(コンテ等)はページ画像化してvision。"""
     os.makedirs(ASSET_FILES, exist_ok=True)
     safe = re.sub(r"[^\w.\-]", "_", os.path.basename(filename or "material"))[:60] or "material"
     path = os.path.join(ASSET_FILES, safe)
@@ -1535,6 +1557,7 @@ def feed_ingest(filename, description, data_b64):
     fmt = ("出力形式を厳守(他に何も書かない):\n"
            "SUMMARY: <この資料が何で、何が読み取れるか。2〜4文>\n"
            "QUESTIONS: <解像度を上げる確認質問1> | <質問2> | <質問3>")
+    is_pdf = ext == ".pdf"
     if is_image and VISION_BACKEND == "claude_cli":
         # 画像は chat backend(ollama/qwen 等)に依らず Claude Sonnet の vision で直接解析
         vp = (build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。"
@@ -1546,6 +1569,26 @@ def feed_ingest(filename, description, data_b64):
                            f"資料ファイル名: {safe}\n説明: {description}\n抽出内容:\n{text[:8000]}\n\n" + fmt)
         else:
             text = "(画像: Casper vision[Sonnet] で直接解析)"
+    elif is_pdf and VISION_BACKEND == "claude_cli" and \
+            len((casper_extract.extract(path) if casper_extract else "").strip().replace("(PDF: テキスト無し=画像PDFの可能性)", "")) < 80:
+        # 画像PDF(コンテ/絵素材等)=テキストが取れぬ → 各ページを画像化して vision で視認
+        imgs = pdf_to_page_images(path, max_pages=5)
+        if imgs:
+            descs = []
+            for i, ip in enumerate(imgs):
+                vp = (build_sys() + "\n\nあなたは資料を理解する Casper。"
+                      f"\n\nこれはPDF資料『{safe}』の{i+1}ページ目の画像(説明:{description})。"
+                      "このページの絵柄・文字・構成・意図を簡潔に述べよ(2〜3文)。")
+                d1 = claude_cli_vision(ip, vp)
+                descs.append(f"[{i+1}ページ] " + (d1 if not d1.startswith("[vision") else "(視認失敗)"))
+            text = "\n".join(descs)
+            out = llm_text(build_sys() + "\n\nあなたは資料を理解する Casper。",
+                           f"PDF資料『{safe}』(全ページ画像PDF・{len(imgs)}ページ視認)。説明:{description}\n\n"
+                           f"各ページ視認結果:\n{text}\n\n" + fmt)
+        else:
+            text = "(画像PDF・ページ画像化失敗)"
+            out = llm_text(build_sys() + "\n\nあなたは資料を理解する Casper。",
+                           f"資料: {safe}(画像PDFだが画像化できず)\n説明: {description}\n\n" + fmt)
     else:
         text = casper_extract.extract(path) if casper_extract else "(抽出器なし)"
         system = (build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。"
@@ -2367,23 +2410,34 @@ class H(BaseHTTPRequestHandler):
                 self.send_response(404); self.end_headers()
             return
         elif self.path.startswith("/asset/"):
-            fn = os.path.basename(self.path.split("/asset/")[-1].split("?")[0])
+            import urllib.parse as _up
+            raw = _up.unquote(self.path.split("/asset/")[-1].split("?")[0])  # 日本語名=percent-encode を復号
+            cands = [os.path.basename(raw)]
+            try:                                          # 生UTF-8がlatin-1で来た場合の復号も試す
+                cands.append(os.path.basename(raw.encode("latin-1").decode("utf-8")))
+            except Exception:
+                pass
             # 配信元2系統: scripts/assets(従来) と vault/50_asset_shadows/files(ingest保存先)。
-            # ingest/抽出した画像は ASSET_FILES に入るため両方を探さねば 404 になる(殿報告 2026-06-29)。
-            ap = ""
-            for _root in (ASSETS_DIR, ASSET_FILES):
-                _cand = os.path.join(_root, fn)
-                if fn and os.path.exists(_cand) and os.path.abspath(_cand).startswith(os.path.abspath(_root)):
-                    ap = _cand
+            ap = ""; fn = cands[0]
+            for _fn in cands:
+                for _root in (ASSETS_DIR, ASSET_FILES):
+                    _cand = os.path.join(_root, _fn)
+                    if _fn and os.path.exists(_cand) and os.path.abspath(_cand).startswith(os.path.abspath(_root)):
+                        ap = _cand; fn = _fn
+                        break
+                if ap:
                     break
             if ap:
                 ext = os.path.splitext(fn)[1].lower()
                 ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                         ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "application/octet-stream")
+                         ".gif": "image/gif", ".webp": "image/webp",
+                         ".pdf": "application/pdf"}.get(ext, "application/octet-stream")
                 b = open(ap, "rb").read()
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(b)))
+                if ext == ".pdf":                          # ブラウザ内 inline 表示(iframe)を許す
+                    self.send_header("Content-Disposition", "inline")
                 self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
                 self.wfile.write(b)
