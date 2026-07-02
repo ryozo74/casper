@@ -1654,6 +1654,8 @@ def open_briefing(who):
                     items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
                     break
             if isinstance(items, list):
+                items = [it for it in items                # 完了タスクは残務一覧に出さぬ(殿指示)
+                         if (it.get("status") or "").lower() not in ("completed", "done")]
                 task_n = len(items)
                 pmap = {}                                 # project_id→PJ名(高精細表示に必須)
                 try:
