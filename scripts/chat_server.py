@@ -41,6 +41,10 @@ try:
 except Exception:
     casper_embed = None
 try:
+    import casper_manifest                       # 資産台帳(実ファイルの決定的真実源)=出口検問/検索の基盤
+except Exception:
+    casper_manifest = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -354,6 +358,32 @@ def _salvage_text_toolcall(final, who, pending_actions):
     f = re.sub(r"\n{3,}", "\n\n", f).strip()
     note = "（↓の承認カードで本文を確認・編集し、ボタンを押すと送信されます）"
     return (f + "\n\n" + note) if f else note
+
+
+def _validate_assets(text):
+    """【出口検問=Fable5処方】応答内の /asset URL を資産台帳と照合し、実在せぬファイル名(LLMの捏造)を
+    ユーザーに届けない。画像markdownは除去(割れ画像を出さぬ)・リンクは注記化。確率0で破れぬ最終防壁。"""
+    if not text or "/asset/" not in text or not casper_manifest:
+        return text
+    try:
+        real = casper_manifest.real_names()
+    except Exception:
+        return text
+    if not real:
+        return text
+    import urllib.parse as _up
+
+    def _fn(u):
+        return os.path.basename(_up.unquote(u.split("?")[0].split("#")[0]))
+
+    def _img(m):                                            # 画像: 実在せぬなら丸ごと除去
+        return m.group(0) if _fn(m.group(1)) in real else ""
+    text = re.sub(r"!\[[^\]]*\]\((/asset/[^)\s]+)\)", _img, text)
+
+    def _lnk(m):                                           # リンク: 実在せぬなら注記
+        return m.group(0) if _fn(m.group(2)) in real else f"[未確認: {m.group(1)}]"
+    text = re.sub(r"(?<!!)\[([^\]]+)\]\((/asset/[^)\s]+)\)", _lnk, text)
+    return re.sub(r"\n{3,}", "\n\n", text)
 
 
 _EMAIL_UID_CACHE = {}
@@ -3153,6 +3183,7 @@ class H(BaseHTTPRequestHandler):
                 thinking = tm.group(1).strip()
             ans = strip_think(raw)
             ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
+            ans = _validate_assets(ans)                           # 出口検問: 捏造/asset URLを除去
             ans, diagram = render_diagram(ans)
             log_convo(who, "user", last_user)                     # 文脈=流れ を順序記録
             log_convo(who, "casper", ans, {"diagram": bool(diagram)})
@@ -3176,6 +3207,7 @@ class H(BaseHTTPRequestHandler):
                 ans = strip_think(anthropic_agent(msgs, fu))
             except Exception as e:
                 ans = f"[anthropic error] {e}"
+            ans = _validate_assets(ans)                           # 出口検問
             for i in range(0, len(ans), 36):
                 self._emit(ans[i:i + 36])
             try:
@@ -3344,6 +3376,7 @@ class H(BaseHTTPRequestHandler):
             final = "(応答を得られませなんだ)"
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
         final = _salvage_text_toolcall(final, who, pending_actions)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
+        final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
         final, diagram = render_diagram(final)
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
