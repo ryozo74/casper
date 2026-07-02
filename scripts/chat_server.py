@@ -284,6 +284,24 @@ def _salvage_text_toolcall(final, who, pending_actions):
     if pending_actions:                            # 既にツール呼出で pending 済なら不要
         return final
     f = final or ""
+    # ⓪ Aurora ノート作成の表明救済: qwen が「Auroraに『TITLE』として作成しますか？承認ボタン…」と
+    #    "言っただけ"で aurora_create を呼ばなかった場合、応答本体を本文に pending 登録→承認カードを出す。
+    if (re.search(r"[Aa]urora", f) and re.search(r"承認ボタン|作成しますか|保存されます|保存しますか|作成しました|保存しました", f)
+            and re.search(r"(ノート|ドキュメント|資料|note)", f)):
+        tm = re.search(r"[「『]([^」』]{2,80})[」』]", f)
+        title = (tm.group(1).strip() if tm else "Casperノート")
+        # 本文=表明文(Aurora/承認ボタン等の行)を除いた応答本体(Casperが提示した一覧など)
+        body = re.sub(r"(?m)^.*(承認ボタン|作成しますか|保存されます|保存しますか|Auroraに|Aurora に).*$", "", f).strip()
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        if len(body) >= 20:
+            args = {"title": title, "body": body}
+            if who.get("uid"):
+                args["actor_id"] = who["uid"]
+            summary = _action_summary("aurora_create", args)
+            pid = _register_pending("aurora_create", args, who.get("uid"), summary)
+            pending_actions.append({"id": pid, "tool": "aurora_create", "args": args, "summary": summary})
+            f2 = re.sub(r"(作成します|保存します|作成しました|保存しました|作成しますか)", "下書きしました", f)
+            return f2 + f"\n\n（↓の承認カードで確認し、ボタンを押すと Aurora に「{title}」として保存されます）"
     to = body = None
     cut = None
     # ① JSONブロック形 ```json {to_user_id, body}```
