@@ -995,6 +995,42 @@ def verify_digest(who, query):
         return ""
 
 
+# 資料/データの"存在"を問う問い(〜はある?/無い/登録されて/見せて/探して/どこ)
+_EXIST_Q_RE = re.compile(
+    r"(あります|ある(か|の|\?|？)|ありませんか|無い|ない(か|の|\?|？)|存在|登録(され|して)|見せて|見たい|"
+    r"探して|見つ|どこ(に|\?|？)|持って(る|いる|ますか)|残って(る|いる)|"
+    r"(資料|画像|動画|データ|ファイル|素材|静止画|コンテ|絵|写真|映像|ドキュメント|議事録).{0,10}(は|が|ある|無|ない|見|探|どこ|欲し))", re.I)
+
+
+def existence_digest(who, query):
+    """【存在断定ゲート】資料/データの"存在"を問う問いには、応答前に RAG 検索を強制注入し、
+    網羅検索なき『無い/存在しない』の断定を禁ずる(掟②・TKP LED_A 誤断 2026-07-02 の再発防止)。"""
+    try:
+        if not query or not _EXIST_Q_RE.search(query):
+            return ""
+        hits = []
+        if casper_embed:                                  # 意味検索(bge-m3)を最優先
+            try:
+                hits = [str(h)[:280] for h in (casper_embed.hybrid(query, k=7) or [])]
+            except Exception:
+                hits = []
+        if not hits and casper_rag:                       # フォールバック=字面検索
+            try:
+                hits = [str(h)[:280] for h in (casper_rag.search(query, k=7) or [])]
+            except Exception:
+                hits = []
+        block = "\n".join(f"- {h}" for h in hits[:7]) if hits else "(RAG検索ヒットなし)"
+        return ("\n\n## 【存在確認ゲート】資料/データの有無を問う問い\n"
+                "この問いは『〜の資料/データ/画像はあるか』を尋ねている。下記は vault の RAG 検索結果:\n"
+                + block +
+                "\n・上記に該当があれば、それを根拠に『在る』と**出所(ファイル名)つき**で答えよ。\n"
+                "・**網羅的に探さぬ限り『無い/存在しない/登録されていない』と断定するな**(掟②)。"
+                "見当たらねば『確認できた範囲では見当たらぬ(別の探し方があれば)』と留保付きで述べよ。\n"
+                "・**別名・略称(例: TKP↔Nina、コンテ↔絵コンテ、動画↔ムービー)も考慮**し、狭い検索語や一部の資料だけ見て早合点するな。")
+    except Exception:
+        return ""
+
+
 def log_convo(who, role, content, extra=None):
     """会話を発信元ごとの順序付きスレッドとして記録(文脈=流れ を資産化)。"""
     try:
@@ -3037,6 +3073,7 @@ class H(BaseHTTPRequestHandler):
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
             cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
             cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
+            cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
@@ -3104,6 +3141,7 @@ class H(BaseHTTPRequestHandler):
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
         sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
         sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
+        sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
         sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
