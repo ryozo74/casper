@@ -1602,8 +1602,24 @@ def pdf_to_page_images(pdf_path, max_pages=5, dpi=100):
         return []
 
 
+def office_to_pdf(src_path):
+    """pptx/docx/xlsx を PDF に変換(libreoffice headless)。表示(PDFビューア)＋vision読解＋そのままDL用。
+    返り値=生成PDFパス or ''(soffice未導入/失敗)。"""
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice or not os.path.exists(src_path):
+        return ""
+    try:
+        subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", ASSET_FILES, src_path],
+                       capture_output=True, text=True, timeout=180)
+        pdf = os.path.join(ASSET_FILES, os.path.splitext(os.path.basename(src_path))[0] + ".pdf")
+        return pdf if os.path.exists(pdf) else ""
+    except Exception:
+        return ""
+
+
 def feed_ingest(filename, description, data_b64):
-    """資料を保存→テキスト抽出/vision→Casper が要約＋確認質問を作る。画像PDF(コンテ等)はページ画像化してvision。"""
+    """資料を保存→テキスト抽出/vision→Casper が要約＋確認質問を作る。画像PDF(コンテ等)はページ画像化してvision。
+    Office(pptx/docx/xlsx)は libreoffice で PDF 化→表示/DL/vision に供する。"""
     os.makedirs(ASSET_FILES, exist_ok=True)
     safe = re.sub(r"[^\w.\-]", "_", os.path.basename(filename or "material"))[:60] or "material"
     path = os.path.join(ASSET_FILES, safe)
@@ -1657,8 +1673,16 @@ def feed_ingest(filename, description, data_b64):
     qm = re.search(r"QUESTIONS:\s*(.+)", out)
     summary = (sm.group(1).strip() if sm else out.strip())[:1200]
     questions = [q.strip() for q in qm.group(1).split("|")] if qm else []
-    return {"saved_as": safe, "summary": summary,
-            "questions": [q for q in questions if q][:5], "extract_preview": text[:600]}
+    resp = {"saved_as": safe, "summary": summary,
+            "questions": [q for q in questions if q][:5], "extract_preview": text[:600],
+            "download_url": "/asset/" + safe}                 # 生ファイルを そのままDL可能に
+    if ext in (".pptx", ".docx", ".xlsx"):                    # Office → PDF化して"そのまま表示"＋DL
+        pdf = office_to_pdf(path)
+        if pdf:
+            resp["view_url"] = "/asset/" + os.path.basename(pdf)   # PDFビューアで表示
+    elif ext == ".pdf":
+        resp["view_url"] = "/asset/" + safe
+    return resp
 
 
 IMPORT_LOG = os.path.join(HERE, "import_log.jsonl")
@@ -2488,14 +2512,19 @@ class H(BaseHTTPRequestHandler):
             if ap:
                 ext = os.path.splitext(fn)[1].lower()
                 ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                         ".gif": "image/gif", ".webp": "image/webp",
-                         ".pdf": "application/pdf"}.get(ext, "application/octet-stream")
+                         ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf",
+                         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}.get(ext, "application/octet-stream")
                 b = open(ap, "rb").read()
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(b)))
                 if ext == ".pdf":                          # ブラウザ内 inline 表示(iframe)を許す
                     self.send_header("Content-Disposition", "inline")
+                elif ext in (".pptx", ".docx", ".xlsx"):   # Office はそのままダウンロード
+                    import urllib.parse as _up2
+                    self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + _up2.quote(fn))
                 self.send_header("Cache-Control", "max-age=86400")
                 self.end_headers()
                 self.wfile.write(b)

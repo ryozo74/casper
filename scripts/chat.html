@@ -262,6 +262,11 @@ function mediaEmbed(ln){
   if(m){ const u=m[1]; const nm=(ln.match(/\[([^\]]+)\]\([^)]+\.pdf\)/i)||[])[1]||decodeURIComponent(u.split('/').pop());
     return '<div class="pdfwrap"><div class="pdfbar">📄 '+esc(nm)+' <a href="'+esc(u)+'" target="_blank">↗ 別タブで開く</a></div>'
       +'<iframe class="pdfframe" src="'+esc(u)+'#view=FitH" loading="lazy"></iframe></div>'; }
+  // Office(pptx/docx/xlsx) リンク → ダウンロードチップ(＋変換PDFがあれば別途 .pdf リンクで表示)
+  m=ln.match(/(\/asset\/[^\s)]+\.(?:pptx|docx|xlsx))/i);
+  if(m){ const u=m[1]; const nm=decodeURIComponent(u.split('/').pop());
+    const ic=/\.pptx$/i.test(u)?'📊':/\.xlsx$/i.test(u)?'📗':'📄';
+    return '<div class="pdfbar" style="border:1px solid #1f2937;border-radius:10px;margin:10px 0">'+ic+' '+esc(nm)+' <a href="'+esc(u)+'" download>⬇ ダウンロード</a></div>'; }
   return null;
 }
 function mdToHtml(src){

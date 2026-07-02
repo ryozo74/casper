@@ -140,7 +140,8 @@ function ingestFile(f){
     try{
       const d=await fetch('/api/feed/ingest',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({filename:f.name,description:'整理対象PJ「'+(SEL?SEL.name:'')+'」の資料',data_b64:r.result})}).then(x=>x.json());
-      $('materials').value=$('materials').value.replace(tag,'【'+f.name+'（Casper読解）】\n'+(d.summary||d.error||'(読込失敗)'));
+      const dl=d.download_url?('\n元ファイル(DL可): '+d.download_url):'';
+      $('materials').value=$('materials').value.replace(tag,'【'+f.name+'（Casper読解）】\n'+(d.summary||d.error||'(読込失敗)')+dl);
     }catch(e){ $('materials').value=$('materials').value.replace(tag,'['+f.name+'] 読込失敗: '+e); }
   };
   r.readAsDataURL(f);
