@@ -146,8 +146,9 @@ function doLearn(){
   busy($('b3'),'結晶化中…');
   fetch('/api/seiri/crystallize',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({project:SEL.name,materials:$('materials').value,qa:$('askans').value})}).then(r=>r.json()).then(d=>{
-    free($('b3'));KNOW=d.knowledge||'';$('learnout').innerHTML='<div class="out">'+esc(KNOW)+'</div>';
-    done(3);done(4,'✓ vault へ保存');on(4);on(5);
+    free($('b3'));KNOW=d.knowledge||'';const src=d.vault_sources||0;
+    $('learnout').innerHTML=(src?'<div class="mut" style="margin-bottom:6px">📚 vault既存素材 '+src+' 件を自動で取り込み、統合して結晶化しました</div>':'')+'<div class="out">'+esc(KNOW)+'</div>';
+    done(3);done(4,'✓ vault へ保存'+(src?'（既存'+src+'件統合）':''));on(4);on(5);
   }).catch(e=>{free($('b3'));$('learnout').textContent='失敗: '+e;});
 }
 // ⑤ 逆インタビュー＋有用性ゲート

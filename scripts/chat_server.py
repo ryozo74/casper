@@ -1791,37 +1791,90 @@ def seiri_projects(who):
     return out
 
 
+def _vault_excerpt(txt, name, per_file=700):
+    """PJ名を含む行の周辺(±2行)を抜粋。全文でなく該当箇所のみ。"""
+    lines = txt.split("\n"); keep = []; seen = set()
+    for i, ln in enumerate(lines):
+        if name in ln:
+            for j in range(max(0, i - 2), min(len(lines), i + 3)):
+                if j not in seen:
+                    seen.add(j); keep.append(lines[j])
+            if sum(len(x) for x in keep) > per_file:
+                break
+    return "\n".join(keep)[:per_file]
+
+
+def seiri_vault_material(project_name, cap=12000):
+    """PJ名で vault を横断し、既存の議事録/asset影武者/DB書庫/人物 等から素材を自動収集。
+    60_projects(自らの結晶化=citogenesis回避)と汎用短名は除外。総量を上限で抑える。返り値=(素材text, 出典数)。"""
+    if not project_name or len(project_name) < 3:
+        return "", 0
+    import glob
+    vault = os.path.join(HERE, "..", "vault")
+    SKIP = {"60_projects", "_templates", "bokan_persona_versions"}
+    chunks = []; total = 0
+    for f in sorted(glob.glob(os.path.join(vault, "**", "*.md"), recursive=True)):
+        d = os.path.basename(os.path.dirname(f))
+        if d in SKIP:
+            continue
+        try:
+            txt = open(f, encoding="utf-8").read()
+        except Exception:
+            continue
+        if project_name not in txt:
+            continue
+        ex = _vault_excerpt(txt, project_name)
+        if ex.strip():
+            piece = f"[{d}/{os.path.basename(f)}]\n{ex}"
+            chunks.append(piece); total += len(piece)
+            if total > cap:
+                break
+    return ("\n\n".join(chunks)[:cap], len(chunks))
+
+
 def seiri_ask(who, project_name, materials):
-    """③ 選ばれたPJ＋投入資料について、Casperが理解を深める質問を生成。"""
+    """③ PJの vault既存素材＋投入資料を踏まえ、Casperが『まだ埋まらぬ穴』を突く質問を生成。"""
+    vault_mat, nsrc = seiri_vault_material(project_name)
     sysp = ("あなたは studio bokan の伴走AI『Casper』。完了プロジェクトの『整理(offboarding)』の最中。"
-            "下記PJと、人が投入した参考資料(観測外のLINE/Slack等含む)について、知識を永続結晶化する為に"
-            "『まだ分からない要点』を突く質問を2〜3個、簡潔に挙げよ。各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
-    user = f"プロジェクト: {project_name}\n\n投入資料:\n{materials or '(資料なし・PJ名のみ)'}"
+            "下記PJについて、vault既存素材(議事録/asset/DB書庫等)と人の投入資料で"
+            "**既に分かっている事は問わず**、永続結晶化に『まだ足りない穴』だけを突く質問を2〜3個、簡潔に挙げよ。"
+            "各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
+    user = (f"プロジェクト: {project_name}\n\n## vault既存素材({nsrc}件)\n{vault_mat or '(なし)'}"
+            f"\n\n## 人が投入した追加資料\n{materials or '(なし)'}")
     return strip_think(llm_text(sysp, user, num_predict=400)).strip()
 
 
 def seiri_crystallize(who, project_name, materials, qa):
-    """④ 知識化: 段取り/落とし穴/見積/判断根拠/外部やりとり/引き継ぎ を vault に永続結晶化。"""
-    sysp = ("あなたは Casper。完了PJの知識を次の類似案件で使える形に結晶化せよ。以下の見出しを必ず立て、"
-            "分かる範囲で埋め、不明は『(未取得)』と明記(捏造禁止・推測は(推測)と明示):\n"
+    """④ 知識化: vault既存素材＋人の投入資料＋質疑を統合し、段取り/落とし穴/見積/判断根拠/外部やりとり/
+    引き継ぎ を vault に永続結晶化。返り値=(結晶化本文, vault出典数)。"""
+    vault_mat, nsrc = seiri_vault_material(project_name)
+    sysp = ("あなたは Casper。完了PJの知識を次の類似案件で使える形に結晶化せよ。**冒頭に前置き・挨拶を書くな**"
+            "(いきなり見出しから始めよ)。以下の見出しを必ず立て、下記素材から分かる範囲で埋め、"
+            "不明は『(未取得)』と明記(捏造禁止・推測は(推測)と明示):\n"
             "## 段取り(工程の実際)\n## 落とし穴・トラブル\n## 見積 vs 実際\n## 判断の根拠\n"
-            "## 外部やりとり(観測外含む)\n## 引き継ぎ要点\n平明な日本語で。")
-    user = f"プロジェクト: {project_name}\n\n投入資料:\n{materials or '(なし)'}\n\n質疑応答:\n{qa or '(なし)'}"
-    body = strip_think(llm_text(sysp, user, num_predict=1400)).strip()
+            "## 外部やりとり(観測外含む)\n## 引き継ぎ要点\n平明な日本語で。\n"
+            "【右脳左脳の重複回避=重要】タスク一覧・日付・担当者・ステータス・数値等の"
+            "『構造化された事実』は左脳(Calendar/Score/DB書庫)が真実源。ここに丸写しするな(重複・陳腐化の元)。"
+            "この結晶化は**左脳に無い『暗黙知・判断・つまづき・教訓』だけ**を右脳知識として蒸留せよ。"
+            "構造化事実に触れる要があれば1行に要約し『(詳細は Calendar/DB書庫)』と出所を指すに留めよ。")
+    user = (f"プロジェクト: {project_name}\n\n## vault既存素材({nsrc}件・議事録/asset/DB書庫等)\n{vault_mat or '(なし)'}"
+            f"\n\n## 人が投入した追加資料\n{materials or '(なし)'}\n\n## 質疑応答\n{qa or '(なし)'}")
+    body = strip_think(llm_text(sysp, user, num_predict=1600)).strip()
     try:
         os.makedirs(SEIRI_DIR, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y-%m-%d")
         slug = re.sub(r"[^\w\-]", "_", project_name or "project")[:40] or "project"
         path = os.path.join(SEIRI_DIR, f"proj_{slug}.md")
         head = (f"---\ntype: project_knowledge\nproject: {project_name}\ncrystallized: {stamp}\n"
-                f"tags: [casper, offboarding, project]\n---\n\n# 🗂 {project_name} — 完了知識(結晶化)\n\n")
+                f"vault_sources: {nsrc}\ntags: [casper, offboarding, project]\n---\n\n"
+                f"# 🗂 {project_name} — 完了知識(結晶化)\n\n> vault既存素材 {nsrc}件＋人の補足を統合。\n\n")
         open(path, "w", encoding="utf-8").write(head + body + "\n")
         if casper_embed:
             try: casper_embed.reindex()
             except Exception: pass
     except Exception:
         pass
-    return body
+    return body, nsrc
 
 
 def seiri_interview(who, project_name, knowledge, answers):
@@ -2400,9 +2453,9 @@ class H(BaseHTTPRequestHandler):
             try:
                 if self.path == "/api/seiri/ask":            # ③ 資料について質問
                     self._json({"questions": seiri_ask(who, req.get("project", ""), req.get("materials", ""))})
-                elif self.path == "/api/seiri/crystallize":  # ④ 知識化(vault結晶化)
-                    self._json({"knowledge": seiri_crystallize(who, req.get("project", ""),
-                                req.get("materials", ""), req.get("qa", ""))})
+                elif self.path == "/api/seiri/crystallize":  # ④ 知識化(vault既存素材＋補足を結晶化)
+                    _kb, _ns = seiri_crystallize(who, req.get("project", ""), req.get("materials", ""), req.get("qa", ""))
+                    self._json({"knowledge": _kb, "vault_sources": _ns})
                 elif self.path == "/api/seiri/interview":    # ⑤ 逆IV＋有用性ゲート
                     self._json(seiri_interview(who, req.get("project", ""),
                                 req.get("knowledge", ""), req.get("answers", "")))
