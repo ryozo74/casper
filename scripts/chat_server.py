@@ -49,6 +49,10 @@ try:
 except Exception:
     casper_openloop = None
 try:
+    import casper_traits                         # 人物trait(癖)レジストリ=verify_digestが決定的消費
+except Exception:
+    casper_traits = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -1150,6 +1154,29 @@ def open_loop_digest(who):
         out += ("・**状態を問われたら実物照会(裏取り)で最新確認**。完了検知済なら『済んだ』、未達なら"
                 "『まだ・催促の頃合いか(推測)』と。Casperが自動で完了を監視している旨も添えてよい。")
         return out
+    except Exception:
+        return ""
+
+
+def traits_digest(who, query):
+    """【人物traitの決定的注入=Fable5 #5】質問文に名が現れる人物の"癖"を構造化レジストリから注入。
+    散文でなくfieldゆえ漏れなく効く(例: horiは作業中報告→『作業中』を結末と誤認せず裏取りせよ)。"""
+    try:
+        if not (casper_traits and query):
+            return ""
+        if not _ROSTER_MAP:
+            _roster_refresh()                             # roster(uid→名)をロード
+        name_to_uid = {nm: uid for uid, nm in _ROSTER_MAP.items()}
+        hits = casper_traits.for_text(query, name_to_uid)
+        if not hits:
+            return ""
+        lines = []
+        for nm, traits in hits:
+            for t in traits[:3]:
+                lines.append(f"- {nm}: {t.get('note')}")
+        return ("\n\n## 【人物の癖(構造化trait・裏取りの手がかり)】\n"
+                "この問いに関わる人物の既知の癖。**これを踏まえて読み、状態は必ず裏取りで確認せよ**:\n"
+                + "\n".join(lines))
     except Exception:
         return ""
 
@@ -3278,6 +3305,7 @@ class H(BaseHTTPRequestHandler):
             cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
             cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += open_loop_digest(who)              # 未了の約束(OPEN LOOP)を⚙レコードから注入
+            cal += traits_digest(who, last_user)      # 人物の癖(構造化trait)を注入=裏取りの手がかり
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
@@ -3349,6 +3377,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
         sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += open_loop_digest(who)                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
+        sysadd += traits_digest(who, ll_user)            # 人物の癖(構造化trait)を注入=裏取りの手がかり
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
         sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
