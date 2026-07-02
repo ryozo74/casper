@@ -2094,40 +2094,75 @@ def seiri_crystallize(who, project_name, materials, qa):
 
 
 def seiri_interview(who, project_name, knowledge, answers):
-    """⑤ 有用性ゲート(採点ルーブリック=Fable5指摘の主観vibe克服)＋不足を埋める逆インタビュー3問。"""
-    sys_j = ("完了PJの結晶化知識が『会社に有用な状態』かを採点せよ。次の5項目それぞれに出所つきの実質的記述が"
-             "1つ以上あるか true/false で判定し JSONのみ返せ: "
+    """⑤ 有用性ゲート(Fable5硬化)。硬化点: ①各trueに"証拠引用"を要求 ②ready判定をLLM任せにせず
+    コードで決定的に(必須コア=判断根拠＋落とし穴 の両方true＋残り3項中2以上)＋不足を埋める逆IV。"""
+    sys_j = ("完了PJの結晶化知識が『会社に有用な状態』かを採点。5項目それぞれ、**知識中の該当記述(短い引用)を根拠に**"
+             "true/falseを判定しJSONのみ返せ。trueは『事実の羅列』でなく『判断・つまづき・教訓』が出所つきで在る時のみ:\n"
              "{\"rubric\":{\"段取り\":bool,\"落とし穴\":bool,\"見積\":bool,\"判断根拠\":bool,\"外部やりとり\":bool},"
-             "\"ready\":bool,\"missing\":[\"...\"]}。ready は5項目中4つ以上 true の時 true。")
+             "\"evidence\":{\"段取り\":\"引用\",\"落とし穴\":\"引用\",\"見積\":\"引用\",\"判断根拠\":\"引用\",\"外部やりとり\":\"引用\"}}。"
+             "ready判定はこちらで行うので rubric と evidence のみ正確に。")
     verdict = strip_think(llm_text(sys_j,
-              f"PJ: {project_name}\n\n結晶化知識:\n{knowledge}\n\n直近の回答:\n{answers or '(なし)'}", num_predict=300)).strip()
-    ready = False; missing = []; rubric = {}
+              f"PJ: {project_name}\n\n結晶化知識:\n{knowledge}\n\n直近の回答:\n{answers or '(なし)'}", num_predict=400)).strip()
+    rubric = {}; evidence = {}
     try:
         m = re.search(r"\{.*\}", verdict, re.S)
         if m:
-            v = json.loads(m.group(0)); ready = bool(v.get("ready")); missing = v.get("missing") or []; rubric = v.get("rubric") or {}
+            v = json.loads(m.group(0)); rubric = v.get("rubric") or {}; evidence = v.get("evidence") or {}
     except Exception:
         pass
+    # ready をコードで決定的判定(LLMの自己申告readyを信じない): 必須コア＋残り3中2
+    core = bool(rubric.get("判断根拠")) and bool(rubric.get("落とし穴"))
+    rest = sum(1 for k in ("段取り", "見積", "外部やりとり") if rubric.get(k))
+    ready = core and rest >= 2
+    missing = [k for k in ("判断根拠", "落とし穴", "段取り", "見積", "外部やりとり") if not rubric.get(k)]
+    reason = ("" if ready else
+              ("必須項目(判断根拠・落とし穴)が未充足" if not core else "残り3項のうち2項以上が必要"))
     questions = ""
     if not ready:
         sys_q = ("あなたは Casper。下記『不足項目』を埋める逆インタビュー質問を最大3個、簡潔に挙げよ。"
                  "各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
         questions = strip_think(llm_text(sys_q,
                     f"PJ: {project_name}\n不足: {missing or '全般の精度向上'}\n\n現在の知識:\n{knowledge[:1500]}", num_predict=300)).strip()
-    return {"ready": ready, "rubric": rubric, "missing": missing, "questions": questions}
+    return {"ready": ready, "rubric": rubric, "evidence": evidence, "missing": missing,
+            "questions": questions, "core_ok": core, "reason": reason}
+
+
+def _seiri_raw_snapshot(uid, project_id):
+    """④ 不可逆な offline(=非可逆圧縮)の前に、Calendar 生データのスナップショットを正本の隣に保存(保険)。
+    Fable5硬化: 蒸留が浅かったと後日判明した時の生データ復元源。返り値=保存パス or None。"""
+    try:
+        pj = casper_mcp.call_tool("get_projects", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
+        items = (json.loads(pj).get("items") if (pj or "").strip().startswith("{") else []) or []
+        prec = next((p for p in items if str(p.get("id")) == str(project_id)), {})
+        name = prec.get("name") or f"project_{project_id}"
+        ev = casper_mcp.call_tool("get_events", {"actor_id": int(uid), "since": 0, "limit": 500},
+                                  token=WRITE_TOKEN, actor=uid)
+        evd = json.loads(ev) if (ev or "").strip().startswith("{") else {}
+        pev = [e for e in (evd.get("events") or []) if str(e.get("target_id")) and prec]
+        snap = {"snapshot_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "project": prec, "events_sample": pev[:200],
+                "note": "offline直前の生データ保険(Fable5硬化)。offlineは不可逆圧縮ゆえ蒸留の再検証用に保存。"}
+        os.makedirs(SEIRI_DIR, exist_ok=True)
+        slug = re.sub(r"[^\w\-]", "_", name)[:40] or "project"
+        path = os.path.join(SEIRI_DIR, f"proj_{slug}_raw.json")
+        json.dump(snap, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        return path
+    except Exception:
+        return None
 
 
 def seiri_offline(who, project_id):
-    """⑥ Calendar で offline 化(人の承認後)。update_project(display_status='offline')。"""
+    """⑥ Calendar で offline 化(人の承認後)。生rawスナップショット保存(不可逆対策)→update_project(display_status='offline')。"""
     uid = who.get("uid")
     if not (uid and WRITE_TOKEN and casper_mcp and project_id):
         return {"ok": False, "error": "未ログイン/PJ未指定"}
+    snap = _seiri_raw_snapshot(uid, project_id)               # ④ offline前に生データ保険
     try:
         r = casper_mcp.call_tool("update_project",
             {"actor_id": int(uid), "project_id": int(project_id), "display_status": "offline"},
             token=WRITE_TOKEN, actor=uid)
         ok = (r or "").strip().startswith("{") and "error" not in (r or "")[:40]
-        return {"ok": ok, "result": str(r)[:200]}
+        return {"ok": ok, "result": str(r)[:200], "raw_snapshot": bool(snap)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

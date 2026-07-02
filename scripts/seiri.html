@@ -217,6 +217,7 @@ function renderIV(d){
     $('b6').disabled=false;$('offout').textContent='承認をお願いいたす。offline 化すると Calendar 上で不可視になり申す（生データは保全）。';
     done(5,'✓ 有用性 到達');on(6);
   }else{
+    if(d.reason)h+='<div class="mut" style="color:var(--warn);margin:6px 0">⛔ '+esc(d.reason)+'（必須コア=判断根拠＋落とし穴＋残り3項中2）</div>';
     h+=(d.questions||'').split('\n').filter(x=>x.trim()).map(q=>'<div class="q">'+esc(q)+'</div>').join('');
     if(d.missing&&d.missing.length)h+='<div class="mut">不足: '+d.missing.map(esc).join('・')+'</div>';
   }
