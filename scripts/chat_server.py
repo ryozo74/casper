@@ -45,6 +45,10 @@ try:
 except Exception:
     casper_manifest = None
 try:
+    import casper_openloop                       # OPEN LOOPレジストリ(未了の約束を⚙レコード化・自動追跡)
+except Exception:
+    casper_openloop = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -1090,6 +1094,36 @@ def existence_digest(who, query):
                 "資産台帳を引いたが該当ファイルは0件。参考(RAG):\n" + block +
                 "\n・別名(TKP↔Nina等)を変えて再照会せよ。それでも無ければ『確認できた範囲では見当たらぬ』と"
                 "留保付きで述べよ——**存在せぬファイル名を推測で書くな**。")
+    except Exception:
+        return ""
+
+
+def open_loop_digest(who):
+    """【OPEN LOOPレジストリの先読み注入】この人が依頼元/通知先の"未了の約束"を⚙レコードから注入。
+    帯の散文でなくレコードゆえ、Casperは常に把握し漏らさない(Fable5 #2・hori事件の恒久解)。"""
+    try:
+        if not casper_openloop:
+            return ""
+        loops = casper_openloop.open_for(who.get("uid"))
+        done = casper_openloop.recently_closed(who.get("uid"))
+        if not loops and not done:
+            return ""
+        out = "\n\n## 【約束の追跡(OPEN LOOP・⚙レコードで自動監視)】\n"
+        if done:
+            out += "▼ 最近 完了を自動検知(利用者へ先読み報告してよい):\n"
+            for r in done[:5]:
+                out += f"- ✅ {r.get('title')} — {r.get('evidence','')}\n"
+        if loops:
+            out += "▼ 未了(追跡中):\n"
+            for r in loops[:8]:
+                pt = {"vimeo": "Vimeoアップ待ち", "asset": "資料登録待ち", "manual": "手動確認"}.get(
+                    r.get("probe", {}).get("type"), "")
+                out += (f"- {r.get('title')}"
+                        + (f"(相手: {r['assignee']})" if r.get("assignee") else "")
+                        + f" [{pt}・{str(r.get('created_at',''))[:10]}〜]\n")
+        out += ("・**状態を問われたら実物照会(裏取り)で最新確認**。完了検知済なら『済んだ』、未達なら"
+                "『まだ・催促の頃合いか(推測)』と。Casperが自動で完了を監視している旨も添えてよい。")
+        return out
     except Exception:
         return ""
 
@@ -3106,6 +3140,19 @@ class H(BaseHTTPRequestHandler):
                     result = (casper_mcp.call_tool(pend["tool"], pend["args"], token=WRITE_TOKEN, actor=actor)
                               if casper_mcp else "(MCP無効)")
                     ok = not str(result).startswith("(MCP")
+                    # DM代筆で"Vimeoにアップして"と依頼した場合、完了を自動追跡する OPEN LOOP を登録
+                    if ok and pend["tool"] == "send_message" and casper_openloop:
+                        try:
+                            body = str((pend.get("args") or {}).get("body") or "")
+                            if re.search(r"[Vv]imeo", body) and re.search(r"アップ|上げ|投稿|共有|お願い", body):
+                                kw = re.findall(r"[A-Z][A-Za-z0-9]{2,}|[ぁ-んァ-ヶ一-龠]{2,10}(?=の動画|動画|ムービー|映像)", body)
+                                q = next((k for k in kw if k.upper() not in ("VIMEO",)), None)
+                                if q:
+                                    to = (pend.get("args") or {}).get("to_user_id")
+                                    casper_openloop.add(who=str(actor), title=f"{_uid_to_name(to)}に「{q}」動画のVimeoアップを依頼",
+                                                        probe={"type": "vimeo", "q": q}, assignee=_uid_to_name(to))
+                        except Exception:
+                            pass
                 self._json({"ok": ok, "executed": True, "tool": pend["tool"], "result": str(result)[:2000]})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
@@ -3167,6 +3214,7 @@ class H(BaseHTTPRequestHandler):
             cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
             cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
             cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
+            cal += open_loop_digest(who)              # 未了の約束(OPEN LOOP)を⚙レコードから注入
             cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
             cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
             cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
@@ -3237,6 +3285,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
         sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
         sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
+        sysadd += open_loop_digest(who)                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
         sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
         sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
@@ -3575,7 +3624,8 @@ def _events_pull_once():
 
 
 def _events_puller():
-    """5分ごとに全社イベントを増分集約(seq昇順・冪等)。各人の動向/トラックの一次データになる。"""
+    """5分ごとに全社イベントを増分集約(seq昇順・冪等)。各人の動向/トラックの一次データになる。
+    併せて OPEN LOOP(未了の約束)の完了プローブを走らせ、達成を自動検知して閉じる(hori事件の恒久解)。"""
     import time as _t
     while True:
         _t.sleep(300)
@@ -3583,6 +3633,12 @@ def _events_puller():
             n = _events_pull_once()
             if n:
                 print(f"[events] +{n} (cursor={_events_cursor_get()})", flush=True)
+        except Exception:
+            pass
+        try:                                               # OPEN LOOP 自動追跡: 完了プローブが満たされたら閉じる
+            if casper_openloop:                             # 完了は open_loop_digest が"最近完了"として利用者へ先読み報告
+                for r in (casper_openloop.check() or []):
+                    print(f"[openloop] closed: {r.get('title')} — {r.get('evidence')}", flush=True)
         except Exception:
             pass
 
