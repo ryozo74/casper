@@ -553,7 +553,7 @@ document.getElementById('who').onclick=async()=>{
 (async()=>{
   const b0=el('bot'); b0.textContent='Casper にござる。（タスク・新着DMを確認中…）';   // 即時表示で白画面を防ぐ
   try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; if(w.avatar) USER_AV=w.avatar; }catch(e){}
-  try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json()); if(br.text){ render(b0,br.text); renderMermaid(b0); log.scrollTop=log.scrollHeight; } }catch(e){}
+  try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json()); if(br.text){ render(b0,br.text); renderMermaid(b0); log.scrollTop=log.scrollHeight; history.push({role:'assistant',content:br.text}); } }catch(e){}   // ブリーフィング(タスク一覧/DM)を会話文脈に載せる=「上記のタスク」等の指示語を解決可能に
   refreshThreads(); })();
 // ===== Score Uploader ツール =====
 const plus=document.getElementById('plus'), toolmenu=document.getElementById('toolmenu');
