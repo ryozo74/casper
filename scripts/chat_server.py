@@ -1592,19 +1592,22 @@ def project_import_refine(proposal, instruction):
 
 
 def open_briefing(who):
-    """インデックス開門時の自動上奏: 挨拶＋本日タスク＋新着DM＋逆インタビュー1問。"""
+    """インデックス開門時の自動上奏: Casperが状況を踏まえ"考えて"述べる挨拶＋本日タスク＋新着DM。
+    挨拶は固定テンプレでなく、タスク/DMの状況に即した気の利いた一言をLLMが生成する。"""
     import json as _j
     h = datetime.datetime.now().hour
     g = "おはようございます" if h < 11 else ("こんにちは" if h < 18 else "こんばんは")
-    lines = [f"{g}、殿。Casper にござる。"]
     uid = who.get("uid")
+    task_n = None                                          # 事実を集め→末尾でCasperが"考えて"挨拶
+    dm_lines = []
+    unread_n = 0
     if uid and WRITE_TOKEN and casper_mcp:
         try:
             tt = casper_mcp.call_tool("get_today_tasks", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
             d = _j.loads(tt) if (tt or "").strip().startswith(("{", "[")) else None
             items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
             if isinstance(items, list):
-                lines.append(f"📋 本日のタスク: **{len(items)}件**{'' if items else '（なし）'}")
+                task_n = len(items)
         except Exception:
             pass
         try:
@@ -1628,22 +1631,45 @@ def open_briefing(who):
                 with _cf.ThreadPoolExecutor(max_workers=10) as _ex:
                     unread = [t for t, un in _ex.map(_chk, th) if un]
                 unread.sort(key=lambda t: str(t.get("updated_at") or ""), reverse=True)
-                if unread:
-                    lines.append(f"💬 **新着DM {len(unread)}件**（未読・新しい順）")
-                    for t in unread:
-                        peers = [p for p in (t.get("participants") or []) if str(p.get("user_id")) != str(uid)]
-                        nm = "、".join(str(p.get("name") or p.get("user_id")) for p in peers[:2]) or "(自分)"
-                        ts = str(t.get("updated_at") or "")[5:16].replace("T", " ")
-                        snip = str(t.get("last_message") or "").replace("\n", " ").translate({ord(c): " " for c in "[]()"})[:40]
-                        pid = peers[0].get("user_id") if peers else ""
-                        # クリックで Casper 上にそのDMを開くリンク(casper-dm:thread:peer)
-                        lines.append(f"🔴 {ts}　[{nm}：{snip}](casper-dm:{t.get('thread_id')}:{pid})")
-                    lines.append("各行をクリックすると、そのDMをここに開きます。「○○さんに返信」で代筆も可。")
+                unread_n = len(unread)
+                for t in unread:
+                    peers = [p for p in (t.get("participants") or []) if str(p.get("user_id")) != str(uid)]
+                    nm = "、".join(str(p.get("name") or p.get("user_id")) for p in peers[:2]) or "(自分)"
+                    ts = str(t.get("updated_at") or "")[5:16].replace("T", " ")
+                    snip = str(t.get("last_message") or "").replace("\n", " ").translate({ord(c): " " for c in "[]()"})[:40]
+                    pid = peers[0].get("user_id") if peers else ""
+                    # クリックで Casper 上にそのDMを開くリンク(casper-dm:thread:peer)
+                    dm_lines.append(f"🔴 {ts}　[{nm}：{snip}](casper-dm:{t.get('thread_id')}:{pid})")
         except Exception:
             pass
-    elif not who.get("authed"):
-        lines.append("ログイン頂ければ、本日のタスク・新着DMもこの入口でお知らせいたす。")
-    lines.append("御用は何なりと、お申し付けを。")
+    # 挨拶は Casper が"考える"(定型テンプレ廃止)。状況(タスク/DM件数)に即した気の利いた一言をLLM生成。
+    ctx = (f"時間帯の挨拶語: {g}。本日のタスク: "
+           f"{('%d件' % task_n) if task_n is not None else '未取得'}。新着未読DM: {unread_n}件。相手: 殿。")
+    def _gen_greet():
+        return strip_think(llm_text(
+            "あなたは studio bokan の伴走AI『Casper』。殿への開門の一言を、下記の状況を踏まえ戦国口調で簡潔に述べよ。"
+            "定型の挨拶文でなく、状況(タスク/DMの有無・件数)に即した気の利いた一言に。"
+            "締め文句・末尾の定型的な誘い(『お申し付けを』等)は付けるな。改行を入れず1〜2文で。",
+            ctx, num_predict=160)).strip().replace("\n", " ")
+    greet = ""
+    try:                                                  # 8秒cap: qwen多忙でブリーフィングをhangさせぬ→テンプレ退避
+        import concurrent.futures as _cf2
+        _ex2 = _cf2.ThreadPoolExecutor(max_workers=1)     # with を使わぬ=8秒超のqwenを待たずに手放す(shutdown wait=False)
+        _fut = _ex2.submit(_gen_greet)
+        try:
+            greet = _fut.result(timeout=8)
+        finally:
+            _ex2.shutdown(wait=False)
+    except Exception:
+        greet = ""
+    if not greet:
+        greet = f"{g}、殿。Casper にござる。"
+    lines = [greet]
+    if dm_lines:
+        lines.append(f"💬 新着DM {unread_n}件（クリックで開く・「○○さんに返信」で代筆可）")
+        lines += dm_lines
+    if uid is None and not who.get("authed"):
+        lines.append("ログイン頂ければ、本日のタスク・新着DMもお知らせいたす。")
     return "\n".join(lines)
 
 
@@ -2031,16 +2057,22 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/whoami":
             who = identify(self)
             name = who.get("email", "")
+            avatar = ""
             if who.get("uid") and casper_tools:
                 try:
-                    name = next((u.get("username") or u.get("name") for u in casper_tools._get("/users?limit=200").get("items", [])
-                                 if str(u.get("id")) == str(who["uid"])), "") or name
+                    u = next((x for x in casper_tools._get("/users?limit=200").get("items", [])
+                              if str(x.get("id")) == str(who["uid"])), None)
+                    if u:
+                        name = (u.get("username") or u.get("name")) or name
+                        av = u.get("avatar_url") or u.get("iconUrl") or u.get("avatar") or ""
+                        if av:                                  # Score/Calendarのアバター(相対なら Calendar 絶対URLへ)
+                            avatar = av if str(av).startswith("http") else (CAL_BASE.rstrip("/") + av)
                 except Exception:
                     pass
             if not name and who.get("uid"):
                 name = _uid_to_name(who["uid"])   # live /users 不達時も堅牢 roster で本人名解決(ゲスト誤表示回避)
             self._json({"uid": who.get("uid", ""), "email": who.get("email", ""),
-                        "authed": who.get("authed", False), "name": name})
+                        "authed": who.get("authed", False), "name": name, "avatar": avatar})
             return
         elif self.path.startswith("/api/devlog"):
             try:
@@ -2958,8 +2990,24 @@ def _build_profile(ukey):
     return True
 
 
+def _refresh_activity_band(ukey):
+    """動向帯(25_activity/u_*.md)をアイドル便乗で日次更新。頭=qwen(安価・PII安全・ローカル)。
+    深い蒸留(Opus)は distill_activity.py の手動/定期バッチが担う。best-effort・失敗は無害skip。"""
+    m = re.match(r"u_(\d+)$", ukey or "")
+    if not m:                                               # uid基盤ユーザーのみ(sid/email はskip)
+        return
+    try:
+        import subprocess as _sp
+        env = dict(os.environ)
+        env["CASPER_ACT_MODEL"] = "qwen3.6:27b"             # 日次=ローカルqwen(深部Opusは別バッチ)
+        _sp.run(["python3", os.path.join(HERE, "distill_activity.py"), m.group(1)],
+                env=env, cwd=HERE, capture_output=True, text=True, timeout=300)
+    except Exception:
+        pass
+
+
 def _profile_worker():
-    """リソース余力(アイドル)時に、変化のあったユーザーの個性プロファイルを1人ずつ更新。"""
+    """リソース余力(アイドル)時に、変化のあったユーザーの 個性プロファイル＋動向帯 を1人ずつ更新。"""
     import time as _t
     while True:
         _t.sleep(50)
@@ -2974,7 +3022,8 @@ def _profile_worker():
                     DIRTY_USERS.pop(uk, None); continue
                 cand = uk; break
             if cand:
-                _build_profile(cand)                        # 1巡で1人だけ(低負荷)
+                _build_profile(cand)                        # 個性(静止画・qwen)
+                _refresh_activity_band(cand)                # 動向帯(動画・qwen日次・深部Opusは別バッチ)
         except Exception:
             pass
 

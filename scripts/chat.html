@@ -41,13 +41,15 @@
   .wrap{max-width:1600px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:16px}
   .msg{display:flex;gap:12px;align-items:flex-start}
   .msg.user{flex-direction:row-reverse}                 /* ユーザーは右側 */
-  .msg.user .bubble{max-width:78%}
-  .msg .av{width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:15px}
+  .msg.user{margin-left:auto}                             /* 行全体を右へ寄せる */
+  .msg .av{width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:15px;overflow:hidden}
   .msg.user .av{background:var(--me);color:var(--accent)}
+  .msg.user .av img{width:100%;height:100%;object-fit:cover}
   .msg.bot  .av{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f}
-  .bubble{padding:11px 15px;border-radius:12px;white-space:pre-wrap;word-break:break-word;max-width:100%}
-  .msg.user .bubble{background:var(--me);border:1px solid var(--line);text-align:left}
-  .msg.bot  .bubble{background:var(--panel);border:1px solid var(--line);flex:1;min-width:0}
+  /* 吹き出しは内容に合わせて幅可変(短文で横に間延びしない)。長文/表は上限まで広がる */
+  .bubble{padding:11px 15px;border-radius:12px;white-space:pre-wrap;word-break:break-word;width:fit-content;max-width:min(88%,860px)}
+  .msg.user .bubble{background:var(--me);border:1px solid var(--line);text-align:left;max-width:min(78%,720px);margin-left:auto}
+  .msg.bot  .bubble{background:var(--panel);border:1px solid var(--line);min-width:0}
   .ptime{color:var(--mut);font-size:11px;margin-top:6px;opacity:.7}
   #menubtn{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cfe8ff;border-radius:9px;width:38px;height:38px;font-size:17px;cursor:pointer;padding:0}
   #who{cursor:pointer}
@@ -207,9 +209,11 @@ fetch('/health').then(r=>r.json()).then(d=>{status.classList.add('ok');
   status.querySelector('span').textContent='接続OK ('+(d.model||'')+')';})
   .catch(()=>status.querySelector('span').textContent='鯖に接続できぬ');
 
+let USER_AV='';                                  // ScoreのユーザーアバターURL(/api/whoami由来)
 function el(role){
   const m=document.createElement('div'); m.className='msg '+role;
-  m.innerHTML=`<div class="av">${role==='user'?'殿':'<img src="/icon" alt="C" style="width:100%;height:100%;object-fit:cover;border-radius:8px">'}</div>`;
+  const uav = USER_AV ? '<img src="'+USER_AV+'" alt="殿" onerror="this.remove()">' : '殿';
+  m.innerHTML=`<div class="av">${role==='user'?uav:'<img src="/icon" alt="C" style="width:100%;height:100%;object-fit:cover;border-radius:8px">'}</div>`;
   const b=document.createElement('div'); b.className='bubble'; m.appendChild(b);
   wrap.appendChild(m); log.scrollTop=log.scrollHeight; return b;
 }
@@ -524,7 +528,7 @@ async function openDM(t){
   const enable=(mode,ph)=>{ curDM.mode=mode; inp.disabled=false; send.disabled=false; inp.placeholder=ph; inp.focus(); };
   bar.appendChild(mk('↗ Scoreで見る','#334155',()=>window.open(SCORE_BASE+'/messages','_blank')));
   bar.appendChild(mk('✍ 返信','#22c55e',()=>enable('reply',(t.peer||'相手')+' さんへの返信を入力…')));
-  bar.appendChild(mk('❓ 質問','#3b82f6',()=>enable('question','このDMについて Casper に質問…')));
+  bar.appendChild(mk('🧵 スレッド化','#3b82f6',()=>{ enable('question','このDMを起点に Casper と話す（スレッドとして残る）…'); if(typeof saveThread==='function'){ try{ saveThread(); }catch(e){} } }));
   b.appendChild(bar);
   log.scrollTop=log.scrollHeight;
 }
@@ -548,7 +552,7 @@ document.getElementById('who').onclick=async()=>{
 };
 (async()=>{
   const b0=el('bot'); b0.textContent='Casper にござる。（タスク・新着DMを確認中…）';   // 即時表示で白画面を防ぐ
-  try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; }catch(e){}
+  try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; if(w.avatar) USER_AV=w.avatar; }catch(e){}
   try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json()); if(br.text){ render(b0,br.text); renderMermaid(b0); log.scrollTop=log.scrollHeight; } }catch(e){}
   refreshThreads(); })();
 // ===== Score Uploader ツール =====
