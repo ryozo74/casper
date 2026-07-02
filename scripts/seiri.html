@@ -64,7 +64,7 @@
   <!-- ② 資料投入 -->
   <div class="step" id="s2"><div class="sh"><span class="no">2</span>追加資料を投入(観測外の LINE/Slack 等)<span class="done" id="d2"></span></div>
     <div class="sb">
-      <div class="drop" id="drop"><input type="file" id="seirifile" accept="image/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.md,.html,.htm" hidden>📎 画像・PDF・Office・テキストをドラッグ、またはクリックで選択（Casperが読解して素材化）</div>
+      <div class="drop" id="drop"><input type="file" id="seirifile" accept="image/*,video/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.md,.html,.htm" hidden>📎 画像・PDF・Office・テキスト・動画をドラッグ、またはクリックで選択<br><span class="mut">画像/PDF/文書=Casperが読解して素材化／資料動画=Vimeoへアップしてリンクを素材に</span></div>
       <textarea id="materials" placeholder="プロジェクトの補足・外部やりとり・決定の背景などを貼り付け（無くても可）"></textarea>
       <button id="b2" onclick="doAsk()">③ Casper に理解させる →</button>
     </div></div>
@@ -130,7 +130,9 @@ $('seirifile').addEventListener('change',e=>{if(e.target.files[0])ingestFile(e.t
 ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
 drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)ingestFile(f);});
 // 画像/PDF/Office を Casper の vision・抽出(feed_ingest)で読解→素材化(教える/遊ぶと同じ支援)
+// 資料としての動画は Vimeo へアップ(殿方針: Score向け以外の動画=Vimeo)
 function ingestFile(f){
+  if(f.type.startsWith('video/')){ return vimeoUploadSeiri(f); }
   const r=new FileReader();
   r.onload=async()=>{
     const tag='['+f.name+'] Casperが読解中…';
@@ -142,6 +144,28 @@ function ingestFile(f){
     }catch(e){ $('materials').value=$('materials').value.replace(tag,'['+f.name+'] 読込失敗: '+e); }
   };
   r.readAsDataURL(f);
+}
+// 資料動画 → Vimeo(create→tus直送→リンクを素材に)。Score向け動画はScore Uploaderで別途。
+async function vimeoUploadSeiri(f){
+  const base=(f.name||'').replace(/\.[^.]+$/,'');
+  const tag='['+f.name+'] Vimeoへアップ中…';
+  const setLine=s=>{$('materials').value=$('materials').value.replace(/\[[^\]]*\][^\n]*Vimeo[^\n]*/, s);};
+  $('materials').value+=($('materials').value?'\n\n':'')+tag;
+  try{
+    const desc='整理対象PJ「'+(SEL?SEL.name:'')+'」の資料動画: '+base;
+    const cr=await fetch('/api/vimeo/create',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({size:f.size,title:base,description:desc,password:''})}).then(x=>x.json());
+    if(!cr||!cr.ok) throw new Error((cr&&cr.error)||'作成失敗');
+    const size=f.size, CHUNK=64*1024*1024; let offset=0;
+    while(offset<size){
+      const slice=f.slice(offset,Math.min(offset+CHUNK,size));
+      const resp=await fetch(cr.upload_link,{method:'PATCH',headers:{'Tus-Resumable':'1.0.0','Upload-Offset':String(offset),'Content-Type':'application/offset+octet-stream'},body:slice});
+      if(!resp.ok&&resp.status!==204) throw new Error('tus HTTP '+resp.status);
+      const no=resp.headers.get('Upload-Offset'); offset=(no!=null)?parseInt(no):(offset+slice.size);
+      setLine('['+f.name+'] Vimeoへアップ中… '+Math.round(offset/size*100)+'%');
+    }
+    setLine('【資料動画: '+f.name+' → Vimeo】\n'+cr.link);
+  }catch(e){ setLine('['+f.name+'] Vimeoアップ失敗: '+e.message); }
 }
 
 function busy(b,t){b.disabled=true;b.dataset.t=b.textContent;b.textContent=t;}
