@@ -365,9 +365,22 @@ def _salvage_text_toolcall(final, who, pending_actions):
     return (f + "\n\n" + note) if f else note
 
 
+def _strip_tool_leak(text):
+    """qwenがツール呼びをテキスト(```tool ...)で書いた漏れ、及び『〜を取得します』等の作業実況を除去。
+    (retrieve-then-renderで事実は注入済ゆえツールは不要。漏れた宣言だけ残るのを掃除)。"""
+    if not text or "```" not in text and "します" not in text:
+        return text
+    text = re.sub(r"```tool.*?```", "", text, flags=re.S)          # ツール呼びの漏れブロック
+    text = re.sub(r"```(?:python|json|tool_code)?\s*(?:calendar_lookup|get_projects|get_today_tasks|get_events)\([^`]*?```",
+                  "", text, flags=re.S)
+    text = re.sub(r"(?m)^.{0,40}(を確認するため.*?|を)(取得|照会|確認)します。?\s*$", "", text)   # 作業実況行
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _validate_assets(text):
     """【出口検問=Fable5処方】応答内の /asset URL を資産台帳と照合し、実在せぬファイル名(LLMの捏造)を
     ユーザーに届けない。画像markdownは除去(割れ画像を出さぬ)・リンクは注記化。確率0で破れぬ最終防壁。"""
+    text = _strip_tool_leak(text)                          # ツール呼びの漏れ・作業実況を掃除
     if not text or "/asset/" not in text or not casper_manifest:
         return text
     try:
@@ -1130,6 +1143,33 @@ def existence_digest(who, query):
                 "資産台帳を引いたが該当ファイルは0件。参考(RAG):\n" + block +
                 "\n・別名(TKP↔Nina等)を変えて再照会せよ。それでも無ければ『確認できた範囲では見当たらぬ』と"
                 "留保付きで述べよ——**存在せぬファイル名を推測で書くな**。")
+    except Exception:
+        return ""
+
+
+# 進行中プロジェクト一覧を尋ねる問いの検知
+_PROJ_Q_RE = re.compile(
+    r"(動いて(る|いる)|進行中|稼働中|現在.{0,4}(プロジェクト|PJ|案件)|"
+    r"(プロジェクト|PJ|案件).{0,8}(一覧|教え|何|どれ|進行|ある|動))", re.I)
+
+
+def projects_digest(query):
+    """【進行中PJ一覧=retrieve-then-render】『動いているプロジェクトは?』等には Calendar(cal_projects.json)から
+    online PJ を注入し、Casperにツールを呼ばず一覧を述べさせる(qwenがツール呼びをテキストで書き失敗する事故を回避)。"""
+    try:
+        if not query or not _PROJ_Q_RE.search(query):
+            return ""
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        online = [p for p in items if str(p.get("display_status") or "online") == "online"]
+        if not online:
+            return ""
+        lines = []
+        for p in online[:40]:
+            due = str(p.get("end_date") or "")[:10]
+            lines.append(f"- {p.get('name')}（{p.get('status')}" + (f"・〆{due}" if due else "") + "）")
+        return ("\n\n## 【進行中プロジェクト一覧(Calendar・確定)】\n"
+                f"現在 online の全{len(online)}件。**この一覧をそのまま答えよ。ツールを呼ぶな・"
+                "『〜を取得します』等の作業実況や ```tool ブロックを書くな**:\n" + "\n".join(lines))
     except Exception:
         return ""
 
@@ -3419,6 +3459,7 @@ class H(BaseHTTPRequestHandler):
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
             cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
             cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
+            cal += projects_digest(last_user)         # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
             cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += open_loop_digest(who)              # 未了の約束(OPEN LOOP)を⚙レコードから注入
             cal += traits_digest(who, last_user)      # 人物の癖(構造化trait)を注入=裏取りの手がかり
@@ -3491,6 +3532,7 @@ class H(BaseHTTPRequestHandler):
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
         sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
         sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
+        sysadd += projects_digest(ll_user)               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
         sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += open_loop_digest(who)                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
         sysadd += traits_digest(who, ll_user)            # 人物の癖(構造化trait)を注入=裏取りの手がかり
