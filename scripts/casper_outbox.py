@@ -88,6 +88,11 @@ def _transition(pid, to_state, expect=None, result=None, uid=None, patch=None):
         if patch:
             rec.setdefault("args", {})
             if isinstance(rec["args"], dict) and isinstance(patch.get("args"), dict):
+                # 承認時に本文が編集で上書きされる時、LLM原案を body_orig へ退避。
+                # (文脈,モデル案,人の完成形)の三つ組=最高品質の教師信号(Fable S級・data flywheel の燃料)。
+                nb = patch["args"].get("body")
+                if nb is not None and nb != rec["args"].get("body") and "body_orig" not in rec:
+                    rec["body_orig"] = rec["args"].get("body")
                 rec["args"].update(patch["args"])
             for k, v in patch.items():
                 if k != "args":
