@@ -59,6 +59,19 @@
   /* 報告書ビルダー(右スライドイン) */
   #reppanel{position:fixed;top:0;right:0;bottom:0;width:min(560px,94vw);background:#0c1018;border-left:1px solid var(--line);z-index:40;transform:translateX(100%);transition:.22s;display:flex;flex-direction:column}
   #reppanel.open{transform:translateX(0)}
+  /* 資料パネル(節構造ドキュメント・Fable UI設計) */
+  #docpanel{position:fixed;top:0;right:0;bottom:0;width:min(640px,96vw);background:#0c1018;border-left:1px solid var(--line);z-index:41;transform:translateX(100%);transition:.22s;display:flex;flex-direction:column}
+  #docpanel.open{transform:translateX(0)}
+  #dochead{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:700;font-size:15px}
+  #docbody{flex:1;overflow:auto;padding:12px 16px}
+  .docsec{border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
+  .docsec .dsh{background:#16233b;padding:8px 12px;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px}
+  .docsec .dsact{margin-left:auto;display:flex;gap:4px}
+  .docsec .dsact button{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cbd5e1;border-radius:7px;padding:2px 10px;cursor:pointer;font-size:14px}
+  .docsec .dsbody{padding:10px 13px}
+  .docsec textarea{width:100%;box-sizing:border-box;min-height:130px;background:#0b1220;border:1px solid #243049;color:#dbe4ee;border-radius:8px;padding:9px 11px;font-size:13.5px;font-family:inherit;line-height:1.6}
+  #docver{background:#11182a;border:1px solid #243049;color:#cbd5e1;border-radius:7px;padding:3px 7px;font-size:12px;max-width:180px}
+  #docpub,#docpanel .x{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cbd5e1;border-radius:7px;padding:2px 9px;cursor:pointer}
   #repmask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:39;display:none}
   #rephead{display:flex;align-items:center;gap:8px;padding:13px 16px;border-bottom:1px solid var(--line);font-weight:700}
   #rephead .x{margin-left:auto;cursor:pointer;font-size:18px;opacity:.7;background:none;border:none;color:inherit}
@@ -188,6 +201,16 @@
   <div id="rephead">📝 報告書を作る<button class="x" id="repClose">✕</button></div>
   <div id="repbody"></div>
 </div>
+<div id="docpanel">
+  <div id="dochead">📄 <span id="doctitle">資料</span>
+    <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+      <select id="docver" title="版を選んで戻す"></select>
+      <button id="docpub" title="Auroraに起票/送信">📤</button>
+      <button class="x" id="docClose">✕</button>
+    </span>
+  </div>
+  <div id="docbody"></div>
+</div>
 <div id="log"><div class="wrap" id="wrap"></div></div>
 <footer>
   <div id="attach"></div>
@@ -200,6 +223,7 @@
   <div id="toolmenu" class="toolmenu" style="display:none">
     <div class="tmitem" data-tool="score_uploader">🎬 Score Uploader（成果物を投げる）</div>
     <div class="tmitem" data-tool="report">📝 報告書を作る</div>
+    <div class="tmitem" data-tool="makedoc">📄 直前の回答を資料にする（節ごと編集・再生成）</div>
   </div>
   <input type="file" id="fileinp" accept="image/*,video/*" style="display:none">
   <div class="hint">応答に数秒〜十数秒かかることがあります。</div>
@@ -417,6 +441,64 @@ async function ask(){
   send.disabled=false; inp.focus();
   saveThread();
 }
+// ===== 資料パネル(節構造ドキュメント・Fable UI設計) =====
+let curDoc=null;
+function dpost(p,body){return fetch(p,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());}
+async function openDoc(id){const r=await dpost('/api/doc/get',{doc_id:id});if(r.doc){curDoc=r.doc;renderDoc();document.getElementById('docpanel').classList.add('open');}}
+function renderDoc(){
+  const d=curDoc; document.getElementById('doctitle').textContent=d.title||'資料';
+  const b=document.getElementById('docbody'); b.innerHTML='';
+  (d.sections||[]).forEach(s=>{
+    const sec=document.createElement('div'); sec.className='docsec';
+    const h=document.createElement('div'); h.className='dsh'; h.textContent=s.heading||'(無題の節)';
+    const act=document.createElement('span'); act.className='dsact';
+    const be=document.createElement('button'); be.textContent='✎'; be.title='編集'; be.onclick=()=>editSection(sec,s);
+    const br=document.createElement('button'); br.textContent='↻'; br.title='この節を再生成'; br.onclick=()=>regenSection(s);
+    act.append(be,br); h.appendChild(act);
+    const body=document.createElement('div'); body.className='dsbody'; render(body, s.body||'');
+    sec.append(h,body); b.appendChild(sec);
+  });
+  renderVersions();
+}
+function editSection(sec,s){
+  const body=sec.querySelector('.dsbody');
+  const ta=document.createElement('textarea'); ta.value=s.body||'';
+  const sv=document.createElement('button'); sv.textContent='保存'; sv.style.cssText='margin-top:6px;padding:5px 14px;border-radius:8px;border:1px solid #22c55e;background:#1e293b;color:#e5e7eb;cursor:pointer';
+  sv.onclick=async()=>{sv.disabled=true;const r=await dpost('/api/doc/section/save',{doc_id:curDoc.id,section_id:s.id,body:ta.value,orig:s.body});if(r.doc){curDoc=r.doc;renderDoc();}};
+  body.innerHTML=''; body.append(ta,sv); ta.focus();
+}
+async function regenSection(s){
+  const instr=prompt('この節をどう書き直しますか？（例: もっと短く / 具体例を足す / 数字を明示）','より分かりやすく簡潔に');
+  if(instr===null)return;
+  const b=document.getElementById('docbody'); b.style.opacity='.5';
+  const r=await dpost('/api/doc/section/regen',{doc_id:curDoc.id,section_id:s.id,instruction:instr});
+  b.style.opacity='1';
+  if(r.doc){curDoc=r.doc;renderDoc();}else alert('再生成失敗: '+(r.error||''));
+}
+async function renderVersions(){
+  const r=await dpost('/api/doc/versions',{doc_id:curDoc.id}); const sel=document.getElementById('docver');
+  sel.innerHTML='<option value="">現在 (v'+(curDoc.version||1)+')</option>'
+    +(r.versions||[]).slice().reverse().map(v=>'<option value="'+v.v+'">↩ v'+v.v+' '+esc(v.note||'')+'</option>').join('');
+}
+document.getElementById('docver').onchange=async e=>{const v=e.target.value;if(!v)return;
+  if(!confirm('v'+v+' に戻しますか？（現在の内容も版として残ります）')){e.target.value='';return;}
+  const r=await dpost('/api/doc/restore',{doc_id:curDoc.id,v:parseInt(v)}); if(r.doc){curDoc=r.doc;renderDoc();}};
+document.getElementById('docpub').onclick=async()=>{
+  const r=await dpost('/api/doc/publish',{doc_id:curDoc.id,thread:curThread});
+  if(r.confirm){const b=el('bot'); render(b,'📄 資料「'+esc(curDoc.title)+'」を Aurora に起票します。↓の承認で確定にござる。');
+    renderConfirm(b,r.confirm); log.scrollTop=log.scrollHeight; document.getElementById('docpanel').classList.remove('open');}};
+document.getElementById('docClose').onclick=()=>document.getElementById('docpanel').classList.remove('open');
+// チャット応答→資料化(会話内生成物→永続文書の一方向の橋・## 見出しで節に分割)
+function mdSections(md){const secs=[];let cur={heading:'',body:''};
+  (md||'').split('\n').forEach(ln=>{const m=ln.match(/^##\s+(.+)$/);
+    if(m){if(cur.heading||cur.body.trim())secs.push(cur);cur={heading:m[1].trim(),body:''};}
+    else if(/^#\s+/.test(ln)){}else cur.body+=ln+'\n';});
+  if(cur.heading||cur.body.trim()){cur.body=cur.body.trim();secs.push(cur);}
+  return secs.length?secs:[{heading:'',body:(md||'').trim()}];}
+async function docFromLastReply(){
+  const asst=history.filter(m=>m.role==='assistant'); if(!asst.length){alert('資料にする回答がまだありませぬ');return;}
+  const md=asst[asst.length-1].content; const title=(md.match(/^#+\s*(.+)$/m)||[])[1]||md.slice(0,24).replace(/\n/g,' ')+'…';
+  const r=await dpost('/api/doc/create',{title:title,sections:mdSections(md)}); if(r.doc)openDoc(r.doc.id);}
 // ===== Stage2: 承認待ち副作用操作のカード =====
 function renderConfirm(b, pa){
   const c=document.createElement('div');
@@ -590,6 +672,7 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
   toolmenu.style.display='none';
   if(it.dataset.tool==='score_uploader'){ uploaderOn=true; renderTools(); }
   if(it.dataset.tool==='report'){ openReport(); }
+  if(it.dataset.tool==='makedoc'){ docFromLastReply(); }
 });
 function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
