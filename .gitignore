@@ -33,3 +33,4 @@ scripts/.casper_*
 CASPER_WRITE_TOKEN.txt.bak*
 scripts/casper_outbox.jsonl
 scripts/casper_trace.jsonl
+queue/casper_alerts.jsonl

@@ -61,6 +61,10 @@ try:
 except Exception:
     casper_outbox = None
 try:
+    import casper_health                          # セルフヘルス(トレース監視→health.md＋逸脱アラート・Fable北極星 柱2)
+except Exception:
+    casper_health = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -4078,14 +4082,24 @@ def _events_puller():
     """5分ごとに全社イベントを増分集約(seq昇順・冪等)。各人の動向/トラックの一次データになる。
     併せて OPEN LOOP(未了の約束)の完了プローブを走らせ、達成を自動検知して閉じる(hori事件の恒久解)。"""
     import time as _t
+    _tick = 0
     while True:
         _t.sleep(300)
+        _tick += 1
         try:
             n = _events_pull_once()
             if n:
                 print(f"[events] +{n} (cursor={_events_cursor_get()})", flush=True)
         except Exception:
             pass
+        if casper_health and _tick % 3 == 0:            # ~15分ごと: セルフヘルス監視→health.md更新＋逸脱アラート
+            try:
+                h = casper_health.run()
+                if h.get("deviations"):
+                    print(f"[health] 🔴 逸脱 {len(h['deviations'])}件: "
+                          + ", ".join(d['metric'] for d in h['deviations']), flush=True)
+            except Exception:
+                pass
         try:                                               # OPEN LOOP 自動追跡: 完了プローブが満たされたら閉じる
             if casper_openloop:                             # 完了は open_loop_digest が"最近完了"として利用者へ先読み報告
                 for r in (casper_openloop.check() or []):
