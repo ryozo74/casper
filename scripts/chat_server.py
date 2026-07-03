@@ -404,6 +404,56 @@ def _guard_completion_claims(text, pending_actions):
     return (text + "\n\n※上記アクション(送信/報告等)はまだ実行しておりませぬ。承認カードが出ておらねば、恐れ入りますがもう一度お申し付けを。").strip()
 
 
+def _ollama_json(system, user, num_predict=400):
+    """z8a を format='json' の制約デコードで呼び、JSON文字列を返す(P2ルーター/引数抽出の土台)。
+    Ollamaのschema-object modeはqwenが無視する為、format='json'＋プロンプト記述スキーマを使う(実測で確実)。"""
+    body = {"model": A.model, "stream": False, "think": False, "keep_alive": "30m", "format": "json",
+            "options": {"num_ctx": 8192, "num_predict": num_predict, "temperature": 0},
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+    req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=40) as r:
+        return json.load(r).get("message", {}).get("content", "")
+
+
+_ACTION_Q_RE = re.compile(r"(DM|ディーエム|メッセージ|連絡し|伝え|知らせ|送っ?て|送信し)", re.I)
+
+
+def _looks_like_action(msg):
+    """安価な事前ゲート: DM/送信の意図がある発話だけ P2ルーターを走らせる(全メッセージで走らせない)。"""
+    return bool(msg and _ACTION_Q_RE.search(msg))
+
+
+def _action_router(user_msg, context, who):
+    """P2(Fable処方 propose→execute→render): 依頼が send_message(DM)かを制約デコードで判定し、型付き引数
+    (to_user_id, body)を抽出。自由文 tool-call を作らせず機構が承認カードを起こす。返り {tool,args,reply} or None。
+    ——qwenがテキストで関数を書く経路を通さないので、salvage のモグラ叩きが不要になる。"""
+    roster_lines = "、".join(f"{nm}=uid{uid}" for uid, nm in list(_ROSTER_MAP.items())[:40])
+    sys_j = ("あなたはCasperのアクション抽出器。ユーザーの依頼が『特定の相手へのDM/メッセージ送信』なら、送るべき"
+             "本文を作り JSON だけで返せ。単なる質問・一覧要求・雑談など送信でなければ is_dm=false。\n"
+             f"社員名簿(名前=uid): {roster_lines}\n"
+             "本文は依頼に沿って簡潔に。数値/固有名は下記コンテキストの事実だけを使い、創作するな。\n"
+             'JSON形式: {"is_dm": true|false, "to_user_id": "uidの数字", "body": "送る本文"}')
+    user_j = f"コンテキスト(事実):\n{(context or '')[:4000]}\n\n依頼: {user_msg}"
+    try:
+        d = json.loads(_ollama_json(sys_j, user_j))
+    except Exception:
+        return None                                        # 抽出失敗→通常経路(salvage+P1)に委ねる(fail-openだが後段で守る)
+    if not d.get("is_dm"):
+        return None
+    to = str(d.get("to_user_id") or "")
+    m = re.search(r"(\d+)", to)
+    to = m.group(1) if m else {v: k for k, v in _ROSTER_MAP.items()}.get(to)
+    body = str(d.get("body") or "").strip()
+    if not (to and body):
+        return None
+    reply = (f"**{_uid_to_name(to)}** 宛に以下のDM下書きを作成しました。↓の承認カードで確認・編集し、"
+             "ボタンを押すと送信されまする（まだ送っておりませぬ）。\n\n> " + body.replace("\n", "\n> "))
+    args = {"to_user_id": to, "body": body}
+    if who.get("uid"):
+        args["actor_id"] = who["uid"]
+    return {"tool": "send_message", "args": args, "reply": reply}
+
+
 def _validate_assets(text):
     """【出口検問=Fable5処方】応答内の /asset URL を資産台帳と照合し、実在せぬファイル名(LLMの捏造)を
     ユーザーに届けない。画像markdownは除去(割れ画像を出さぬ)・リンクは注記化。確率0で破れぬ最終防壁。"""
@@ -3646,8 +3696,25 @@ class H(BaseHTTPRequestHandler):
         final = ""
         pending_actions = []                        # Stage2: 副作用操作の承認待ちキュー
         MAXIT = 6
+        # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
+        # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
+        routed = _action_router(ll_user, sysadd, who) if _looks_like_action(ll_user) else None
+        if routed:
+            try:
+                summary = _action_summary(routed["tool"], routed["args"])
+                pid = _register_pending(routed["tool"], routed["args"], who.get("uid"), summary)
+                try:
+                    PENDING_ACTIONS[pid]["thread"] = thr
+                except Exception:
+                    pass
+                pending_actions.append({"id": pid, "tool": routed["tool"], "args": routed["args"], "summary": summary})
+                final = routed["reply"]
+            except Exception:
+                routed = None                       # 起票失敗→通常経路へフォールバック
         try:
             for it in range(MAXIT):
+                if routed:                          # P2でアクション確定済 → 生成ループをスキップ
+                    break
                 last = (it == MAXIT - 1)
                 # 最終反復は tool 無しで強制的に回答させる(空振り無限ループ防止)
                 resp = ollama_chat(working, tools=(None if last else tools))
