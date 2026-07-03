@@ -1513,6 +1513,44 @@ def _report_context(anchor, rtype=""):
     return "\n".join(lines) or f"対象: {anchor}"
 
 
+def _report_facts(anchor):
+    """報告書の retrieve-then-render(Fable5 #1): 数値・固有名・ファイル名を LLM に創作させず、
+    Calendar/資産台帳/Vimeo から決定的に引いた"確定事実表"を注入。LLMはこの表から引いて並べるだけ。"""
+    if not anchor:
+        return ""
+    facts = []
+    try:                                                   # ① 対象PJの確定情報(Calendar)
+        for p in json.load(open("/tmp/cal_projects.json")).get("items", []):
+            nm = p.get("name") or ""
+            if nm and (anchor.lower() in nm.lower() or nm.lower() in anchor.lower()):
+                facts.append(f"PJ: {nm}｜status:{p.get('status')}｜期間:{p.get('start_date')}〜{p.get('end_date')}"
+                             f"｜表示:{p.get('display_status', 'online')}")
+                break
+    except Exception:
+        pass
+    if casper_manifest:                                    # ② 実在する資産ファイル(台帳・これ以外は存在しない)
+        try:
+            fs = casper_manifest.search(anchor, limit=30)
+            if fs:
+                facts.append(f"実在ファイル({len(fs)}件): " + "、".join(m["name"] for m in fs[:30]))
+        except Exception:
+            pass
+    try:                                                   # ③ 関連Vimeo動画(実在するもの)
+        import casper_vimeo
+        vs = casper_vimeo.search(anchor, per_page=20)
+        items = vs if isinstance(vs, list) else (vs.get("data") or vs.get("items") or [])
+        if items:
+            facts.append(f"関連Vimeo({len(items)}件): "
+                         + "、".join(f"{v.get('name') or '?'} {v.get('link') or ''}".strip() for v in items[:10]))
+    except Exception:
+        pass
+    if not facts:
+        return ""
+    return ("\n\n■確定事実(Calendar/資産台帳/Vimeoから決定的に取得)。"
+            "**数値・固有名・ファイル名・リンクは下記からのみ引け。ここに無い数値/名前/ファイルを創作するな**:\n"
+            + "\n".join(f"・{f}" for f in facts))
+
+
 _REPORT_IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
 
@@ -3170,6 +3208,7 @@ class H(BaseHTTPRequestHandler):
                 rtype = req.get("rtype", ""); structure = req.get("structure") or {}
                 answers = req.get("answers") or {}; anchor = req.get("anchor", "")
                 ctx = _report_context(anchor, rtype)
+                ctx += _report_facts(anchor)         # retrieve-then-render: 確定事実表を注入(数値/固有名の創作を防ぐ)
                 src_digest = _report_source_digest(req.get("sources") or [])
                 if src_digest:                       # 添付資料(PPT/Excel/図)を生の事実として参考データに合流
                     ctx = (ctx + "\n\n■添付資料から読み取れる事実:\n" + src_digest).strip()
