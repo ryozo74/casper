@@ -213,15 +213,30 @@ function renderIV(d){
   const R=d.rubric||{};const keys=['段取り','落とし穴','見積','判断根拠','外部やりとり'];
   let h='<div class="rubric">'+keys.map(k=>'<span class="ri '+(R[k]?'ok':'ng')+'">'+(R[k]?'✓':'×')+' '+k+'</span>').join('')+'</div>';
   if(d.ready){
-    h+='<div class="ready">✓ 会社に有用な状態に達し申した。offline化してよろしゅうござる。</div>';
-    $('b6').disabled=false;$('offout').textContent='承認をお願いいたす。offline 化すると Calendar 上で不可視になり申す（生データは保全）。';
-    done(5,'✓ 有用性 到達');on(6);
+    h+='<div class="ready">✓ ルーブリック到達。最終確認として closed-book 試験を行い申す…</div>';
+    $('ivout').innerHTML=h; runClosedBook(); return;
   }else{
     if(d.reason)h+='<div class="mut" style="color:var(--warn);margin:6px 0">⛔ '+esc(d.reason)+'（必須コア=判断根拠＋落とし穴＋残り3項中2）</div>';
     h+=(d.questions||'').split('\n').filter(x=>x.trim()).map(q=>'<div class="q">'+esc(q)+'</div>').join('');
     if(d.missing&&d.missing.length)h+='<div class="mut">不足: '+d.missing.map(esc).join('・')+'</div>';
   }
   $('ivout').innerHTML=h;
+}
+// ⑤→⑥ 最終硬化: closed-book試験(結晶化知識だけで引き継ぎ質問に答えられるか)。合格で初めて⑥解放。
+function runClosedBook(){
+  fetch('/api/seiri/closedbook',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({project:SEL.name,knowledge:KNOW})}).then(r=>r.json()).then(d=>{
+    let h='<div class="rubric"><span class="ri '+(d.pass?'ok':'ng')+'">closed-book '+esc(d.score||'')+'</span></div>';
+    (d.graded||[]).forEach(g=>{h+='<div class="q">'+(g.covered?'✅':'❌')+' '+esc(g.q)+'<div class="mut" style="margin-top:3px">'+esc(g.a)+'</div></div>';});
+    if(d.pass){
+      h+='<div class="ready">✓ closed-book 合格。会社に有用な状態にござる。offline化してよろしゅうござる。</div>';
+      $('b6').disabled=false;$('offout').textContent='承認をお願いいたす。offline 化すると Calendar 上で不可視になり申す（生データは保全）。';
+      done(5,'✓ 有用性＋closed-book 到達');on(6);
+    }else{
+      h+='<div class="mut" style="color:var(--warn)">⛔ closed-book 不合格（結晶化知識だけでは引き継ぎ質問に答えられぬ）。❌の項を逆インタビューで補ってくだされ。</div>';
+    }
+    $('ivout').innerHTML=h;
+  }).catch(e=>{$('ivout').innerHTML='<div class="mut">closed-book 失敗: '+e+'</div>';});
 }
 // ⑥ offline
 function doOffline(){

@@ -2226,6 +2226,32 @@ def seiri_interview(who, project_name, knowledge, answers):
             "questions": questions, "core_ok": core, "reason": reason}
 
 
+def seiri_closed_book(who, project_name, knowledge):
+    """⑥前の最終硬化ゲート(Fable5・closed-book試験): 引き継ぎ担当が必ず知るべき質問を"知識を見せず"生成し
+    (循環回避)、結晶化知識だけで closed-book 回答→実質的に答えられた数で採点。正答して初めて offline(不可逆)
+    の引き金を許す=自己申告rubricより一段強い決定的ゲート。返り: {pass, score, graded[{q,a,covered}]}。"""
+    try:
+        qs = strip_think(llm_text(
+            "あなたはCasper。完了プロジェクトの引き継ぎ試験官。『次に似た案件を担当する人』が必ず知るべき実務的で"
+            "具体的な質問を4問だけ挙げよ(段取りの要所/最大の落とし穴/重要な判断の理由/外部との重要なやりとり を各1問)。"
+            "各質問1行・番号のみ・前置き不要。",
+            f"プロジェクト名: {project_name}", num_predict=250)).strip()
+        questions = [re.sub(r"^[0-9.\-・\)\s]+", "", q).strip() for q in qs.split("\n") if q.strip()][:4]
+        graded = []
+        for q in questions:
+            ans = strip_think(llm_text(
+                "下記『結晶化知識』**だけ**を根拠に質問へ答えよ。知識に該当が無ければ必ず『(知識に記載なし)』とだけ答えよ。"
+                "推測・一般論で補うな。",
+                f"結晶化知識:\n{knowledge[:6000]}\n\n質問: {q}", num_predict=280)).strip()
+            covered = ("記載なし" not in ans) and (len(re.sub(r"\s", "", ans)) >= 15)
+            graded.append({"q": q, "a": ans[:400], "covered": covered})
+        ncov = sum(1 for g in graded if g["covered"])
+        passed = len(graded) > 0 and ncov >= max(3, len(graded) - 1)   # 4問中3以上(1問までは許容)
+        return {"pass": passed, "score": f"{ncov}/{len(graded)}", "graded": graded}
+    except Exception as e:
+        return {"pass": False, "score": "0/0", "graded": [], "error": str(e)}
+
+
 def _seiri_raw_snapshot(uid, project_id):
     """④ 不可逆な offline(=非可逆圧縮)の前に、Calendar 生データのスナップショットを正本の隣に保存(保険)。
     Fable5硬化: 蒸留が浅かったと後日判明した時の生データ復元源。返り値=保存パス or None。"""
@@ -2834,6 +2860,8 @@ class H(BaseHTTPRequestHandler):
                 elif self.path == "/api/seiri/interview":    # ⑤ 逆IV＋有用性ゲート
                     self._json(seiri_interview(who, req.get("project", ""),
                                 req.get("knowledge", ""), req.get("answers", "")))
+                elif self.path == "/api/seiri/closedbook":   # ⑤→⑥ 最終硬化ゲート(closed-book試験)
+                    self._json(seiri_closed_book(who, req.get("project", ""), req.get("knowledge", "")))
                 elif self.path == "/api/seiri/offline":      # ⑥ Calendar offline(人承認後)
                     self._json(seiri_offline(who, req.get("project_id")))
                 else:
