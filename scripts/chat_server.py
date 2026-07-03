@@ -1343,7 +1343,7 @@ def ollama_chat(messages, tools=None, num_predict=1536):
     # num_predict: 既定1536。import等の大きなJSON生成は呼出側で引き上げ(途中切れ→JSON解析失敗を防ぐ)
     body = {"model": A.model, "messages": messages, "stream": False, "think": False,
             "keep_alive": "30m",                              # モデルを温存(再ロードの15秒遅延を防ぐ・賢さは不変)
-            "options": {"num_ctx": 24576, "num_predict": num_predict,
+            "options": {"num_ctx": 12288, "num_predict": num_predict,
                         "temperature": 0.15, "top_p": 0.9}}   # tool呼出を安定化(非決定性を抑制)
     if tools:
         body["tools"] = tools
@@ -3669,7 +3669,7 @@ def _warm_model_loop():
         try:
             wb = {"model": A.model, "messages": [{"role": "user", "content": "hi"}],
                   "stream": False, "think": False, "keep_alive": "30m",
-                  "options": {"num_ctx": 24576, "num_predict": 1}}   # 実チャットと同 num_ctx(違うと積み直す)
+                  "options": {"num_ctx": 12288, "num_predict": 1}}   # 実チャットと同 num_ctx(違うと積み直す)
             urllib.request.urlopen(urllib.request.Request(OLLAMA, data=json.dumps(wb).encode(),
                                    headers={"Content-Type": "application/json"}), timeout=120).read()
         except Exception:
