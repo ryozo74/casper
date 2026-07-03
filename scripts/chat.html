@@ -207,6 +207,9 @@
 <script>
 const wrap=document.getElementById('wrap'), log=document.getElementById('log');
 const inp=document.getElementById('inp'), send=document.getElementById('send');
+// 先回りウォーム(Fable): 入力にfocusした瞬間qwenのロードを開始→打っている間に温まり、送信時には速い。2分に1回に絞る。
+let _lastWarm=0;
+inp.addEventListener('focus',()=>{ const t=Date.now(); if(t-_lastWarm>120000){ _lastWarm=t; fetch('/api/prewarm',{credentials:'same-origin'}).catch(()=>{}); } });
 const status=document.getElementById('status');
 const history=[];
 
@@ -395,6 +398,7 @@ async function ask(){
         if(!line) continue;
         let j; try{ j=JSON.parse(line);}catch(e){ continue; }
         if(j.error){ acc+='\n[error] '+j.error; }
+        else if(j.status){ if(!acc){ b.textContent=j.status; log.scrollTop=log.scrollHeight; } continue; }  // 縮退: 本回答前の"少々お待ちを"(accには足さず、本文が来たら上書きされる)
         else if(j.message&&j.message.content){ acc+=j.message.content; }
         else if(j.diagram){ diagramUrl=j.diagram; }
         else if(j.confirm){ pendingConfirms.push(j.confirm); }

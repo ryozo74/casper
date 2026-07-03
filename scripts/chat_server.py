@@ -422,11 +422,24 @@ def _ollama_json(system, user, num_predict=400):
     """z8a を format='json' の制約デコードで呼び、JSON文字列を返す(P2ルーター/引数抽出の土台)。
     Ollamaのschema-object modeはqwenが無視する為、format='json'＋プロンプト記述スキーマを使う(実測で確実)。"""
     body = {"model": A.model, "stream": False, "think": False, "keep_alive": "30m", "format": "json",
-            "options": {"num_ctx": 8192, "num_predict": num_predict, "temperature": 0},
+            # num_ctx は対話/pinger と統一(Fable): 不一致は Ollama のランナー再作成=実質再ロードで温存を壊す(冷間の真犯人)
+            "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": 0},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=40) as r:
         return json.load(r).get("message", {}).get("content", "")
+
+
+def _qwen_is_warm():
+    """z8a に対話モデルが常駐しているか(/api/ps・数ms)。冷間検知(Fable縮退#3): 埋込による追い出しも捕捉。
+    エラー時は True(=status出さず・過剰な"お待ちを"を避ける・fail-open)。"""
+    try:
+        with urllib.request.urlopen(A.endpoint.rstrip("/") + "/api/ps", timeout=2) as r:
+            names = [m.get("name", "") for m in json.load(r).get("models", [])]
+        base = str(A.model).split(":")[0]
+        return any(base in n for n in names)
+    except Exception:
+        return True
 
 
 _ACTION_Q_RE = re.compile(r"(DM|ディーエム|メッセージ|連絡し|伝え|知らせ|送っ?て|送信し)", re.I)
@@ -2964,6 +2977,16 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(b)
             else:
                 self.send_response(404); self.end_headers()
+        elif self.path == "/api/prewarm":          # 先回りウォーム(Fable): 入力focus時に叩き、打っている間にqwenをロード
+            if BACKEND not in ("claude_cli", "anthropic") and not _qwen_is_warm():
+                def _warm():
+                    try:
+                        _ollama_json("ping", "hi", num_predict=1)   # num_ctx 12288 のランナーを温める
+                    except Exception:
+                        pass
+                import threading as _tw
+                _tw.Thread(target=_warm, daemon=True).start()
+            self._json({"ok": True}); return
         elif self.path == "/health":
             if BACKEND == "claude_cli":
                 active = f"Claude {CLI_MODEL.title()} (Max)"
@@ -3657,6 +3680,13 @@ class H(BaseHTTPRequestHandler):
         # --- Ollama(local) backend (qwen3.6:27b 等・自律 tool-calling) ---
         ll_user = next((m.get("content", "") for m in reversed(msgs)
                         if m.get("role") == "user"), "")
+        if not _qwen_is_warm():                     # 縮退(Fable): 冷間なら"少々お待ちを"を即返す(本回答は同一ストリームで続く)
+            try:
+                self.wfile.write((json.dumps({"status": "🔥 Casper を起こしております、少々お待ちを…（初回は十数秒かかり申す）"},
+                                             ensure_ascii=False) + "\n").encode())
+                self.wfile.flush()
+            except Exception:
+                pass
         # 出力指針(表/mermaid/Canvas/動画)を system に追記。
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
