@@ -57,6 +57,10 @@ try:
 except Exception:
     casper_trace = None
 try:
+    import casper_outbox                          # アクションoutbox(永続状態機械・冪等・"送信済"の真実源・Fable #4)
+except Exception:
+    casper_outbox = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -282,10 +286,16 @@ def _action_summary(tool, args):
     except Exception:
         return tool
 
-def _register_pending(tool, args, uid, summary):
-    pid = uuid.uuid4().hex[:12]
+def _register_pending(tool, args, uid, summary, thread=None):
+    if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
+        try:
+            pid = casper_outbox.propose(tool, args, uid, summary, thread=thread)["id"]
+        except Exception:
+            pid = uuid.uuid4().hex[:12]
+    else:
+        pid = uuid.uuid4().hex[:12]
     PENDING_ACTIONS[pid] = {"tool": tool, "args": args, "uid": str(uid or ""), "summary": summary}
-    if len(PENDING_ACTIONS) > 50:                  # 古いものから間引き(メモリ肥大防止)
+    if len(PENDING_ACTIONS) > 50:                  # 古いものから間引き(メモリキャッシュの肥大防止・真実源はoutbox)
         for k in list(PENDING_ACTIONS)[:-50]:
             PENDING_ACTIONS.pop(k, None)
     return pid
@@ -3434,18 +3444,36 @@ class H(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
             who = identify(self)
             pid = req.get("id", ""); approve = bool(req.get("approve"))
-            pend = PENDING_ACTIONS.pop(pid, None)
+            # 真実源=outbox(永続)。in-memoryは高速キャッシュ。再起動(reload多発)でもoutboxから拾える。
+            pend = PENDING_ACTIONS.get(pid)
+            if pend is None and casper_outbox:
+                orec = casper_outbox.get(pid)
+                if orec and orec.get("state") == "proposed":
+                    pend = {"tool": orec["tool"], "args": orec["args"], "uid": orec["uid"],
+                            "summary": orec.get("summary", ""), "thread": orec.get("thread")}
             if not pend:
                 self._json({"ok": False, "error": "提案が見つかりませぬ(期限切れか既処理)"}); return
             if pend["uid"] and who.get("uid") and str(who["uid"]) != pend["uid"]:
                 self._json({"ok": False, "error": "本人のみ承認できまする"}); return
             if not approve:
+                if casper_outbox:
+                    casper_outbox.reject(pid, uid=who.get("uid"))
+                PENDING_ACTIONS.pop(pid, None)
                 self._json({"ok": True, "executed": False, "message": "却下しました"}); return
-            if req.get("body") is not None and isinstance(pend.get("args"), dict):   # 承認カードで編集された本文を反映
-                pend["args"]["body"] = req["body"]
-                pend["summary"] = _action_summary(pend["tool"], pend["args"])
-            if not WRITE_TOKEN:
+            if not WRITE_TOKEN:                             # 実行不可なら approved にせず proposed のまま残す(後で再試行可)
                 self._json({"ok": False, "error": "write token 未設定のため実行できませぬ(ニブ殿の token 更新待ち)"}); return
+            body_edit = req.get("body") if req.get("body") is not None else None
+            if casper_outbox:                              # 冪等ガード: proposed→approved を原子遷移。二重承認/多重クリックは弾く(二度送らぬ)
+                appr = casper_outbox.approve(pid, uid=who.get("uid"), body_edit=body_edit)
+                if not appr:
+                    self._json({"ok": False, "error": "既に処理済みにござる(二重送信を防ぎました)"}); return
+                if isinstance(appr.get("args"), dict):
+                    pend["args"] = appr["args"]            # outboxの確定args(本文編集反映済)を採用
+                casper_outbox.mark_executing(pid)
+            elif body_edit is not None and isinstance(pend.get("args"), dict):
+                pend["args"]["body"] = body_edit
+            PENDING_ACTIONS.pop(pid, None)                 # キャッシュから除去(以後の真実源はoutboxのstate)
+            pend["summary"] = _action_summary(pend["tool"], pend["args"])
             try:
                 actor = who.get("uid") or pend["uid"]
                 if pend["tool"] in ("aurora_create", "aurora_append"):   # Aurora書込は casper_aurora 経由(write token・別endpoint)
@@ -3492,8 +3520,13 @@ class H(BaseHTTPRequestHandler):
                                         probe={"type": d["kind"], "q": d["keyword"]}, assignee=_uid_to_name(to))
                         except Exception:
                             pass
+                if casper_outbox:                          # 状態を確定(=『送信済』の唯一の真実源)
+                    (casper_outbox.mark_sent(pid, str(result)[:500]) if ok
+                     else casper_outbox.mark_failed(pid, str(result)[:500]))
                 self._json({"ok": ok, "executed": True, "tool": pend["tool"], "result": str(result)[:2000]})
             except Exception as e:
+                if casper_outbox:
+                    casper_outbox.mark_failed(pid, str(e)[:500])   # executing→failed(再試行可・状態を残す)
                 self._json({"ok": False, "error": str(e)})
             return
         if self.path == "/api/feedback":
