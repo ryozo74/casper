@@ -2303,15 +2303,21 @@ def seiri_vault_material(project_name, cap=12000):
 
 
 def seiri_ask(who, project_name, materials):
-    """③ PJの vault既存素材＋投入資料を踏まえ、Casperが『まだ埋まらぬ穴』を突く質問を生成。"""
+    """③ PJの vault既存素材＋投入資料を踏まえ、Casperが『まだ埋まらぬ穴』を突く質問を生成。
+    質問数は投入資料の量に比例させ、複数資料でも1問あたりの濃度が下がらぬようにする(殿御下命)。"""
     vault_mat, nsrc = seiri_vault_material(project_name)
+    mat = materials or ""
+    n_docs = mat.count("（Casper読解）") + mat.count("Vimeo")   # 投入した資料の点数(読解ファイル＋動画)
+    n_q = min(9, 3 + n_docs + len(mat) // 2500)                 # 基本3問＋資料が多いほど増やす(上限9・薄めない)
     sysp = ("あなたは studio bokan の伴走AI『Casper』。完了プロジェクトの『整理(offboarding)』の最中。"
             "下記PJについて、vault既存素材(議事録/asset/DB書庫等)と人の投入資料で"
-            "**既に分かっている事は問わず**、永続結晶化に『まだ足りない穴』だけを突く質問を2〜3個、簡潔に挙げよ。"
+            f"**既に分かっている事は問わず**、永続結晶化に『まだ足りない穴』だけを突く質問を**{n_q}個**挙げよ。"
+            "**投入資料が複数ある時は、各資料・各観点(段取り/落とし穴/判断根拠/外部やりとり)の穴を漏らさず**、"
+            "表面的な質問で数を埋めるな——それぞれ具体的で、答えれば結晶化が濃くなる質問にせよ。"
             "各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
     user = (f"プロジェクト: {project_name}\n\n## vault既存素材({nsrc}件)\n{vault_mat or '(なし)'}"
-            f"\n\n## 人が投入した追加資料\n{materials or '(なし)'}")
-    return strip_think(llm_text(sysp, user, num_predict=400)).strip()
+            f"\n\n## 人が投入した追加資料\n{mat or '(なし)'}")
+    return strip_think(llm_text(sysp, user, num_predict=max(400, n_q * 90))).strip()
 
 
 def seiri_crystallize(who, project_name, materials, qa):

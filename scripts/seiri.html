@@ -65,7 +65,7 @@
   <!-- ② 資料投入 -->
   <div class="step" id="s2"><div class="sh"><span class="no">2</span>追加資料を投入(観測外の LINE/Slack 等)<span class="done" id="d2"></span></div>
     <div class="sb">
-      <div class="drop" id="drop"><input type="file" id="seirifile" accept="image/*,video/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.md,.html,.htm" hidden>📎 画像・PDF・Office・テキスト・動画をドラッグ、またはクリックで選択<br><span class="mut">画像/PDF/文書=Casperが読解して素材化／資料動画=Vimeoへアップしてリンクを素材に</span></div>
+      <div class="drop" id="drop"><input type="file" id="seirifile" accept="image/*,video/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.md,.html,.htm" multiple hidden>📎 画像・PDF・Office・テキスト・動画をドラッグ、またはクリックで選択<br><span class="mut">複数まとめて選択・ドロップ可（1つずつ追加も可）／画像・PDF・文書=Casperが読解して素材化／資料動画=Vimeoへアップしてリンクを素材に</span></div>
       <textarea id="materials" placeholder="プロジェクトの補足・外部やりとり・決定の背景などを貼り付け（無くても可）"></textarea>
       <button id="b2" onclick="doAsk()">③ Casper に理解させる →</button>
     </div></div>
@@ -127,17 +127,19 @@ function pickManual(){
 // ② ドラッグ投入
 const drop=$('drop');
 drop.onclick=()=>$('seirifile').click();
-$('seirifile').addEventListener('change',e=>{if(e.target.files[0])ingestFile(e.target.files[0]);e.target.value='';});
+$('seirifile').addEventListener('change',e=>{[...e.target.files].forEach(ingestFile);e.target.value='';});   // 複数まとめて可
 ['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
 ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
-drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)ingestFile(f);});
+drop.addEventListener('drop',e=>{[...e.dataTransfer.files].forEach(ingestFile);});   // 複数ドロップ可
 // 画像/PDF/Office を Casper の vision・抽出(feed_ingest)で読解→素材化(教える/遊ぶと同じ支援)
 // 資料としての動画は Vimeo へアップ(殿方針: Score向け以外の動画=Vimeo)
+let _ingSeq=0;
 function ingestFile(f){
   if(f.type.startsWith('video/')){ return vimeoUploadSeiri(f); }
   const r=new FileReader();
+  const mark=String.fromCharCode(0x200b).repeat(++_ingSeq);   // 不可視の一意マーカー(ゼロ幅空白): 複数/同名の並行読解でも .replace の取り違えを防ぐ
+  const tag='['+f.name+'] Casperが読解中…'+mark;
   r.onload=async()=>{
-    const tag='['+f.name+'] Casperが読解中…';
     $('materials').value+=($('materials').value?'\n\n':'')+tag;
     try{
       const d=await fetch('/api/feed/ingest',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
