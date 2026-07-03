@@ -2263,6 +2263,25 @@ def _seiri_raw_snapshot(uid, project_id):
             return None
         name = prec.get("name") or f"project_{project_id}"
         slug = re.sub(r"[^\w\-]", "_", name)[:40] or "project"
+        # Calendar 生データ(REST): PJの タスク / 決定 / イベント を実取得(不可逆offlineの真の復元源)
+        tasks = []; decisions = []; events = []
+        try:
+            _get = casper_tools._get if casper_tools else None
+            if _get:
+                allt = []
+                for off in (0, 500, 1000, 1500):
+                    page = _get(f"/tasks?limit=500&offset={off}").get("items", [])
+                    allt += page
+                    if len(page) < 500:
+                        break
+                tasks = [t for t in allt if str(t.get("project_id")) == str(project_id)]
+                task_ids = {str(t.get("id")) for t in tasks}
+                decisions = [d for d in _get("/decisions?limit=500").get("items", [])
+                             if str(d.get("project_id")) == str(project_id)]
+                events = [e for e in _get("/events?limit=1000").get("items", [])
+                          if str(e.get("target_id")) in task_ids][:400]
+        except Exception:
+            pass
         cryst = ""
         cpath = os.path.join(SEIRI_DIR, f"proj_{slug}.md")   # 結晶化本文(あれば)
         if os.path.exists(cpath):
@@ -2274,9 +2293,10 @@ def _seiri_raw_snapshot(uid, project_id):
             except Exception:
                 pass
         snap = {"snapshot_at": datetime.datetime.now().isoformat(timespec="seconds"),
-                "project": prec, "crystallization": cryst, "vault_sources": sources,
-                "note": "offline前の復元手がかり(Fable硬化)。project記録＋結晶化本文＋蒸留に使ったvault素材一覧。"
-                        "注: Calendarのタスク/決定/DMの完全raw取得はAPI未対応ゆえ含まぬ(今後の課題)。"}
+                "project": prec, "tasks": tasks, "decisions": decisions, "events": events,
+                "crystallization": cryst, "vault_sources": sources,
+                "note": "offline前の生データ保険(Fable硬化)。PJのタスク/決定/イベント(Calendar生データ)＋結晶化本文＋蒸留素材一覧。"
+                        "offlineは不可逆圧縮ゆえ、蒸留が浅かった時の復元源。"}
         os.makedirs(SEIRI_DIR, exist_ok=True)
         path = os.path.join(SEIRI_DIR, f"proj_{slug}_raw.json")
         json.dump(snap, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
@@ -3314,17 +3334,26 @@ class H(BaseHTTPRequestHandler):
                     result = (casper_mcp.call_tool(pend["tool"], pend["args"], token=WRITE_TOKEN, actor=actor)
                               if casper_mcp else "(MCP無効)")
                     ok = not str(result).startswith("(MCP")
-                    # DM代筆で"Vimeoにアップして"と依頼した場合、完了を自動追跡する OPEN LOOP を登録
+                    # DMが成果物(動画/資料)の依頼なら OPEN LOOP を自動登録。抽出は正規表現でなく LLM構造化出力
+                    # (Fable指摘: DM本文はLLMが書くのだから対象語もLLMに構造で吐かせる方が頑健)。安価な事前ゲート付き。
                     if ok and pend["tool"] == "send_message" and casper_openloop:
                         try:
                             body = str((pend.get("args") or {}).get("body") or "")
-                            if re.search(r"[Vv]imeo", body) and re.search(r"アップ|上げ|投稿|共有|お願い", body):
-                                kw = re.findall(r"[A-Z][A-Za-z0-9]{2,}|[ぁ-んァ-ヶ一-龠]{2,10}(?=の動画|動画|ムービー|映像)", body)
-                                q = next((k for k in kw if k.upper() not in ("VIMEO",)), None)
-                                if q:
+                            if re.search(r"(アップ|提出|作成|お願い|依頼|上げ|共有)", body) and \
+                               re.search(r"(動画|ムービー|映像|資料|画像|ファイル|[Vv]imeo)", body):
+                                rec = strip_think(llm_text(
+                                    "次のDMは相手に『成果物(動画/資料)の作成・アップ・提出』を依頼しているか判定し JSONのみ返せ:"
+                                    " {\"track\":true|false, \"kind\":\"vimeo\"|\"asset\"|\"\", \"keyword\":\"追跡に使う対象名(PJ名/作品名・簡潔に)\"}。"
+                                    "動画のVimeoアップ依頼なら kind=vimeo、資料ファイルなら asset。単なる連絡・質問なら track=false。",
+                                    body, num_predict=120))
+                                mm = re.search(r"\{.*\}", rec, re.S)
+                                d = json.loads(mm.group(0)) if mm else {}
+                                if d.get("track") and d.get("keyword") and d.get("kind") in ("vimeo", "asset"):
                                     to = (pend.get("args") or {}).get("to_user_id")
-                                    casper_openloop.add(who=str(actor), title=f"{_uid_to_name(to)}に「{q}」動画のVimeoアップを依頼",
-                                                        probe={"type": "vimeo", "q": q}, assignee=_uid_to_name(to))
+                                    casper_openloop.add(
+                                        who=str(actor),
+                                        title=f"{_uid_to_name(to)}に「{d['keyword']}」の{'Vimeoアップ' if d['kind']=='vimeo' else '資料提出'}を依頼",
+                                        probe={"type": d["kind"], "q": d["keyword"]}, assignee=_uid_to_name(to))
                         except Exception:
                             pass
                 self._json({"ok": ok, "executed": True, "tool": pend["tool"], "result": str(result)[:2000]})
