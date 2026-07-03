@@ -346,6 +346,19 @@ def _salvage_text_toolcall(final, who, pending_actions):
             to = rev.get(nm) or rev.get(nm.replace("さん", ""))
             body = " ".join(q.strip() for q in quotes).strip()
             body = re.sub(r"^" + re.escape(nm) + r"\s*さん[、,：:]?\s*", "", body)
+    # ④ 関数呼び構文形 send_message(to_user_id="uid31", body="...") をテキストで書いた場合(qwen頻出)
+    if not (to and body):
+        mf = re.search(r"send_message\s*\(([^)]*)\)", f, re.S)
+        if mf:
+            inner = mf.group(1)
+            mt = re.search(r"to_user_id\s*=\s*[\"']?([^\"',\s)]+)[\"']?", inner)
+            mbd = re.search(r"body\s*=\s*[\"'](.+?)[\"']", inner, re.S)
+            if mt and mbd:
+                raw_to = mt.group(1)
+                m_uid = re.search(r"(\d+)", raw_to)              # "uid31"→31 / 名前→roster逆引き
+                to = m_uid.group(1) if m_uid else {v: k for k, v in _ROSTER_MAP.items()}.get(raw_to)
+                body = mbd.group(1)
+                cut = (mf.start(), mf.end())
     if not (to and body):
         return final
     args = {"to_user_id": to, "body": body}
@@ -375,6 +388,20 @@ def _strip_tool_leak(text):
                   "", text, flags=re.S)
     text = re.sub(r"(?m)^.{0,40}(を確認するため.*?|を)(取得|照会|確認)します。?\s*$", "", text)   # 作業実況行
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _guard_completion_claims(text, pending_actions):
+    """P1(Fable処方・fail-closed): アクション完了主張は"真実値テキスト"。承認カード(=アクション台帳の
+    レシート)が無いのに送信/報告等を断じた文を打ち消す。既成事実化を salvage の網羅性でなく構造で封じる
+    ——qwenがどんな未知の書式でツールをテキスト化しても、カードが無ければ完了主張は通さない。"""
+    if not text or pending_actions:                        # カードあり=台帳にレシート有り→主張は裏付く
+        return text
+    if not re.search(r"(送信|お送り|DM|連絡|報告|通知|投稿|アップ(ロード)?)(しました|いたしました|済み|完了しました)", text):
+        return text
+    # レシート無し＋完了主張 → 該当行を打ち消し、未実行の注記へ差替(fail-closed=疑わしきは実行済と言わせぬ)
+    text = re.sub(r"(?m)^.*(送信|お送り|DM|連絡|報告|通知|投稿|アップ(ロード)?)(しました|いたしました|済み|完了しました).*$", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return (text + "\n\n※上記アクション(送信/報告等)はまだ実行しておりませぬ。承認カードが出ておらねば、恐れ入りますがもう一度お申し付けを。").strip()
 
 
 def _validate_assets(text):
@@ -1147,15 +1174,17 @@ def existence_digest(who, query):
         return ""
 
 
-# 進行中プロジェクト一覧を尋ねる問いの検知
+# 進行中PJ一覧/納期を尋ねる問い・直前の一覧への言及(上記リスト等)を検知
 _PROJ_Q_RE = re.compile(
     r"(動いて(る|いる)|進行中|稼働中|現在.{0,4}(プロジェクト|PJ|案件)|"
-    r"(プロジェクト|PJ|案件).{0,8}(一覧|教え|何|どれ|進行|ある|動))", re.I)
+    r"(プロジェクト|PJ|案件).{0,8}(一覧|教え|何|どれ|進行|ある|動)|"
+    r"納期|締切|〆|遅れ|遅延|上記.{0,5}(リスト|一覧|PJ|プロジェクト|案件|の))", re.I)
 
 
 def projects_digest(query):
-    """【進行中PJ一覧=retrieve-then-render】『動いているプロジェクトは?』等には Calendar(cal_projects.json)から
-    online PJ を注入し、Casperにツールを呼ばず一覧を述べさせる(qwenがツール呼びをテキストで書き失敗する事故を回避)。"""
+    """【進行中PJ一覧=retrieve-then-render】『動いているPJは?』『上記リストの納期遅れ』等には Calendar
+    (cal_projects.json)から online PJ を本日日付＋納期超過印つきで注入し、ツールを呼ばず一覧から答えさせる
+    (qwenのツール呼び失敗＋"上記"=直前回答を参照できぬ文脈欠落 の両方を機構で回避)。"""
     try:
         if not query or not _PROJ_Q_RE.search(query):
             return ""
@@ -1163,13 +1192,24 @@ def projects_digest(query):
         online = [p for p in items if str(p.get("display_status") or "online") == "online"]
         if not online:
             return ""
+        today = datetime.date.today().isoformat()
+        overdue = []
         lines = []
         for p in online[:40]:
             due = str(p.get("end_date") or "")[:10]
-            lines.append(f"- {p.get('name')}（{p.get('status')}" + (f"・〆{due}" if due else "") + "）")
-        return ("\n\n## 【進行中プロジェクト一覧(Calendar・確定)】\n"
-                f"現在 online の全{len(online)}件。**この一覧をそのまま答えよ。ツールを呼ぶな・"
-                "『〜を取得します』等の作業実況や ```tool ブロックを書くな**:\n" + "\n".join(lines))
+            is_late = bool(due) and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled")
+            if is_late:
+                overdue.append(p.get("name"))
+            lines.append(f"- {p.get('name')}（{p.get('status')}" + (f"・〆{due}" if due else "")
+                         + ("・🔴納期超過" if is_late else "") + "）")
+        latenote = (f"\n\n**本日{today}時点で納期超過(🔴)は {len(overdue)}件: "
+                    + "、".join(overdue) + "**") if overdue else f"\n\n※本日{today}時点で納期超過なし。"
+        return (f"\n\n## 【進行中プロジェクト一覧(Calendar・確定・本日{today})】\n"
+                f"現在 online の全{len(online)}件。**この一覧を根拠に答えよ(『上記リスト』とはこれ)。"
+                "PJ一覧の取得に calendar_lookup 等を呼ぶな(この一覧を使え)・『〜を取得します』の実況や ```tool ブロックを書くな。"
+                "ただし DM送信(send_message)等の別アクションは通常通りツールで実行せよ(送信前は承認待ち下書きになる。"
+                "まだ送っていないのに『報告しました/送信しました』と既成事実化するな)**:\n"
+                + "\n".join(lines) + latenote)
     except Exception:
         return ""
 
@@ -3688,6 +3728,7 @@ class H(BaseHTTPRequestHandler):
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
         final = _salvage_text_toolcall(final, who, pending_actions)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
+        final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
         final, diagram = render_diagram(final)
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
