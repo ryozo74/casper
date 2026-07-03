@@ -7,7 +7,7 @@ CORS 不要・ブラウザから外部IPへ直接出ない。
 Usage:
   python3 chat_server.py --endpoint http://192.168.44.119:11434 --model qwen3:14b --port 8770
 """
-import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, urllib.request, urllib.error, uuid
+import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, time, urllib.request, urllib.error, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,6 +52,10 @@ try:
     import casper_traits                         # 人物trait(癖)レジストリ=verify_digestが決定的消費
 except Exception:
     casper_traits = None
+try:
+    import casper_trace                          # トレーシング(1req=1trace・事後分析基盤・Fable #7-1)
+except Exception:
+    casper_trace = None
 try:
     import casper_extract
 except Exception:
@@ -3696,6 +3700,7 @@ class H(BaseHTTPRequestHandler):
         final = ""
         pending_actions = []                        # Stage2: 副作用操作の承認待ちキュー
         MAXIT = 6
+        _t0 = time.time()                           # トレース: 生成時間計測の起点
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
         # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
         routed = _action_router(ll_user, sysadd, who) if _looks_like_action(ll_user) else None
@@ -3793,9 +3798,22 @@ class H(BaseHTTPRequestHandler):
         if not final:
             final = "(応答を得られませなんだ)"
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
+        _pre = final
         final = _salvage_text_toolcall(final, who, pending_actions)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
+        _salv = final != _pre; _pre = final
         final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
+        _val = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
+        _grd = final != _pre
+        if casper_trace:                            # トレース: 判断点を1req=1行で記録(事後分析基盤・Fable #7-1)
+            try:
+                casper_trace.emit({"query": str(ll_user)[:200], "actor": who.get("uid"), "thread": thr,
+                                   "routed": bool(routed), "action": (routed or {}).get("tool"),
+                                   "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
+                                   "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val,
+                                   "guarded_claim": _grd, "final_len": len(final), "cards": len(pending_actions)})
+            except Exception:
+                pass
         final, diagram = render_diagram(final)
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
