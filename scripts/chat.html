@@ -172,9 +172,10 @@
 <body>
 <header>
   <button id="menubtn" title="スレッド一覧">☰</button>
-  <div><h1>Casper</h1></div>
+  <div><h1 onclick="location.reload()" style="cursor:pointer" title="クリックで再読込">Casper</h1></div>
   <nav class="nav"><a href="/learn">🧠 Casperに教える</a><a href="/play">🎲 Casperと遊ぶ</a><a href="/seiri">🧹 Casperで整理</a><a href="/peek">🔮 Casperをのぞく</a></nav>
-  <div class="dot" id="who" title="ログイン">👤 <span id="whoname">ゲスト</span></div>
+  <span id="today" style="color:var(--mut);font-size:12px;margin-left:auto"></span>
+  <div class="dot" id="who" title="ログイン"><span id="whoav">👤</span> <span id="whoname">ゲスト</span></div>
   <div class="dot" id="status"><b></b><span>接続確認中…</span></div>
 </header>
 <div id="sidebar">
@@ -564,9 +565,10 @@ document.getElementById('newthread').onclick=newThread;
 document.getElementById('who').onclick=async()=>{
   if(confirm('ログアウトしますか?')){ await jpost('/api/logout',{}); location.href='/login'; }
 };
+(function(){ const d=new Date(),w='日月火水木金土'[d.getDay()]; document.getElementById('today').textContent='本日 '+(d.getMonth()+1)+'月'+d.getDate()+'日('+w+')'; })();
 (async()=>{
   const b0=el('bot'); b0.textContent='Casper にござる。（タスク・新着DMを確認中…）';   // 即時表示で白画面を防ぐ
-  try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; if(w.avatar) USER_AV=w.avatar; }catch(e){}
+  try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; if(w.avatar){ USER_AV=w.avatar; document.getElementById('whoav').innerHTML='<img src="'+USER_AV+'" alt="" style="width:20px;height:20px;border-radius:5px;object-fit:cover;vertical-align:middle" onerror="this.replaceWith(document.createTextNode(\'👤\'))">'; } }catch(e){}
   try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json()); if(br.text){ render(b0,br.text); renderMermaid(b0); log.scrollTop=log.scrollHeight; history.push({role:'assistant',content:br.text}); } }catch(e){}   // ブリーフィング(タスク一覧/DM)を会話文脈に載せる=「上記のタスク」等の指示語を解決可能に
   refreshThreads(); })();
 // ===== Score Uploader ツール =====

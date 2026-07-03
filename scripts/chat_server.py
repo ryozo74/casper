@@ -1036,6 +1036,18 @@ def activity_digest(who):
         return ""
 
 
+def _bounded(fn, sec, default=None):
+    """fn() を sec秒だけ待ち、超えたら default を返す(遅いMCP/RAGで応答をhangさせない安全弁)。"""
+    import concurrent.futures as _cf
+    _ex = _cf.ThreadPoolExecutor(max_workers=1)
+    try:
+        return _ex.submit(fn).result(timeout=sec)
+    except Exception:
+        return default
+    finally:
+        _ex.shutdown(wait=False)
+
+
 # 状態を問う問い(〜された?/上がった?/どうなってる?/進捗?)を機械的に検知する関門。
 _STATE_Q_RE = re.compile(
     r"(され(た|てる|てます|ました)|終わ(った|り|りました)|上が(った|ってる|りました)|"
@@ -1053,15 +1065,13 @@ def verify_digest(who, query):
         uid = who.get("uid")
         live = ""
         if uid and WRITE_TOKEN and casper_mcp:
-            try:                                          # get_events(Nibu改修で稼働)=最新の状態変化
-                ev = casper_mcp.call_tool("get_events", {"actor_id": int(uid), "since": 0, "limit": 30},
-                                          token=WRITE_TOKEN, actor=int(uid))
-                if isinstance(ev, str) and ev.strip().startswith("{") and "error" not in ev[:40]:
-                    live += "\n【live: Calendar 最新イベント(get_events)】\n" + ev[:1500]
-            except Exception:
-                pass
+            # Calendar照会は7秒で見切る(遅延時に応答をhangさせない=無応答事故の防止)
+            ev = _bounded(lambda: casper_mcp.call_tool("get_events", {"actor_id": int(uid), "since": 0, "limit": 30},
+                                                       token=WRITE_TOKEN, actor=int(uid)), 7, None)
+            if isinstance(ev, str) and ev.strip().startswith("{") and "error" not in ev[:40]:
+                live += "\n【live: Calendar 最新イベント(get_events)】\n" + ev[:1500]
             try:
-                tt = casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=int(uid))
+                tt = _bounded(lambda: casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=int(uid)), 7, None)
                 if isinstance(tt, str) and tt.strip().startswith(("{", "[")):
                     live += "\n【live: 本日タスク】\n" + tt[:900]
             except Exception:
@@ -1097,12 +1107,7 @@ def existence_digest(who, query):
                 rows = casper_manifest.search(query, limit=80)
             except Exception:
                 rows = []
-        rag = []                                          # RAGは"説明の文脈"用の補助(識別子は台帳が正)
-        if casper_embed:
-            try:
-                rag = [str(h)[:200] for h in (casper_embed.hybrid(query, k=4) or [])]
-            except Exception:
-                rag = []
+        rag = []                                          # 補助RAGは廃止(台帳が真実源・hybridは重く応答を遅延させる為)
         if rows:
             shown = rows[:45]
             lines = []
@@ -2026,13 +2031,10 @@ def open_briefing(who):
     def _gen_greet():
         return strip_think(llm_text(
             "あなたは studio bokan の伴走AI『Casper』。殿への開門の一言を、下記の状況を踏まえ述べよ。"
-            "【最優先=分かりやすさ】平明で自然な現代日本語で書く。凝った比喩・詩的な飾り(『午後の光が差し込む』等)・"
-            "回りくどい古語は使わない。口調は軽く——**文末を必ず『〜にござる』か『〜でござる』で締める**"
-            "(『ですね』等の現代語尾で終えない)。この語尾だけで十分で、他に大げさな戦国調・古語は使わない。"
-            "定型挨拶でなく、**本日のタスクの内訳に具体的に触れよ**(完了済みは実質除いて数える・どれから着手すべきか等の"
-            "気づきを一言添える)。未読DMがあればそれも織り込む。改行を入れず1〜2文で。"
-            "締め文句・末尾の定型的な誘い(『お申し付けを』等)は付けない。一人称で。",
-            ctx, num_predict=200)).strip().replace("\n", " ")
+            "**短く・親しみやすく**。堅苦しい飾りや古語・詩的表現は使わず、文末だけ軽く『〜にござる』で締める。"
+            "本日のタスク件数(完了は除く)と、あれば着手の一押しを、**1文で**。未読DMがあれば件数だけ添える。"
+            "定型挨拶・締め文句(『お申し付けを』等)は不要。改行なし・一人称。",
+            ctx, num_predict=120)).strip().replace("\n", " ")
     greet = ""
     try:                                                  # 8秒cap: qwen多忙でブリーフィングをhangさせぬ→テンプレ退避
         import concurrent.futures as _cf2
@@ -3409,8 +3411,9 @@ class H(BaseHTTPRequestHandler):
                 hist = "\n\n## これまでの会話(直近):\n" + "\n".join(
                     ("殿: " if m["role"] == "user" else "Casper: ") + str(m["content"])[:600]
                     for m in convo[-7:-1])
-            hits = (casper_embed.hybrid(last_user, k=8) if (casper_embed and last_user)
-                    else (casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []))
+            # 応答パスは高速な字面検索(casper_rag)を使う。意味検索(casper_embed 412MB)は load26s/検索8sで
+            # 応答をhangさせる為 hot pathから外す(存在確認は台帳が担う)。索引の高速化(binary)は別課題。
+            hits = casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
@@ -3497,7 +3500,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += portfolio_digest(ll_user)             # 実績クエリは自社Vimeo実績を注入
         sysadd += cross_digest(ll_user)                 # 横断クエリは全PJ遅延サマリを注入
         try:
-            hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)
+            hits = (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user)
                     else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
             if hits:
                 sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
