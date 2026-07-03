@@ -160,7 +160,8 @@ def calendar_events(uid):
 
 
 def gather(uid, tok):
-    """1uid分の全素材を時系列テキストに。"""
+    """1uid分の全素材を時系列テキストに。各内容行に出典タグ[S<n>]を付し、有効タグ集合も返す
+    (蒸留出典検問=Fable5 #2: 帯の主張が実在素材に基づくかを⚙照合する為)。返り=(material, cnt, valid_tags)。"""
     parts = [f"# 素材 uid={uid} ({uname(uid)})", "", "## org DM 逐語(get_messages)"]
     dm = org_dm(uid, tok)
     parts += dm if dm else ["(なし/未取得)"]
@@ -173,7 +174,15 @@ def gather(uid, tok):
     parts += ["", "## Score現場ログ"]
     sc = score_rows().get(uid, [])
     parts += sc if sc else ["(なし)"]
-    return "\n".join(parts), len(ev) + len(dm) + len(ce)
+    # 内容行に出典タグ[S<n>]を付与(見出し/空行/(なし)は除く)
+    valid = set(); n = 0; tagged = []
+    for ln in parts:
+        s = ln.strip()
+        if s and not s.startswith("#") and s not in ("(なし)", "(なし/未取得)"):
+            n += 1; t = f"S{n}"; valid.add(t); tagged.append(f"[{t}] {ln}")
+        else:
+            tagged.append(ln)
+    return "\n".join(tagged), len(ev) + len(dm) + len(ce), valid
 
 
 PROMPT_TMPL = (
@@ -187,7 +196,22 @@ PROMPT_TMPL = (
     "④状態(〜した?/上がった?)は帯の古記述を結末と誤認せず実物照会前提⑤揺れる語(動画/資料/データ)は同一対象へ串刺し"
     "⑥**時刻は絶対表記(MM-DD HH:MM)で刻め**。『N時間後』等の相対表現は避け、ETAも絶対時刻に換算せよ"
     "(この帯は as-of {asof} 時点のスナップショットゆえ、後で読むと相対表現は陳腐化する)。\n"
-    "{prev}\n## 素材:\n{material}")
+    "⑦**各事実の末尾に根拠の出典タグ[S<n>]を付けよ**(素材の各行頭の[S<n>]。複数可: [S3][S7])。"
+    "素材に無い事は書くな。出典タグは素材に在るものだけ使い、創作するな(推測項は出典不要)。\n"
+    "{prev}\n## 素材(各行頭[S<n>]が出典タグ):\n{material}")
+
+
+def validate_sources(band, valid):
+    """帯が引く出典タグ[S<n>]が実在素材のものか⚙照合。実在せぬ(捏造)タグを [出典不明] に置換し、
+    (clean_band, 実在数, 捏造数)を返す。Fable5 #2: 蒸留の権威で捏造事実が消費されるのを防ぐ最終防壁。"""
+    import re as _re
+    cited = _re.findall(r"\[(S\d+)\]", band or "")
+    bad = [c for c in cited if c not in valid]
+    ok = len(cited) - len(bad)
+    if bad:
+        badset = set(bad)
+        band = _re.sub(r"\[(S\d+)\]", lambda m: m.group(0) if m.group(1) in valid else "[出典不明]", band)
+    return band, ok, len(bad)
 
 
 def distill(uid, material, prev="", asof=""):
@@ -234,7 +258,7 @@ def main():
     for uid in uids:
         if not uid:
             continue
-        material, cnt = gather(uid, tok)
+        material, cnt, valid = gather(uid, tok)
         if cnt < MIN_EVENTS:
             print(f"skip u_{uid} (活動{cnt}件・{MIN_EVENTS}未満)")
             continue
@@ -244,8 +268,9 @@ def main():
             prev = open(path, encoding="utf-8").read()[:4000]
         asof = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         band = distill(uid, material, prev, asof=asof)
+        band, src_ok, src_bad = validate_sources(band, valid)   # 出典検問: 捏造タグを[出典不明]化
         # as-of を帯冒頭に明示 = 時間軸のズレ対策。状態問合せは live(左脳)で裏取りする前提(帯は物語/先読み用)。
-        hdr = (f"<!-- distill_activity.py / model={MODEL} / 素材{cnt}件 / 元データ非破壊 -->\n"
+        hdr = (f"<!-- distill_activity.py / model={MODEL} / 素材{cnt}件 / 出典 実在{src_ok}・捏造{src_bad} / 元データ非破壊 -->\n"
                f"> **as-of {asof} 時点のスナップショット**。現在の状態はこの帯でなく live(Calendar)で裏取りせよ。\n\n")
         open(path, "w", encoding="utf-8").write(hdr + band + "\n")
         print(f"OK u_{uid} ({uname(uid)}) -> 25_activity/u_{uid}.md (素材{cnt}件・model={MODEL})")
