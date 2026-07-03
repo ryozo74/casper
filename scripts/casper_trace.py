@@ -71,6 +71,7 @@ def _stats(rows):
     print(f"  ツール漏れ掃除(salvaged)    : {rate('salvaged'):.0%}")
     print(f"  asset検問発火(validated)   : {rate('validated'):.0%}")
     print(f"  既成事実化打消(guarded_claim): {rate('guarded_claim'):.0%}  ← 急増はモデル/プロンプト劣化の警報")
+    print(f"  棄権率(abstained)          : {rate('abstained'):.0%}  ← 高すぎ=使われない/低すぎ=捏造の疑い(要較正)")
     gs = [r.get("gen_sec", 0) for r in rows if r.get("gen_sec")]
     if gs:
         gs.sort()

@@ -3843,11 +3843,14 @@ class H(BaseHTTPRequestHandler):
         _grd = final != _pre
         if casper_trace:                            # トレース: 判断点を1req=1行で記録(事後分析基盤・Fable #7-1)
             try:
+                _abstain = bool(re.search(r"(見当たら|確認できた範囲|わかりませ|分かりませ|存じませ|"
+                                          r"該当(する|情報|資料).{0,8}(見つか|ありませ|無い|なし))", final))
                 casper_trace.emit({"query": str(ll_user)[:200], "actor": who.get("uid"), "thread": thr,
                                    "routed": bool(routed), "action": (routed or {}).get("tool"),
                                    "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
                                    "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val,
-                                   "guarded_claim": _grd, "final_len": len(final), "cards": len(pending_actions)})
+                                   "guarded_claim": _grd, "abstained": _abstain,   # 棄権(Fable #3-5/7-5: 棄権率の定点観測)
+                                   "final_len": len(final), "cards": len(pending_actions)})
             except Exception:
                 pass
         final, diagram = render_diagram(final)
