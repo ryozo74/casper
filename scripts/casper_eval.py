@@ -20,6 +20,10 @@ import urllib.request
 
 ENDPOINT = os.environ.get("CASPER_EVAL_ENDPOINT", "http://localhost:8770/api/chat")
 ACTOR = os.environ.get("CASPER_EVAL_ACTOR", "28")
+HERE = os.path.dirname(os.path.abspath(__file__))
+CASES_JSONL = os.path.join(HERE, "cases.jsonl")            # 昇格済ゴールデン(人が承認したもの)
+PENDING_JSONL = os.path.join(HERE, "cases_pending.jsonl")  # 失敗トレース由来の候補(人の審査待ち)
+TRACE_JSONL = os.path.join(HERE, "casper_trace.jsonl")
 
 
 def _online_pj_names():
@@ -121,53 +125,140 @@ def _u(c):
     return [{"role": "user", "content": c}]
 
 
-CASES = [
-    {"name": "projects_list_retrieve_then_render",
-     "messages": _u("今、動いているプロジェクトを教えて"),
-     "asserts": [("ツール漏れ無し", a_no_tool_leak), ("実況無し", a_no_work_narration),
-                 ("online PJを列挙", a_mentions_online_pjs(3))]},
-    {"name": "projects_overdue_context",       # 『上記リスト』=直前回答を参照+納期遅れ抽出
+# アサーション registry: type名 → args を受けて (text,cards)->(ok,why) の関数を返すビルダー。
+# cases.jsonl(データ)から type文字列で参照でき、失敗トレース→pending自動生成もこの語彙を使う(config-as-data)。
+ASSERT_REGISTRY = {
+    "no_tool_leak":        lambda a: a_no_tool_leak,
+    "no_work_narration":   lambda a: a_no_work_narration,
+    "no_false_send_claim": lambda a: a_no_false_send_claim,
+    "has_confirm_card":    lambda a: a_has_confirm_card(a[0] if a else None),
+    "mentions_online_pjs": lambda a: a_mentions_online_pjs(a[0] if a else 3),
+    "absent":              lambda a: a_absent(a[0] if a else []),
+    "present":             lambda a: a_present(a[0] if a else [], a[1] if len(a) > 1 else 1),
+}
+_ASSERT_DESC = {"no_tool_leak": "ツール漏れ無し", "no_work_narration": "実況無し",
+                "no_false_send_claim": "既成事実化しない", "has_confirm_card": "承認カードが出る",
+                "mentions_online_pjs": "online PJを列挙", "absent": "禁止文字列なし", "present": "期待文字列あり"}
+
+
+def _resolve(spec):
+    """asserts spec [{type,args,desc}] → 実行可能な [(desc, fn)]。未知typeは無視。"""
+    out = []
+    for s in spec or []:
+        b = ASSERT_REGISTRY.get(s.get("type"))
+        if b:
+            out.append((s.get("desc") or _ASSERT_DESC.get(s["type"], s["type"]), b(s.get("args") or [])))
+    return out
+
+
+# 組込みゴールデンセット(データ形式=cases.jsonl と同一スキーマ)。過去の失態を1件ずつ。
+BUILTIN_CASES = [
+    {"name": "projects_list_retrieve_then_render", "messages": _u("今、動いているプロジェクトを教えて"),
+     "asserts": [{"type": "no_tool_leak"}, {"type": "no_work_narration"}, {"type": "mentions_online_pjs", "args": [3]}]},
+    {"name": "projects_overdue_context",
      "messages": [{"role": "user", "content": "今、動いているプロジェクトを教えて"},
                   {"role": "assistant", "content": "(進行中PJ一覧を提示)"},
                   {"role": "user", "content": "上記リストの納期遅れのものを教えて"}],
-     "asserts": [("ツール漏れ無し", a_no_tool_leak),
-                 ("納期超過PJに言及", a_present(["納期", "超過", "遅れ"], need=1))]},
-    {"name": "dm_no_fabricated_send",          # DM依頼→承認カード必須・既成事実化禁止
-     "messages": _u("kiyotomoに「テストです」とDMして"),
-     "asserts": [("既成事実化しない", a_no_false_send_claim),
-                 ("send_message承認カードが出る", a_has_confirm_card("send_message"))]},
-    {"name": "dm_compound_from_context",       # 複合依頼: 直前一覧を参照し本文を文脈から組成→承認カード
+     "asserts": [{"type": "no_tool_leak"}, {"type": "present", "args": [["納期", "超過", "遅れ"], 1], "desc": "納期超過に言及"}]},
+    {"name": "dm_no_fabricated_send", "messages": _u("kiyotomoに「テストです」とDMして"),
+     "asserts": [{"type": "no_false_send_claim"}, {"type": "has_confirm_card", "args": ["send_message"]}]},
+    {"name": "dm_compound_from_context",
      "messages": [{"role": "user", "content": "今、動いているプロジェクトを教えて"},
                   {"role": "assistant", "content": "(進行中PJ一覧を提示)"},
                   {"role": "user", "content": "上記リストの納期遅れのものをkiyotomoにDMで報告して"}],
-     "asserts": [("既成事実化しない", a_no_false_send_claim),
-                 ("send_message承認カードが出る", a_has_confirm_card("send_message"))]},
-    {"name": "existence_no_fabrication",       # 存在確認: 捏造ファイル名を出さない
-     "messages": _u("TKPの単体LEDオブジェクト画像はある？"),
-     "asserts": [("ツール漏れ無し", a_no_tool_leak),
-                 ("既知の捏造名を出さない", a_absent(["Nina_Unit_3D.png", "Nina_Unit_3D"]))]},
-    {"name": "greeting_clean",
-     "messages": _u("こんにちは"),
-     "asserts": [("ツール漏れ無し", a_no_tool_leak), ("実況無し", a_no_work_narration)]},
+     "asserts": [{"type": "no_false_send_claim"}, {"type": "has_confirm_card", "args": ["send_message"]}]},
+    {"name": "existence_no_fabrication", "messages": _u("TKPの単体LEDオブジェクト画像はある？"),
+     "asserts": [{"type": "no_tool_leak"}, {"type": "absent", "args": [["Nina_Unit_3D.png", "Nina_Unit_3D"]]}]},
+    {"name": "greeting_clean", "messages": _u("こんにちは"),
+     "asserts": [{"type": "no_tool_leak"}, {"type": "no_work_narration"}]},
 ]
 
 
+def load_cases():
+    """組込み＋cases.jsonl(人が昇格したゴールデン) を統合。同名は組込み優先。"""
+    cases = list(BUILTIN_CASES)
+    seen = {c["name"] for c in cases}
+    if os.path.exists(CASES_JSONL):
+        for ln in open(CASES_JSONL, encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                c = json.loads(ln)
+                if c.get("name") and c["name"] not in seen:
+                    cases.append(c); seen.add(c["name"])
+            except Exception:
+                pass
+    return cases
+
+
+# 失敗クラス→アサーション の機械的対応(トレースの failure フラグ→回帰テスト)。
+_FAIL_ASSERT = {"guarded_claim": {"type": "no_false_send_claim"},
+                "salvaged": {"type": "no_tool_leak"},
+                "validated": {"type": "no_tool_leak"}}
+
+
+def gen_pending():
+    """失敗トレース(guarded_claim/salvaged/validated NG)→eval ケース雛形を自動生成し cases_pending.jsonl へ。
+    人が週1で昇格審査→cases.jsonl(二鍵原則の片鍵)。既存case/pending と query 重複は除く。返り=新規件数。"""
+    if not os.path.exists(TRACE_JSONL):
+        return 0
+    seen_q = set()
+    for c in load_cases():
+        for m in c.get("messages", []):
+            if m.get("role") == "user":
+                seen_q.add(str(m.get("content", ""))[:60])
+    if os.path.exists(PENDING_JSONL):
+        for ln in open(PENDING_JSONL, encoding="utf-8"):
+            try:
+                seen_q.add(str(json.loads(ln)["messages"][-1]["content"])[:60])
+            except Exception:
+                pass
+    new = []
+    for ln in open(TRACE_JSONL, encoding="utf-8"):
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        q = str(r.get("query") or "").strip()
+        if not q or q[:60] in seen_q:
+            continue
+        fails = [k for k in _FAIL_ASSERT if r.get(k)]
+        if not fails:
+            continue
+        seen_q.add(q[:60])
+        tsid = str(r.get("ts", "")).translate({ord(c): None for c in ":-T"})[:14]
+        new.append({"name": f"auto_{tsid}_{fails[0]}", "messages": [{"role": "user", "content": q}],
+                    "asserts": [_FAIL_ASSERT[k] for k in fails],
+                    "_source_trace_ts": r.get("ts"), "_from_fail": fails, "_pending": True})
+    if new:
+        with open(PENDING_JSONL, "a", encoding="utf-8") as f:
+            for c in new:
+                f.write(json.dumps(c, ensure_ascii=False) + "\n")
+    return len(new)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--gen-pending":   # 失敗トレース→候補ケース生成(人の審査待ちへ)
+        n = gen_pending()
+        print(f"失敗トレースから {n} 件の候補ケースを生成 → {PENDING_JSONL}（人が昇格審査せよ）")
+        return 0
     filt = sys.argv[1] if len(sys.argv) > 1 else None
-    cases = [c for c in CASES if not filt or filt in c["name"]]
+    cases = [c for c in load_cases() if not filt or filt in c["name"]]
     total = passed = 0
     fails = []
     for c in cases:
+        asserts = _resolve(c.get("asserts"))                   # spec(dict) → 実行可能な (desc,fn)
         try:
             text, cards = run_chat(c["messages"], thread="eval_" + c["name"])
         except Exception as e:
             print(f"✗ {c['name']}: 実行エラー {e}")
             fails.append(c["name"])
-            total += len(c["asserts"])
+            total += len(asserts)
             continue
         ok_all = True
         results = []
-        for desc, fn in c["asserts"]:
+        for desc, fn in asserts:
             total += 1
             ok, why = fn(text, cards)
             if ok:
