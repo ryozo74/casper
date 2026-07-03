@@ -65,6 +65,10 @@ try:
 except Exception:
     casper_health = None
 try:
+    import casper_doc                             # 節構造ドキュメント(資料作り・節単位再生成/版管理・Fable UI設計)
+except Exception:
+    casper_doc = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -3472,6 +3476,59 @@ class H(BaseHTTPRequestHandler):
                 res = casper_aurora.append_version(doc_id, html, author_id=uname)
                 rd = json.loads(res) if isinstance(res, str) else (res or {})
                 self._json({"ok": bool(rd), "version": rd.get("version")})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path.startswith("/api/doc/") and casper_doc:   # 節構造ドキュメント(資料作り・Fable UI設計)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            try:
+                if self.path == "/api/doc/create":              # 節配列 or 報告書構成 から文書を作る
+                    d = casper_doc.create(req.get("title", "無題"), req.get("sections") or [],
+                                          project=req.get("project", ""), author=_uid_to_name(who.get("uid")) or "casper")
+                    self._json({"ok": True, "doc": d})
+                elif self.path == "/api/doc/get":
+                    self._json({"ok": True, "doc": casper_doc.get(req.get("doc_id", ""))})
+                elif self.path == "/api/doc/section/save":      # 節本文の編集保存(版退避＋教師信号 _prev)
+                    d = casper_doc.save_section(req.get("doc_id", ""), req.get("section_id", ""),
+                                                req.get("body", ""), orig=req.get("orig"))
+                    self._json({"ok": bool(d), "doc": d})
+                elif self.path == "/api/doc/section/regen":     # 節単位の再生成(弱いqwen対策=小さく回す)
+                    doc = casper_doc.get(req.get("doc_id", ""))
+                    sec = casper_doc.section(doc, req.get("section_id", "")) if doc else None
+                    if not sec:
+                        self._json({"ok": False, "error": "節が見つかりませぬ"}); return
+                    instr = req.get("instruction", "") or "より分かりやすく簡潔に"
+                    sysp = ("あなたはCasper。報告書の『1つの節だけ』を指示に沿って書き直せ。"
+                            "**見出しや他の節は書くな・その節の本文markdownのみ**返せ。前置き不要。")
+                    user = (f"文書: {doc.get('title','')}\n節の見出し: {sec.get('heading','')}\n"
+                            f"現在の本文:\n{sec.get('body','')}\n\n書き直しの指示: {instr}")
+                    nb = strip_think(llm_text(sysp, user, num_predict=max(400, len(sec.get('body','')) // 2)))
+                    nb = _strip_tool_leak(nb).strip()
+                    d = casper_doc.save_section(req.get("doc_id", ""), req.get("section_id", ""),
+                                                nb, orig=sec.get("body"), instruction=instr)
+                    self._json({"ok": bool(d), "doc": d, "regenerated": req.get("section_id")})
+                elif self.path == "/api/doc/add_section":
+                    d = casper_doc.add_section(req.get("doc_id", ""), req.get("heading", ""),
+                                               req.get("body", ""), after=req.get("after"))
+                    self._json({"ok": bool(d), "doc": d})
+                elif self.path == "/api/doc/versions":
+                    self._json({"ok": True, "versions": casper_doc.versions(req.get("doc_id", ""))})
+                elif self.path == "/api/doc/restore":           # 版へ戻す(戻す操作も可逆)
+                    d = casper_doc.restore(req.get("doc_id", ""), req.get("v"))
+                    self._json({"ok": bool(d), "doc": d})
+                elif self.path == "/api/doc/publish":           # 完成→既存の承認カード(Aurora起票)へ流す
+                    doc = casper_doc.get(req.get("doc_id", ""))
+                    if not doc:
+                        self._json({"ok": False, "error": "文書が見つかりませぬ"}); return
+                    md = casper_doc.to_markdown(doc)
+                    args = {"title": doc.get("title", "無題"), "body": md, "tags": req.get("tags") or []}
+                    summary = _action_summary("aurora_create", args)
+                    pid = _register_pending("aurora_create", args, who.get("uid"), summary, thread=req.get("thread"))
+                    self._json({"ok": True, "confirm": {"id": pid, "tool": "aurora_create", "args": args, "summary": summary}})
+                else:
+                    self._json({"ok": False, "error": "unknown doc endpoint"})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
