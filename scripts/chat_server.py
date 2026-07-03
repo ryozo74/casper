@@ -1474,11 +1474,14 @@ def build_sys():
     today = datetime.date.today()
     wd = "月火水木金土日"[today.weekday()]
     datehdr = (f"【今日の日付】{today.isoformat()}（{wd}曜）。日数・遅延・締切は必ずこの日付を基準に計算せよ"
-               "(自分の記憶の日付を使うな)。\n")
+               "(自分の記憶の日付を使うな)。")
     tail = ("\n【回答の作法】記号や番号(A/B/C等)1文字だけで答えるな。必ず日本語の文で具体的に答えよ。"
             "数値(遅延日数等)はデータから計算して明示せよ。")
-    base = datehdr + BASE_SYS + PERSONA_SYS + tail + team_roster()
-    return (ctx + "\n\n---\n" + base) if ctx else base
+    # KVキャッシュのプレフィックス安定化(Fable 6-3): 静的要素(ctx/BASE/PERSONA/roster)を先頭に固め、
+    # 日替わりの日付は末尾へ。→ 日を跨いでも静的プレフィックスが再利用され TTFT が下がる(1文字でも
+    # 動的要素を先頭に混ぜると全損する為)。
+    static = ((ctx + "\n\n---\n") if ctx else "") + BASE_SYS + PERSONA_SYS + tail + team_roster()
+    return static + "\n\n" + datehdr
 
 
 def ollama_chat(messages, tools=None, num_predict=1536):
