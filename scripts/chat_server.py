@@ -69,6 +69,10 @@ try:
 except Exception:
     casper_doc = None
 try:
+    import casper_dropbox                         # Dropbox転送(ファイル→パスワード付き共有リンク・Business口)
+except Exception:
+    casper_dropbox = None
+try:
     import casper_extract
 except Exception:
     casper_extract = None
@@ -3477,6 +3481,22 @@ class H(BaseHTTPRequestHandler):
                 res = casper_aurora.append_version(doc_id, html, author_id=uname)
                 rd = json.loads(res) if isinstance(res, str) else (res or {})
                 self._json({"ok": bool(rd), "version": rd.get("version")})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/dropbox/transfer":       # ファイル → Dropbox転送(パスワード付き共有リンク)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            if not (casper_dropbox and casper_dropbox.available()):
+                self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
+            try:
+                b64 = req.get("data_b64", "")
+                if "," in b64[:64]:
+                    b64 = b64.split(",", 1)[1]             # data:URL の接頭辞を除去
+                data = _b64.b64decode(b64)
+                r = casper_dropbox.transfer(data, req.get("filename", "file"),
+                                            password=(req.get("password") or None))
+                self._json(r)
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return

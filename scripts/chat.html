@@ -224,8 +224,10 @@
     <div class="tmitem" data-tool="score_uploader">🎬 Score Uploader（成果物を投げる）</div>
     <div class="tmitem" data-tool="report">📝 報告書を作る</div>
     <div class="tmitem" data-tool="makedoc">📄 直前の回答を資料にする（節ごと編集・再生成）</div>
+    <div class="tmitem" data-tool="dropbox">📦 Dropboxで送る（大容量・パスワード付きリンク）</div>
   </div>
   <input type="file" id="fileinp" accept="image/*,video/*" style="display:none">
+  <input type="file" id="dbxinp" style="display:none">
   <div class="hint">応答に数秒〜十数秒かかることがあります。</div>
 </footer>
 <script>
@@ -673,6 +675,35 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
   if(it.dataset.tool==='score_uploader'){ uploaderOn=true; renderTools(); }
   if(it.dataset.tool==='report'){ openReport(); }
   if(it.dataset.tool==='makedoc'){ docFromLastReply(); }
+  if(it.dataset.tool==='dropbox'){ document.getElementById('dbxinp').click(); }
+});
+// 📦 Dropbox転送: ファイル選択→Casper経由でDropboxへ→パスワード付きリンクを表示
+document.getElementById('dbxinp').addEventListener('change',async e=>{
+  const f=e.target.files[0]; e.target.value=''; if(!f)return;
+  const b=el('bot'); b.classList.add('cursor'); render(b,'📦 「'+esc(f.name)+'」を Dropbox へ転送中…（大きいファイルは少々かかり申す）');
+  log.scrollTop=log.scrollHeight;
+  const rd=new FileReader();
+  rd.onload=async()=>{
+    try{
+      const r=await dpost('/api/dropbox/transfer',{filename:f.name,data_b64:rd.result});
+      b.classList.remove('cursor');
+      if(r.ok){
+        const sz=(r.size/1e6).toFixed(1);
+        let h='📦 **'+esc(r.name)+'**（'+sz+'MB）を Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。\n\n'
+          +'**リンク**: '+esc(r.link)+'\n\n**パスワード**: `'+esc(r.password)+'`';
+        render(b,h);
+        const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:8px';
+        const cl=document.createElement('button'); cl.textContent='🔗 リンクをコピー';
+        const cp=document.createElement('button'); cp.textContent='🔑 パスワードをコピー';
+        [cl,cp].forEach(x=>x.style.cssText='padding:5px 12px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:13px');
+        cl.onclick=()=>{navigator.clipboard.writeText(r.link);cl.textContent='✓ コピー済';};
+        cp.onclick=()=>{navigator.clipboard.writeText(r.password);cp.textContent='✓ コピー済';};
+        bar.append(cl,cp); b.appendChild(bar);
+      }else{ render(b,'📦 転送に失敗いたした: '+esc(r.error||'不明')); }
+      log.scrollTop=log.scrollHeight;
+    }catch(err){ b.classList.remove('cursor'); render(b,'📦 転送エラー: '+esc(err.message||err)); }
+  };
+  rd.readAsDataURL(f);
 });
 function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
