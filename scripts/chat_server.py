@@ -2890,15 +2890,16 @@ class H(BaseHTTPRequestHandler):
             who = identify(self)
             name = who.get("email", "")
             avatar = ""
+            # アバター(Nibu 2026-07-06 是正): /api/users/{id}/avatar が無認証で image/*(未設定はSVGプレースホルダ)を
+            # 決定的に配信。avatar_url フィールドに頼らず uid から直接構築する(常に表示可・<img>はBearer不要)。
+            if who.get("uid"):
+                avatar = CAL_BASE.rstrip("/") + f"/api/users/{who['uid']}/avatar"
             if who.get("uid") and casper_tools:
                 try:
                     u = next((x for x in casper_tools._get("/users?limit=200").get("items", [])
                               if str(x.get("id")) == str(who["uid"])), None)
                     if u:
                         name = (u.get("username") or u.get("name")) or name
-                        av = u.get("avatar_url") or u.get("iconUrl") or u.get("avatar") or ""
-                        if av:                                  # Score/Calendarのアバター(相対なら Calendar 絶対URLへ)
-                            avatar = av if str(av).startswith("http") else (CAL_BASE.rstrip("/") + av)
                 except Exception:
                     pass
             if not name and who.get("uid"):
