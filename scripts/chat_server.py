@@ -433,7 +433,7 @@ def _guard_completion_claims(text, pending_actions):
 def _ollama_json(system, user, num_predict=400):
     """z8a を format='json' の制約デコードで呼び、JSON文字列を返す(P2ルーター/引数抽出の土台)。
     Ollamaのschema-object modeはqwenが無視する為、format='json'＋プロンプト記述スキーマを使う(実測で確実)。"""
-    body = {"model": A.model, "stream": False, "think": False, "keep_alive": "30m", "format": "json",
+    body = {"model": A.model, "stream": False, "think": False, "keep_alive": -1, "format": "json",
             # num_ctx は対話/pinger と統一(Fable): 不一致は Ollama のランナー再作成=実質再ロードで温存を壊す(冷間の真犯人)
             "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": 0},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
@@ -1514,7 +1514,7 @@ def ollama_chat(messages, tools=None, num_predict=1536):
     # num_ctx は大きめ(tool結果が大きいとコンテキスト溢れで出力が1文字に途切れる事故あり)
     # num_predict: 既定1536。import等の大きなJSON生成は呼出側で引き上げ(途中切れ→JSON解析失敗を防ぐ)
     body = {"model": A.model, "messages": messages, "stream": False, "think": False,
-            "keep_alive": "30m",                              # モデルを温存(再ロードの15秒遅延を防ぐ・賢さは不変)
+            "keep_alive": -1,                              # モデルを温存(再ロードの15秒遅延を防ぐ・賢さは不変)
             "options": {"num_ctx": 12288, "num_predict": num_predict,
                         "temperature": 0.15, "top_p": 0.9}}   # tool呼出を安定化(非決定性を抑制)
     if tools:
@@ -3993,7 +3993,7 @@ def _warm_model_loop():
     while True:
         try:
             wb = {"model": A.model, "messages": [{"role": "user", "content": "hi"}],
-                  "stream": False, "think": False, "keep_alive": "30m",
+                  "stream": False, "think": False, "keep_alive": -1,
                   "options": {"num_ctx": 12288, "num_predict": 1}}   # 実チャットと同 num_ctx(違うと積み直す)
             urllib.request.urlopen(urllib.request.Request(OLLAMA, data=json.dumps(wb).encode(),
                                    headers={"Content-Type": "application/json"}), timeout=120).read()

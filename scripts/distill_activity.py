@@ -220,7 +220,7 @@ def distill(uid, material, prev="", asof=""):
     if MODEL.startswith("qwen"):                       # 軽量=ローカルqwen
         try:
             # num_ctx=12288・keep_alive=30m を対話と統一(Fable): 不一致/未指定はランナー積み直し→バッチ後に対話が冷える主犯
-            body = {"model": MODEL, "think": False, "stream": False, "keep_alive": "30m",
+            body = {"model": MODEL, "think": False, "stream": False, "keep_alive": -1,
                     "messages": [{"role": "user", "content": prompt}],
                     "options": {"temperature": 0.2, "num_predict": 1400, "num_ctx": 12288}}
             req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
