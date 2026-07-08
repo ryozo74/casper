@@ -338,8 +338,8 @@ function mdToHtml(src){
     }
     const h=ln.match(/^(#{1,4})\s+(.*)$/);
     if(h){const n=Math.min(h[1].length+2,5); out.push('<h'+n+'>'+inlineMd(h[2])+'</h'+n+'>'); i++; continue;}
-    if(/^\s*[-*]\s+/.test(ln)){
-      const it=[]; while(i<L.length && /^\s*[-*]\s+/.test(L[i])){it.push('<li>'+inlineMd(L[i].replace(/^\s*[-*]\s+/,''))+'</li>'); i++;}
+    if(/^\s*([-*]\s+|[・•]\s*)/.test(ln)){   // ・/• も箇条書きとして tight な <ul> に(各行<p>の間延び防止)
+      const it=[]; while(i<L.length && /^\s*([-*]\s+|[・•]\s*)/.test(L[i])){it.push('<li>'+inlineMd(L[i].replace(/^\s*([-*]\s+|[・•]\s*)/,''))+'</li>'); i++;}
       out.push('<ul>'+it.join('')+'</ul>'); continue;
     }
     if(ln.trim()===''){i++; continue;}
