@@ -3879,12 +3879,23 @@ class H(BaseHTTPRequestHandler):
                            "ここから一字一句コピーせよ。これに無い画像URLは創作するな:\n" + fulltext[:7000])
         except Exception:
             pass
+        # 会話履歴が長いと入力が num_ctx(12288) を埋め、出力(表等)が途中で切れる=文脈オーバーフロー。
+        # 直近の会話だけに絞り、生成の余地を残す(char budget・最新から遡って詰める・systemは常に残す)。
+        _sys_msgs = [m for m in msgs if m.get("role") == "system"]
+        _conv = [m for m in msgs if m.get("role") != "system"]
+        _HIST_BUDGET = 4500                                # 履歴の総文字数上限(sysadd/RAG/出力の余地を確保)
+        _kept, _used = [], 0
+        for m in reversed(_conv):                          # 最新から遡り、予算内で採用(直近ほど優先)
+            c = len(str(m.get("content", "")))
+            if _kept and _used + c > _HIST_BUDGET:
+                break
+            _used += c
+            _kept.append(m)
+        _conv = list(reversed(_kept))
         working = []
-        for m in msgs:
-            if m.get("role") == "system":
-                working.append({"role": "system", "content": m["content"] + sysadd})
-            else:
-                working.append(m)
+        for m in _sys_msgs:
+            working.append({"role": "system", "content": m["content"] + sysadd})
+        working += _conv
         if not any(m.get("role") == "system" for m in working):
             working = [{"role": "system", "content": build_sys() + fu + sysadd}] + working
         tools = list(casper_tools.TOOLS) if casper_tools else []
