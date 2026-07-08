@@ -137,6 +137,8 @@
   .md img.thumb.big{max-width:min(82vw,560px);max-height:none;cursor:zoom-out}
   .md h3,.md h4,.md h5{margin:13px 0 6px;line-height:1.3}
   .md p{margin:3px 0} .md ul{margin:2px 0 4px 20px} .md li{margin:1px 0}
+  .md blockquote{margin:6px 0;padding:6px 12px;border-left:3px solid #334155;background:rgba(255,255,255,.03);border-radius:4px}
+  .md blockquote p{margin:2px 0} .md blockquote ul{margin:2px 0 2px 18px}
   .md code{background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;font-size:.92em}
   .md a{color:var(--accent)}
   .md pre.code{background:rgba(10,15,25,.7);border:1px solid #1f2937;border-radius:10px;padding:10px 13px;overflow:auto;font-size:12.5px;line-height:1.5}
@@ -335,6 +337,10 @@ function mdToHtml(src){
       let t='<table class="mdtbl"><thead><tr>'+head.map(c=>'<th>'+inlineMd(c)+'</th>').join('')+'</tr></thead><tbody>';
       t+=rows.map(r=>'<tr>'+r.map(c=>'<td>'+inlineMd(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
       out.push(t); i=j; continue;
+    }
+    if(/^\s*>\s?/.test(ln)){   // 引用ブロック(> ): 連続行をまとめ、中を再帰描画(> ・item の間延びを解消)
+      const bq=[]; while(i<L.length && /^\s*>\s?/.test(L[i])){bq.push(L[i].replace(/^\s*>\s?/,'')); i++;}
+      out.push('<blockquote>'+mdToHtml(bq.join('\n'))+'</blockquote>'); continue;
     }
     const h=ln.match(/^(#{1,4})\s+(.*)$/);
     if(h){const n=Math.min(h[1].length+2,5); out.push('<h'+n+'>'+inlineMd(h[2])+'</h'+n+'>'); i++; continue;}
