@@ -462,6 +462,19 @@ def _looks_like_action(msg):
     return bool(msg and _ACTION_Q_RE.search(msg))
 
 
+def _extract_list_lines(text):
+    """テキストから一覧行を verbatim で抜き出す([PJ]で始まる or · 区切りの短い行)。
+    『上記リストをそのまま』のDMで、LLMに要約させず一覧を忠実に付ける為(kiyotomo殿指摘の項目落ち対策)。"""
+    out = []
+    for ln in (text or "").split("\n"):
+        s = ln.strip()
+        s = re.sub(r"^[-・*•●]\s+", "", s)                 # 箇条書き記号
+        s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)             # 太字装飾
+        if (re.match(r"^\[[^\]]+\]", s) or " · " in s) and 4 < len(s) < 140:
+            out.append(s)
+    return out
+
+
 def _clean_dm_body(body):
     """DM本文をプレーンテキストに整える(kiyotomo殿指摘『読みづらい/改行が多い』対策): HTMLエンティティ復元・
     タグ除去・機械前置き除去・冒頭署名除去・改行の詰め。DMは素のテキストゆえ装飾と間延びを消す。"""
@@ -530,6 +543,22 @@ def _action_router(user_msg, context, who, convo=None):
     m = re.search(r"(\d+)", to)
     to = m.group(1) if m else {v: k for k, v in _ROSTER_MAP.items()}.get(to)
     body = _clean_dm_body(str(d.get("body") or "").strip())   # プレーンテキスト整形(読みやすさ・&amp;除去)
+    # 『上記のリスト/タスクをそのまま』のDMは、qwenに要約させず直前の一覧を verbatim で付ける(項目落ち根治)。
+    if re.search(r"(上記|この|その|それら|これら)\s*(の|、)?\s*(タスク|リスト|一覧|件|もの)", user_msg or ""):
+        prior_asst = [x for x in conv if x["role"] == "assistant"]
+        items = _extract_list_lines(str(prior_asst[-1].get("content", "")) if prior_asst else "")
+        if len(items) >= 2:
+            # 用件の骨子(1文)。担当違いの定番は clean template、それ以外はqwen1文目を汎用化。一覧は verbatim。
+            if re.search(r"担当(では|じゃ)?な|担当外|自分の.*でな|私の.*でな", (body or "") + (user_msg or "")):
+                intro = "下記のタスクは私の担当ではないようです。ご確認・アサインの修正をお願いできますでしょうか。"
+            else:
+                intro = re.split(r"[。\n！？]", body)[0].strip()   # qwen本文の1文目=用件の骨子
+                intro = re.sub(r"[（(]?c?\d+\s*[〜~\-－]\s*c?\d+[）)]?", "", intro)   # 誤ったカット範囲要約を除去
+                intro = re.sub(r"[（(]?c\d+(?:[、,]\s*c\d+)*[）)]?", "", intro)
+                intro = re.sub(r"の\s*(および|、|の|及び)\s*", "", intro).replace("  ", " ").strip()
+                if intro and not re.search(r"[。！？]$", intro):
+                    intro += "。"
+            body = (intro + "\n\n" if intro else "") + "\n".join("・" + it for it in items)
     if not (to and body):
         return None
     reply = (f"**{_uid_to_name(to)}** 宛に以下のDM下書きを作成しました。↓の承認カードで確認・編集し、"
