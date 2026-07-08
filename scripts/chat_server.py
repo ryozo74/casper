@@ -349,6 +349,33 @@ def _salvage_text_toolcall(final, who, pending_actions):
             cut = (m.start(), m.end())
         except Exception:
             pass
+    # ①.5 tool-call JSON形 {"tool":"send_message","params"/"arguments":{recipient/to_user_id, message/body}}
+    #     (qwenが承認カードでなく生JSONで書く新顔・入れ子波括弧を釣り合いで抽出)
+    if not (to and body):
+        _ti = f.find('"tool"')
+        if _ti >= 0 and "send_message" in f[_ti:_ti + 60]:
+            _st = f.rfind("{", 0, _ti)
+            if _st >= 0:
+                _d = 0; _en = -1
+                for _j in range(_st, len(f)):
+                    if f[_j] == "{":
+                        _d += 1
+                    elif f[_j] == "}":
+                        _d -= 1
+                        if _d == 0:
+                            _en = _j + 1; break
+                if _en > _st:
+                    try:
+                        o = json.loads(f[_st:_en], strict=False)   # strict=False: 本文中のリテラル改行も許容
+                        p = o.get("params") or o.get("arguments") or o.get("parameters") or o
+                        body = p.get("message") or p.get("body") or p.get("content") or p.get("text")
+                        rcp = p.get("recipient") or p.get("to_user_id") or p.get("to") or p.get("user_id")
+                        if rcp is not None:
+                            mm = re.search(r"(\d+)", str(rcp))
+                            to = mm.group(1) if mm else {v: k for k, v in _ROSTER_MAP.items()}.get(str(rcp))
+                        cut = (_st, _en)
+                    except Exception:
+                        pass
     # ② プロセ形 「宛先: 〇〇（uid31）… 本文: 〇〇」
     if not (to and body):
         mb = re.search(r"本文\**\s*[:：]\s*\**\s*(.+?)\s*(?:\n|$)", f)
@@ -405,13 +432,26 @@ def _salvage_text_toolcall(final, who, pending_actions):
 
 
 def _strip_tool_leak(text):
-    """qwenがツール呼びをテキスト(```tool ...)で書いた漏れ、及び『〜を取得します』等の作業実況を除去。
+    """qwenがツール呼びをテキスト(```tool ... / 生JSON)で書いた漏れ、及び『〜を取得します』等の作業実況を除去。
     (retrieve-then-renderで事実は注入済ゆえツールは不要。漏れた宣言だけ残るのを掃除)。"""
-    if not text or "```" not in text and "します" not in text:
+    if not text or ("```" not in text and "します" not in text and '"tool"' not in text):
         return text
     text = re.sub(r"```tool.*?```", "", text, flags=re.S)          # ツール呼びの漏れブロック
     text = re.sub(r"```(?:python|json|tool_code)?\s*(?:calendar_lookup|get_projects|get_today_tasks|get_events)\([^`]*?```",
                   "", text, flags=re.S)
+    # 生JSONのtool-call漏れ {"tool":"..","params"/"arguments":{..}} を除去(salvageが拾えなかった残り・生JSONを殿に見せぬ)
+    if '"tool"' in text:
+        _ti = text.find('"tool"'); _st = text.rfind("{", 0, _ti) if _ti >= 0 else -1
+        if _st >= 0:
+            _d = 0
+            for _j in range(_st, len(text)):
+                if text[_j] == "{":
+                    _d += 1
+                elif text[_j] == "}":
+                    _d -= 1
+                    if _d == 0:
+                        text = (text[:_st] + text[_j + 1:]); break
+        text = re.sub(r"```(?:json)?\s*```", "", text)             # 空になったコードフェンス
     text = re.sub(r"(?m)^.{0,40}(を確認するため.*?|を)(取得|照会|確認)します。?\s*$", "", text)   # 作業実況行
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
@@ -454,7 +494,7 @@ def _qwen_is_warm():
         return True
 
 
-_ACTION_Q_RE = re.compile(r"(DM|ディーエム|メッセージ|連絡し|伝え|知らせ|送っ?て|送信し)", re.I)
+_ACTION_Q_RE = re.compile(r"(DM|ディーエム|メッセージ|連絡し|伝え|知らせ|報告し|報せ|送っ?て|送信し)", re.I)
 
 
 def _looks_like_action(msg):
