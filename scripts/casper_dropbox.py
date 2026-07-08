@@ -33,7 +33,8 @@ def _api(url, arg=None, body=None, data=None, ctype="application/json"):
     tok = _token()
     headers = {"Authorization": f"Bearer {tok}"}
     if arg is not None:
-        headers["Dropbox-API-Arg"] = json.dumps(arg)
+        # Dropbox-API-Arg は HTTPヘッダ=ASCIIのみ可。日本語等は必ず \uXXXX にエスケープ(ensure_ascii=True明示)。
+        headers["Dropbox-API-Arg"] = json.dumps(arg, ensure_ascii=True)
         headers["Content-Type"] = "application/octet-stream"
         payload = data or b""
     else:
