@@ -463,15 +463,20 @@ def _looks_like_action(msg):
 
 
 def _clean_dm_body(body):
-    """DM本文をプレーンテキストに整える(kiyotomo殿指摘『読みづらい』対策): HTMLエンティティ復元(&amp;→&)・
-    生HTMLタグ除去・空行の連発を圧縮・行頭の機械的前置きを削る。DMは素のテキストゆえ装飾は消す。"""
+    """DM本文をプレーンテキストに整える(kiyotomo殿指摘『読みづらい/改行が多い』対策): HTMLエンティティ復元・
+    タグ除去・機械前置き除去・冒頭署名除去・改行の詰め。DMは素のテキストゆえ装飾と間延びを消す。"""
     import html as _h
     b = _h.unescape(body or "")
     b = re.sub(r"<br\s*/?>", "\n", b, flags=re.I)
     b = re.sub(r"<[^>]+>", "", b)                          # 生HTMLタグ除去
-    b = re.sub(r"^\s*【[^】]*(Casper|Ryoji|殿).*?】\s*", "", b)   # 『【Casperより/Ryojiの指示に基づく連絡】』等の機械前置きを除去
+    b = re.sub(r"^\s*【[^】]*(Casper|Ryoji|殿).*?】\s*", "", b)   # 『【Casperより/Ryojiの指示に基づく連絡】』等の機械前置き
+    b = re.sub(r"^\s*(ryoji|Ryoji|りょうじ|殿)\s*より[\s、,：:]*\n+", "", b)   # 冒頭の署名『ryojiより』を除去(送信者は自明)
     b = re.sub(r"[ \t]+\n", "\n", b)                       # 行末空白
-    b = re.sub(r"\n{3,}", "\n\n", b)                       # 空行の連発を1つに
+    b = re.sub(r"\n{3,}", "\n\n", b)                       # 空行の連発をまず2つに
+    b = b.strip()
+    # 短いDM(180字未満)は空行を全て詰めて double-spaced の間延びを解消(kiyotomo殿『改行が多い』)
+    if len(b) < 180:
+        b = re.sub(r"\n\s*\n", "\n", b)                    # 空行→単一改行
     return b.strip()
 
 
@@ -487,7 +492,9 @@ def _action_router(user_msg, context, who, convo=None):
              "・普通のビジネスチャットの自然な文章で書く。プレーンテキストのみ(HTMLタグや &amp; 等のエンティティを使うな。"
              "『&』はそのまま『&』と書く)。\n"
              "・簡潔に。まず用件を1〜2文で述べ、詳細は必要な分だけ。長い羅列・壁のような文章にしない。\n"
-             "・箇条書きは使うなら3〜5項目まで、入れ子(ネスト)にしない。段落の間は空行を1つ入れて読みやすく。\n"
+             "・**改行は最小限**。2〜3文の短いメッセージなら改行せず続けて書く(1文ごとに改行・空行を入れて間延びさせない)。"
+             "冒頭に『ryojiより』等の署名は書かない(送信者は自動で分かる)。\n"
+             "・箇条書きは項目が3つ以上ある時だけ使い(3〜5まで・ネスト禁止)、短い依頼では使わない。\n"
              "・『【Casperより/Ryojiの指示に基づく連絡】』等の機械的な前置きは付けない。人が書いたように自然に。\n"
              "・数値/固有名は下記コンテキストの事実だけを使い、創作するな。\n"
              "【指示語の鉄則＝捏造防止(重要)】ユーザーが『上記の/この/その〜(タスク/件/PJ等)』と指す対象は、"
@@ -2192,6 +2199,9 @@ def open_briefing(who):
                 _tctx = []
                 for it in items[:12]:                     # フィールド名の揺れに頑健(name/title/task_name)
                     nm = it.get("name") or it.get("title") or it.get("task_name") or ("task#%s" % it.get("id"))
+                    shot = str(it.get("shotID") or it.get("shot") or "").strip()   # カット番号(c12等)を頭に付け同名タスクを区別
+                    if shot and shot.lower() not in nm.lower():
+                        nm = f"{shot} {nm}"
                     st = it.get("status") or ""
                     stj = _ST.get(st, st)
                     pjn = pmap.get(str(it.get("project_id")), "")
