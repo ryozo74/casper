@@ -387,7 +387,7 @@ def _salvage_text_toolcall(final, who, pending_actions):
                 cut = (mf.start(), mf.end())
     if not (to and body):
         return final
-    args = {"to_user_id": to, "body": body}
+    args = {"to_user_id": to, "body": _clean_dm_body(body)}   # salvage経路のDMもプレーンテキスト整形(読みやすさ)
     if who.get("uid"):
         args["actor_id"] = who["uid"]
     summary = _action_summary("send_message", args)
@@ -462,15 +462,34 @@ def _looks_like_action(msg):
     return bool(msg and _ACTION_Q_RE.search(msg))
 
 
+def _clean_dm_body(body):
+    """DM本文をプレーンテキストに整える(kiyotomo殿指摘『読みづらい』対策): HTMLエンティティ復元(&amp;→&)・
+    生HTMLタグ除去・空行の連発を圧縮・行頭の機械的前置きを削る。DMは素のテキストゆえ装飾は消す。"""
+    import html as _h
+    b = _h.unescape(body or "")
+    b = re.sub(r"<br\s*/?>", "\n", b, flags=re.I)
+    b = re.sub(r"<[^>]+>", "", b)                          # 生HTMLタグ除去
+    b = re.sub(r"^\s*【[^】]*(Casper|Ryoji|殿).*?】\s*", "", b)   # 『【Casperより/Ryojiの指示に基づく連絡】』等の機械前置きを除去
+    b = re.sub(r"[ \t]+\n", "\n", b)                       # 行末空白
+    b = re.sub(r"\n{3,}", "\n\n", b)                       # 空行の連発を1つに
+    return b.strip()
+
+
 def _action_router(user_msg, context, who):
     """P2(Fable処方 propose→execute→render): 依頼が send_message(DM)かを制約デコードで判定し、型付き引数
     (to_user_id, body)を抽出。自由文 tool-call を作らせず機構が承認カードを起こす。返り {tool,args,reply} or None。
     ——qwenがテキストで関数を書く経路を通さないので、salvage のモグラ叩きが不要になる。"""
     roster_lines = "、".join(f"{nm}=uid{uid}" for uid, nm in list(_ROSTER_MAP.items())[:40])
-    sys_j = ("あなたはCasperのアクション抽出器。ユーザーの依頼が『特定の相手へのDM/メッセージ送信』なら、送るべき"
-             "本文を作り JSON だけで返せ。単なる質問・一覧要求・雑談など送信でなければ is_dm=false。\n"
+    sys_j = ("あなたはCasperのアクション抽出器 兼 DM代筆者。ユーザーの依頼が『特定の相手へのDM/メッセージ送信』なら、"
+             "送るべき本文を作り JSON だけで返せ。単なる質問・一覧要求・雑談など送信でなければ is_dm=false。\n"
              f"社員名簿(名前=uid): {roster_lines}\n"
-             "本文は依頼に沿って簡潔に。数値/固有名は下記コンテキストの事実だけを使い、創作するな。\n"
+             "【本文の書き方＝読みやすさ最優先】\n"
+             "・普通のビジネスチャットの自然な文章で書く。プレーンテキストのみ(HTMLタグや &amp; 等のエンティティを使うな。"
+             "『&』はそのまま『&』と書く)。\n"
+             "・簡潔に。まず用件を1〜2文で述べ、詳細は必要な分だけ。長い羅列・壁のような文章にしない。\n"
+             "・箇条書きは使うなら3〜5項目まで、入れ子(ネスト)にしない。段落の間は空行を1つ入れて読みやすく。\n"
+             "・『【Casperより/Ryojiの指示に基づく連絡】』等の機械的な前置きは付けない。人が書いたように自然に。\n"
+             "・数値/固有名は下記コンテキストの事実だけを使い、創作するな。\n"
              'JSON形式: {"is_dm": true|false, "to_user_id": "uidの数字", "body": "送る本文"}')
     user_j = f"コンテキスト(事実):\n{(context or '')[:4000]}\n\n依頼: {user_msg}"
     try:
@@ -482,7 +501,7 @@ def _action_router(user_msg, context, who):
     to = str(d.get("to_user_id") or "")
     m = re.search(r"(\d+)", to)
     to = m.group(1) if m else {v: k for k, v in _ROSTER_MAP.items()}.get(to)
-    body = str(d.get("body") or "").strip()
+    body = _clean_dm_body(str(d.get("body") or "").strip())   # プレーンテキスト整形(読みやすさ・&amp;除去)
     if not (to and body):
         return None
     reply = (f"**{_uid_to_name(to)}** 宛に以下のDM下書きを作成しました。↓の承認カードで確認・編集し、"
