@@ -183,6 +183,24 @@ MCP_SIDE_EFFECT = {"upload_asset", "add_reference_material", "send_message", "up
 # actor_id(本人uid)を引数に要する MCP ツール。chat ループで本人uidを強制注入(spoof防止)。
 MCP_ACTOR_TOOLS = {"upload_asset", "add_reference_material", "send_message", "get_messages", "update_task"}
 
+# Calendar タスクステータス 新19値(2026-07-08 刷新・ニブ資料 calendar_status_changes_summary)。
+# 完了は deliver のみ。遅延は status でなく isOverdue 派生(due<today かつ status∉{deliver,omit})。旧値は互換期間中も許容。
+_TASK_DONE = {"deliver", "completed", "done", "complete", "approved"}   # 完了扱い(新=deliverのみ・旧値も互換で吸収)
+_TASK_NOT_OVERDUE = {"deliver", "omit"}                                 # 遅延判定の除外(完了+作業対象外)
+_TASK_ACTIVE = {"mk", "wip", "modeling", "lookdev", "caching", "rig", "facial",   # 未着手+進行中の工程群
+                "todo", "in-progress", "in_progress"}                             # (旧値互換)
+_TASK_ST_LABEL = {   # status → 表示ラベル(絵文字つき・5カテゴリ準拠)
+    "mk": "⚪MK(未着手)", "wip": "🔵WIP(進行中)", "modeling": "🔵Modeling", "lookdev": "🔵LookDev",
+    "caching": "🔵Caching", "rig": "🔵Rig", "facial": "🔵Facial",
+    "v1qc": "🟡V1QC", "qc": "🟡QC(社内チェック)", "qc_fb": "🟠QC_FB(社内FB)",
+    "ap": "🟣AP(社内承認)", "ap_fb": "🟠AP_FB(社外FB)", "dir_wt": "🟡Dir待ち", "dir_ap": "🟣Dir承認",
+    "dir_fb": "🟠Dir_FB", "fix": "🟢FIX(クラ承認)", "deliver": "✅Deliver(完了)",
+    "omit": "⚫Omit(除外)", "wt": "⏸WT(停止)",
+    # 旧値互換(移行期間中)
+    "todo": "⚪未着手", "in-progress": "🔵進行中", "in_progress": "🔵進行中", "review": "🟡レビュー",
+    "completed": "✅完了", "done": "✅完了", "approved": "🟣承認済", "delayed": "🔴遅延", "blocked": "🔴停滞",
+}
+
 # --- Stage2: 副作用ツールの「承認→実行」フロー(DM代筆・QC提出・参照登録) ---
 PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
 _AURORA_CUR = {}       # thread -> {doc_id, title}: 1スレッド=1資料の紐付け(更新はappend)
@@ -606,10 +624,9 @@ def _action_router(user_msg, context, who, convo=None):
             if len(got) >= 2:
                 items = got; break
         _overdue = bool(re.search(r"納期超過|超過|遅れ|遅延", (user_msg or "") + (body or "")))
-        if items and _overdue:                         # 納期超過の話題は該当行だけに絞る(基本リストを verbatim・関連分のみ)
-            od = [it for it in items if re.search(r"納期超過|超過|遅れ", it)]
-            if od:
-                items = od
+        if items and _overdue:                         # 納期超過の話題は🔴/超過の行だけに絞る(基本リストを verbatim・関連分のみ)
+            items = [it for it in items if re.search(r"納期超過|超過|遅れ|🔴", it)]
+            # 超過行が1つも無ければ verbatim を採らず qwen に委ねる(非超過の一覧を『納期超過』見出しで出さぬ・殿指摘)
         if len(items) >= 2:
             # 用件の骨子(1文)。定番は clean template、それ以外はqwen1文目を汎用化。一覧は verbatim(表の行はそのまま)。
             if _overdue:
@@ -769,7 +786,7 @@ def calendar_digest(query):
                 break
 
         def active(s):
-            return (s or "").lower().replace("_", "-") not in ("completed", "approved", "cancelled")
+            return (s or "").lower() not in _TASK_DONE | {"omit", "cancelled"}   # 完了(deliver)/除外は非active(新19値)
         due = [t for t in tasks if str(t.get("due_date") or "").startswith(today) and active(t.get("status"))]
         if due:
             parts.append(f"本日({today})締切のタスク {len(due)}件:")
@@ -777,9 +794,9 @@ def calendar_digest(query):
                 parts.append(f"  - {t.get('name')} [{t.get('status')}] 担当:{umap.get(t.get('assigned_to'),'未割当')}")
         else:
             parts.append(f"本日({today})締切のタスク: なし")
-        ip = sum(1 for t in tasks if (t.get("status") or "") == "in-progress")
-        todo = sum(1 for t in tasks if (t.get("status") or "") == "todo")
-        parts.append(f"(タスク全体: 進行中 {ip} / todo {todo} / 総数 {len(tasks)})")
+        ip = sum(1 for t in tasks if (t.get("status") or "").lower() in ("wip", "in-progress", "in_progress"))
+        mk = sum(1 for t in tasks if (t.get("status") or "").lower() in ("mk", "todo"))
+        parts.append(f"(タスク全体: 進行中(wip) {ip} / 未着手(mk) {mk} / 総数 {len(tasks)})")
         ev = _get("/events?limit=500").get("items", [])
         tev = [e for e in ev if str(e.get("date") or "").startswith(today)
                or str(e.get("start_time") or "").startswith(today)]
@@ -826,7 +843,7 @@ def uploader_resolve(hint, vision_desc="", uid=None, max_c=6):
     pm = {str(x["id"]): x.get("name") for x in _get("/projects?limit=200").get("items", [])}
 
     def active(s):
-        return (s or "").lower().replace("_", "-") in ("todo", "in-progress", "review", "retake", "delayed")
+        return (s or "").lower() not in _TASK_DONE | {"omit", "cancelled"}   # 完了/除外以外=未完了(新19値・deliverのみ完了)
     scored = []
     for t in tasks:
         if not active(t.get("status")):
@@ -965,7 +982,9 @@ def cross_digest(query):
         um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
               for u in _get("/users?limit=200").get("items", [])}
         import collections
-        dl = [t for t in tasks if (t.get("status") or "") == "delayed"]
+        _tdy = datetime.date.today().isoformat()          # 遅延=isOverdue派生(due<today かつ status∉{deliver,omit})。旧delayedステータスは廃止(2026-07-08)
+        dl = [t for t in tasks if str(t.get("due_date") or "")[:10] and str(t.get("due_date") or "")[:10] < _tdy
+              and (t.get("status") or "").lower() not in _TASK_NOT_OVERDUE]
         byp = collections.Counter(pm.get(t.get("project_id"), t.get("project_id")) for t in dl)
         byu = collections.Counter(um.get(t.get("assigned_to"), "未割当") for t in dl)
         lines = [f"全PJ遅延タスク総数: {len(dl)}件",
@@ -2276,8 +2295,8 @@ def open_briefing(who):
                     items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
                     break
             if isinstance(items, list):
-                items = [it for it in items                # 完了タスクは残務一覧に出さぬ(殿指示)
-                         if (it.get("status") or "").lower() not in ("completed", "done")]
+                items = [it for it in items                # 完了(deliver)・除外(omit) は残務一覧に出さぬ(新19値対応)
+                         if (it.get("status") or "").lower() not in _TASK_DONE | {"omit"}]
                 task_n = len(items)
                 pmap = {}                                 # project_id→PJ名(高精細表示に必須)
                 try:
@@ -2287,8 +2306,7 @@ def open_briefing(who):
                         pmap = {str(p.get("id")): p.get("name") for p in (pit or [])}
                 except Exception:
                     pass
-                _ST = {"in-progress": "🔵進行中", "todo": "⚪未着手", "completed": "✅完了",
-                       "done": "✅完了", "review": "🟡レビュー", "blocked": "🔴停滞"}
+                _ST = _TASK_ST_LABEL                       # 新19値の表示ラベル(2026-07-08刷新・旧値も互換)
                 _PR = {"HIGH": "優先高", "MEDIUM": "優先中", "LOW": ""}
                 _tctx = []
                 for it in items[:12]:                     # フィールド名の揺れに頑健(name/title/task_name)
