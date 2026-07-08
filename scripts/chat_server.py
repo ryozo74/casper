@@ -494,7 +494,7 @@ def _qwen_is_warm():
         return True
 
 
-_ACTION_Q_RE = re.compile(r"(DM|ディーエム|メッセージ|連絡し|伝え|知らせ|報告し|報せ|送っ?て|送信し)", re.I)
+_ACTION_Q_RE = re.compile(r"(DM|ディーエム|メッセージ|連絡し|伝え|知らせ|報告し|報せ|通達|通知し|送っ?て|送信し)", re.I)
 
 
 def _looks_like_action(msg):
