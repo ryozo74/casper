@@ -3780,6 +3780,31 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
+        if self.path == "/api/dropbox/batch_add":      # 複数まとめ: フォルダへ1ファイルずつアップ(リンクはまだ作らぬ)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            if not (casper_dropbox and casper_dropbox.available()):
+                self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
+            try:
+                b64 = req.get("data_b64", "")
+                if "," in b64[:64]:
+                    b64 = b64.split(",", 1)[1]
+                data = _b64.b64decode(b64)
+                self._json(casper_dropbox.upload_into(req.get("folder", "batch"), data, req.get("filename", "file")))
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/dropbox/batch_share":    # 複数まとめ: フォルダに1つのパスワード付きリンクを作る
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            if not (casper_dropbox and casper_dropbox.available()):
+                self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
+            try:
+                self._json(casper_dropbox.share_folder(req.get("folder", "batch"),
+                                                       password=(req.get("password") or None)))
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
         if self.path.startswith("/api/doc/") and casper_doc:   # 節構造ドキュメント(資料作り・Fable UI設計)
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")

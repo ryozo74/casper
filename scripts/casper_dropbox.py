@@ -116,6 +116,42 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
     return {"ok": True, "link": url, "password": pw, "name": safe, "size": len(file_bytes), "path": path}
 
 
+def _safe(name, fallback):
+    return "".join(c for c in (name or "") if c not in '\\/:*?"<>|').strip() or fallback
+
+
+def upload_into(folder, file_bytes, filename):
+    """/Casper_Transfer/<folder>/<filename> へアップ(リンクは作らない=バッチ用)。返り {ok, path, size} or {ok:False,error}。"""
+    if not _token():
+        return {"ok": False, "error": "Dropbox token 未設定(.casper_dropbox_token)"}
+    path = f"{FOLDER}/{_safe(folder, 'batch')}/{_safe(filename, 'file')}"
+    ok, err = _upload_bytes(path, file_bytes)
+    if not ok:
+        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
+        return {"ok": False, "error": f"アップロード失敗: {es}"}
+    return {"ok": True, "path": path, "size": len(file_bytes)}
+
+
+def share_folder(folder, password=None):
+    """/Casper_Transfer/<folder> にパスワード付き共有リンクを1つ作る(複数ファイルを1リンクで共有)。
+    返り {ok, link, password, folder} or {ok:False,error}。"""
+    if not _token():
+        return {"ok": False, "error": "Dropbox token 未設定"}
+    path = f"{FOLDER}/{_safe(folder, 'batch')}"
+    pw = password or _gen_password()
+    st, r = _api(API + "/sharing/create_shared_link_with_settings",
+                 body={"path": path, "settings": {"require_password": True, "link_password": pw,
+                                                   "audience": "public", "access": "viewer", "allow_download": True}})
+    if st != 200:
+        st2, r2 = _api(API + "/sharing/list_shared_links", body={"path": path, "direct_only": True})
+        links = (r2 or {}).get("links", []) if st2 == 200 else []
+        if not links:
+            es = (r or {}).get("error_summary", str(r))[:200]
+            return {"ok": False, "error": f"フォルダ共有リンク作成失敗: {es}"}
+        r = links[0]
+    return {"ok": True, "link": r.get("url", ""), "password": pw, "folder": path}
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) >= 2 and sys.argv[1] == "account":

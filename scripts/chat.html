@@ -711,33 +711,50 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
 // 📦 Dropbox転送(複数対応): ファイル選択 or ドラッグ&ドロップ→Casper経由でDropboxへ→各パスワード付きリンクを表示
 document.getElementById('dbxinp').addEventListener('change',e=>{ const fs=[...e.target.files]; e.target.value=''; dropboxTransferFiles(fs); });
 function _readDataURL(f){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error('読込失敗')); r.readAsDataURL(f); }); }
+function _dbxLinkCard(b, name, link, password, sub){
+  const row=document.createElement('div'); row.style.cssText='margin-top:8px;padding:9px 12px;border:1px solid #243049;border-radius:9px;background:rgba(255,255,255,.02)';
+  row.innerHTML='📦 <b>'+esc(name)+'</b>'+(sub?' <span style="color:#9fb3c8;font-size:12px">'+esc(sub)+'</span>':'')+'<br>'
+    +'<span style="font-size:12px;color:#9fb3c8">🔗 '+esc(link)+'<br>🔑 <code>'+esc(password)+'</code></span>';
+  const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:6px';
+  const cl=document.createElement('button'); cl.textContent='🔗 リンクをコピー'; const cp=document.createElement('button'); cp.textContent='🔑 パスワードをコピー';
+  [cl,cp].forEach(x=>x.style.cssText='padding:4px 11px;border-radius:7px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:12px');
+  cl.onclick=()=>{navigator.clipboard.writeText(link);cl.textContent='✓ コピー済';};
+  cp.onclick=()=>{navigator.clipboard.writeText(password);cp.textContent='✓ コピー済';};
+  bar.append(cl,cp); row.appendChild(bar); b.appendChild(row);
+}
 async function dropboxTransferFiles(files){
   files=[...(files||[])].filter(Boolean); if(!files.length) return;
   const b=el('bot'); b.classList.add('cursor');
-  render(b,'📦 '+files.length+'件を Dropbox へ転送中…（大きいファイルは少々かかり申す）'); log.scrollTop=log.scrollHeight;
-  const results=[];
-  for(let i=0;i<files.length;i++){ const f=files[i];
-    render(b,'📦 転送中… ('+(i+1)+'/'+files.length+') '+esc(f.name));  log.scrollTop=log.scrollHeight;
-    try{ const du=await _readDataURL(f); const r=await dpost('/api/dropbox/transfer',{filename:f.name,data_b64:du}); results.push({name:f.name,...r}); }
-    catch(err){ results.push({name:f.name,ok:false,error:(err.message||err)}); }
+  if(files.length===1){        // 単一=そのままファイルへ1リンク
+    const f=files[0];
+    render(b,'📦 「'+esc(f.name)+'」を Dropbox へ転送中…（大きいファイルは少々かかり申す）'); log.scrollTop=log.scrollHeight;
+    try{ const du=await _readDataURL(f); const r=await dpost('/api/dropbox/transfer',{filename:f.name,data_b64:du});
+      b.classList.remove('cursor');
+      if(r.ok){ render(b,'📦 Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。'); _dbxLinkCard(b,r.name,r.link,r.password,'（'+(r.size/1e6).toFixed(1)+'MB）'); }
+      else render(b,'📦 転送に失敗いたした: '+esc(r.error||'不明'));
+    }catch(err){ b.classList.remove('cursor'); render(b,'📦 転送エラー: '+esc(err.message||err)); }
+    log.scrollTop=log.scrollHeight; return;
   }
+  // 複数=1フォルダにまとめ、パスワード付きの「1リンク」で共有
+  const stamp=new Date().toISOString().slice(0,16).replace(/[-:T]/g,'').slice(0,12);
+  const folder='casper_'+stamp+'_'+Math.random().toString(36).slice(2,6);
+  render(b,'📦 '+files.length+'件を Dropbox へ転送中…（まとめて1リンクにいたす）'); log.scrollTop=log.scrollHeight;
+  const up=[];
+  for(let i=0;i<files.length;i++){ const f=files[i];
+    render(b,'📦 転送中… ('+(i+1)+'/'+files.length+') '+esc(f.name)); log.scrollTop=log.scrollHeight;
+    try{ const du=await _readDataURL(f); const r=await dpost('/api/dropbox/batch_add',{folder,filename:f.name,data_b64:du}); up.push({name:f.name,...r}); }
+    catch(err){ up.push({name:f.name,ok:false,error:(err.message||err)}); }
+  }
+  const okn=up.filter(r=>r.ok).length;
+  const sh=await dpost('/api/dropbox/batch_share',{folder});   // フォルダに1リンク(パスワード付き)
   b.classList.remove('cursor');
-  const okn=results.filter(r=>r.ok).length;
-  render(b,'📦 **'+okn+'/'+files.length+'件** を Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。');
-  results.forEach(r=>{
-    const row=document.createElement('div'); row.style.cssText='margin-top:8px;padding:8px 11px;border:1px solid #243049;border-radius:9px;background:rgba(255,255,255,.02)';
-    if(r.ok){ const sz=(r.size/1e6).toFixed(1);
-      row.innerHTML='📄 <b>'+esc(r.name)+'</b> <span style="color:#9fb3c8;font-size:12px">（'+sz+'MB）</span><br>'
-        +'<span style="font-size:12px;color:#9fb3c8">🔗 '+esc(r.link)+'<br>🔑 <code>'+esc(r.password)+'</code></span>';
-      const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:6px';
-      const cl=document.createElement('button'); cl.textContent='🔗 リンク'; const cp=document.createElement('button'); cp.textContent='🔑 パス';
-      [cl,cp].forEach(x=>x.style.cssText='padding:4px 11px;border-radius:7px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:12px');
-      cl.onclick=()=>{navigator.clipboard.writeText(r.link);cl.textContent='✓ コピー済';};
-      cp.onclick=()=>{navigator.clipboard.writeText(r.password);cp.textContent='✓ コピー済';};
-      bar.append(cl,cp); row.appendChild(bar);
-    }else{ row.innerHTML='⚠️ <b>'+esc(r.name)+'</b>: '+esc(r.error||'転送失敗'); }
-    b.appendChild(row);
-  });
+  if(sh.ok){
+    render(b,'📦 **'+okn+'/'+files.length+'件** を1つのフォルダにまとめ申した。下記の**1リンク（パスワード付き）**で全ファイル共有できまする。');
+    _dbxLinkCard(b,okn+'件のファイル',sh.link,sh.password,'（まとめリンク）');
+    const li=document.createElement('div'); li.style.cssText='margin-top:6px;font-size:12px;color:#9fb3c8';
+    li.innerHTML='含まれるファイル: '+up.map(r=>esc(r.name)+(r.ok?'':' ⚠️')).join(' / ');
+    b.appendChild(li);
+  }else{ render(b,'📦 まとめリンクの作成に失敗いたした: '+esc(sh.error||'不明')+'（'+okn+'件はアップ済）'); }
   log.scrollTop=log.scrollHeight;
 }
 // ドラッグ&ドロップ: ファイルを画面に落とすと Dropbox へ転送(複数可・オーバーレイ表示)
