@@ -475,10 +475,10 @@ def _clean_dm_body(body):
     return b.strip()
 
 
-def _action_router(user_msg, context, who):
+def _action_router(user_msg, context, who, convo=None):
     """P2(Fable処方 propose→execute→render): 依頼が send_message(DM)かを制約デコードで判定し、型付き引数
     (to_user_id, body)を抽出。自由文 tool-call を作らせず機構が承認カードを起こす。返り {tool,args,reply} or None。
-    ——qwenがテキストで関数を書く経路を通さないので、salvage のモグラ叩きが不要になる。"""
+    ——qwenがテキストで関数を書く経路を通さないので、salvage のモグラ叩きが不要になる。convo=直前の会話(『上記』解決用)。"""
     roster_lines = "、".join(f"{nm}=uid{uid}" for uid, nm in list(_ROSTER_MAP.items())[:40])
     sys_j = ("あなたはCasperのアクション抽出器 兼 DM代筆者。ユーザーの依頼が『特定の相手へのDM/メッセージ送信』なら、"
              "送るべき本文を作り JSON だけで返せ。単なる質問・一覧要求・雑談など送信でなければ is_dm=false。\n"
@@ -490,8 +490,29 @@ def _action_router(user_msg, context, who):
              "・箇条書きは使うなら3〜5項目まで、入れ子(ネスト)にしない。段落の間は空行を1つ入れて読みやすく。\n"
              "・『【Casperより/Ryojiの指示に基づく連絡】』等の機械的な前置きは付けない。人が書いたように自然に。\n"
              "・数値/固有名は下記コンテキストの事実だけを使い、創作するな。\n"
+             "【指示語の鉄則＝捏造防止(重要)】ユーザーが『上記の/この/その〜(タスク/件/PJ等)』と指す対象は、"
+             "**直前の会話に明示されたものだけ**を指す。下記コンテキストは背景情報にすぎず、"
+             "**そこから勝手に対象(特定のタスク名/PJ名等)を選んで本文に書き込むな**。"
+             "指す対象が会話に見当たらず特定できない時は、**具体名を創作せず is_dm=false を返せ**"
+             "(→Casperが『どれのことか』を聞き返す)。\n"
              'JSON形式: {"is_dm": true|false, "to_user_id": "uidの数字", "body": "送る本文"}')
-    user_j = f"コンテキスト(事実):\n{(context or '')[:4000]}\n\n依頼: {user_msg}"
+    conv = [m for m in (convo or []) if m.get("role") in ("user", "assistant") and m.get("content")]
+    # 機構ガード(捏造防止): 『上記/先ほど/この〜タスク/件』の参照なのに直前のCasper応答にタスクの気配が無ければ
+    # 対象不明→DMを組ませず None(通常経路で聞き返す)。tim担当タスクを殿の物と偽ってDM化した事故(2026-07-08)の恒久策。
+    if re.search(r"(上記|先ほど|さっき|この|その)\s*(の|、)?\s*(タスク|件|案件|依頼|PJ|プロジェクト)", user_msg or ""):
+        prior_asst = [m for m in conv if m["role"] == "assistant"]
+        last_a = str(prior_asst[-1].get("content", "")) if prior_asst else ""
+        if not re.search(r"(タスク|担当|assigned|SEQ|〆|納期|status|ID:|進行中|\|.+\|)", last_a):
+            return None                                    # 直前にタスク一覧/言及なし=対象不明→捏造させぬ
+    # 直前の会話も渡す(『上記』の指示語を正しく解決させる為・背景コンテキストと区別)
+    hist = ""
+    try:
+        if len(conv) > 1:
+            hist = "\n\n直前の会話(『上記』等はここだけを指す):\n" + "\n".join(
+                ("殿: " if m["role"] == "user" else "Casper: ") + str(m.get("content", ""))[:400] for m in conv[-7:-1])
+    except Exception:
+        pass
+    user_j = f"背景コンテキスト(参考):\n{(context or '')[:3500]}{hist}\n\n依頼: {user_msg}"
     try:
         d = json.loads(_ollama_json(sys_j, user_j))
     except Exception:
@@ -3876,7 +3897,7 @@ class H(BaseHTTPRequestHandler):
         _t0 = time.time()                           # トレース: 生成時間計測の起点
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
         # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
-        routed = _action_router(ll_user, sysadd, who) if _looks_like_action(ll_user) else None
+        routed = _action_router(ll_user, sysadd, who, convo=msgs) if _looks_like_action(ll_user) else None
         if routed:
             try:
                 summary = _action_summary(routed["tool"], routed["args"])
