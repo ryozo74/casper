@@ -107,6 +107,7 @@ AURORA_RENDER = os.path.join(PROJECT_ROOT, "skills", "aurora", "scripts", "rende
 DIAG_DIR = os.path.join(HERE, "diagrams")
 ASSETS_DIR = os.path.join(HERE, "assets")
 FEEDBACK_LOG = os.path.join(HERE, "feedback_log.jsonl")
+CORRECTIONS_LOG = os.path.join(HERE, "corrections.jsonl")   # 🙅『欲しい内容と違う』→ヒアリング+スレッドログの修正リスト(自己改善の教師信号)
 
 DIAG_HINT = ("\n\n【見せ方は内容に応じて自分で判断せよ】答えを最も分かりやすく伝える形式を選ぶ:\n"
     "・一覧/カット表/スケジュール/比較/項目×属性 など表が分かりやすいデータ → **markdown の表**で書く"
@@ -3132,6 +3133,18 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"text": "", "error": str(e)})
             return
+        elif self.path == "/api/corrections":      # 🙅修正リスト(欲しい内容と違う→ヒアリング結果+スレッドログ)
+            try:
+                items = []
+                if os.path.exists(CORRECTIONS_LOG):
+                    for ln in open(CORRECTIONS_LOG, encoding="utf-8"):
+                        if ln.strip():
+                            items.append(json.loads(ln))
+                openn = [c for c in items if c.get("status") == "open"]
+                self._json({"total": len(items), "open": len(openn), "items": items[-50:]})
+            except Exception as e:
+                self._json({"items": [], "error": str(e)})
+            return
         elif self.path == "/api/whoami":
             who = identify(self)
             name = who.get("email", "")
@@ -3893,12 +3906,28 @@ class H(BaseHTTPRequestHandler):
                     "ts": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
                     "question": str(req.get("question", ""))[:500],
                     "format": str(req.get("format", "")),      # text/table/mermaid/canvas/...
-                    "verdict": str(req.get("verdict", "")),    # good/want_diagram/want_text/wrong_format
+                    "verdict": str(req.get("verdict", "")),    # good/want_diagram/want_text/wrong_format/wrong_content
                     "answer_excerpt": str(req.get("answer_excerpt", ""))[:300],
                 }
                 os.makedirs(os.path.dirname(FEEDBACK_LOG), exist_ok=True)
                 with open(FEEDBACK_LOG, "a", encoding="utf-8") as f:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                # 🙅『欲しい内容と違う』+ ヒアリング説明 → スレッドログごと修正リスト化(自己改善の教師信号・殿御下命2026-07-08)
+                if req.get("verdict") == "wrong_content" and str(req.get("detail", "")).strip():
+                    thread = req.get("thread") or []
+                    thread = [{"role": str(m.get("role", ""))[:12], "content": str(m.get("content", ""))[:1200]}
+                              for m in thread if isinstance(m, dict)][-8:]
+                    corr = {
+                        "id": uuid.uuid4().hex[:10],
+                        "ts": rec["ts"],
+                        "question": rec["question"],
+                        "answer_excerpt": str(req.get("answer_excerpt", ""))[:600],
+                        "what_was_wrong": str(req.get("detail", ""))[:1200],   # 何が違ったか(ヒアリング結果)
+                        "thread_log": thread,                                  # そのスレッドの直近ログ
+                        "status": "open",                                      # open→(人が審査)→triaged/fixed
+                    }
+                    with open(CORRECTIONS_LOG, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(corr, ensure_ascii=False) + "\n")
                 self._json({"ok": True})
             except Exception as e:
                 self._json({"error": str(e)})

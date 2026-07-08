@@ -157,6 +157,9 @@
   .fbbtn{background:rgba(255,255,255,.05);border:1px solid #243049;color:var(--mut);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
   .fbbtn:hover{background:rgba(125,211,252,.14);color:#cfe8ff;border-color:#3a4a66}
   .fbthx{color:var(--mut);font-size:12px}
+  .fbq{flex-basis:100%;color:#cfe8ff;font-size:12.5px;margin-bottom:2px}
+  .fbin{flex-basis:100%;background:rgba(10,15,25,.6);border:1px solid #2a3550;color:var(--fg);border-radius:8px;padding:6px 9px;font-size:13px;font-family:inherit;resize:vertical}
+  .fbin:focus{outline:none;border-color:#3a4a66}
   #plus{background:rgba(255,255,255,.06);border:1px solid #243049;color:#cfe8ff;border-radius:10px;width:42px;font-size:20px;cursor:pointer}
   #plus:hover{background:rgba(125,211,252,.15)}
   .toolmenu{position:absolute;bottom:64px;left:14px;background:#11182a;border:1px solid #243049;border-radius:12px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:9}
@@ -378,6 +381,24 @@ function addFeedback(b, question, answer){
    ['wrong_content','🙅 欲しい内容と違う']].forEach(([v,label])=>{
     const btn=document.createElement('button'); btn.className='fbbtn'; btn.textContent=label;
     btn.onclick=()=>{
+      if(v==='wrong_content'){          // 🙅 欲しい内容と違う → 何が違うかヒアリング→スレッドログごと修正リスト化
+        bar.innerHTML='';
+        const q=document.createElement('div'); q.className='fbq'; q.textContent='何が違いましたか？（正しくはどうあるべきか、お聞かせください）';
+        const ta=document.createElement('textarea'); ta.className='fbin'; ta.rows=2;
+        ta.placeholder='例: 担当者ではなく期限を聞きたかった / marukome以外も出してほしい …';
+        const sb=document.createElement('button'); sb.className='fbbtn'; sb.textContent='修正リストに登録';
+        sb.onclick=()=>{
+          const detail=(ta.value||'').trim();
+          if(!detail){ ta.focus(); ta.style.borderColor='#e0679a'; return; }
+          try{ fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({question, format:fmt, verdict:v, detail,
+              answer_excerpt:(answer||'').slice(0,600), thread:history.slice(-8)})}); }catch(e){}
+          bar.innerHTML='<span class="fbthx">修正リストに記録しました。改善に活かします ✓</span>';
+        };
+        ta.addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){ e.preventDefault(); sb.onclick(); }});
+        bar.appendChild(q); bar.appendChild(ta); bar.appendChild(sb); ta.focus();
+        return;
+      }
       try{ fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({question, format:fmt, verdict:v, answer_excerpt:(answer||'').slice(0,300)})}); }catch(e){}
       bar.innerHTML='<span class="fbthx">評価ありがとうございます ✓</span>';
