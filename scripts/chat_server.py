@@ -470,7 +470,7 @@ def _clean_dm_body(body):
     b = re.sub(r"<br\s*/?>", "\n", b, flags=re.I)
     b = re.sub(r"<[^>]+>", "", b)                          # 生HTMLタグ除去
     b = re.sub(r"^\s*【[^】]*(Casper|Ryoji|殿).*?】\s*", "", b)   # 『【Casperより/Ryojiの指示に基づく連絡】』等の機械前置き
-    b = re.sub(r"^\s*(ryoji|Ryoji|りょうじ|殿)\s*より[\s、,：:]*\n+", "", b)   # 冒頭の署名『ryojiより』を除去(送信者は自明)
+    b = re.sub(r"^\s*(ryoji|Ryoji|りょうじ|殿)\s*より[。、,：:\s]*", "", b)   # 冒頭の署名『ryojiより』『ryojiより。』を除去(インライン含む・送信者は自明)
     b = re.sub(r"[ \t]+\n", "\n", b)                       # 行末空白
     b = re.sub(r"\n{3,}", "\n\n", b)                       # 空行の連発をまず2つに
     b = b.strip()
