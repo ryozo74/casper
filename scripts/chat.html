@@ -711,6 +711,24 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
 // 📦 Dropbox転送(複数対応): ファイル選択 or ドラッグ&ドロップ→Casper経由でDropboxへ→各パスワード付きリンクを表示
 document.getElementById('dbxinp').addEventListener('change',e=>{ const fs=[...e.target.files]; e.target.value=''; dropboxTransferFiles(fs); });
 function _readDataURL(f){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error('読込失敗')); r.readAsDataURL(f); }); }
+// クリップボードコピー: HTTP(非セキュアコンテキスト)では navigator.clipboard が無いため execCommand にフォールバック
+function copyText(text){
+  try{
+    if(navigator.clipboard && window.isSecureContext){ return navigator.clipboard.writeText(text).then(()=>true).catch(()=>_copyFallback(text)); }
+  }catch(e){}
+  return Promise.resolve(_copyFallback(text));
+}
+function _copyFallback(text){
+  try{
+    const ta=document.createElement('textarea'); ta.value=text;
+    ta.setAttribute('readonly',''); ta.style.cssText='position:fixed;top:-1000px;left:-1000px;opacity:0';
+    document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0,ta.value.length);
+    const ok=document.execCommand('copy'); document.body.removeChild(ta); return ok;
+  }catch(e){ return false; }
+}
+function _copyBtn(btn, text, okLabel){
+  btn.onclick=()=>{ Promise.resolve(copyText(text)).then(ok=>{ btn.textContent = ok ? (okLabel||'✓ コピー済') : '⚠ 選択してコピーを'; }); };
+}
 function _dbxLinkCard(b, name, link, password, sub){
   const row=document.createElement('div'); row.style.cssText='margin-top:8px;padding:9px 12px;border:1px solid #243049;border-radius:9px;background:rgba(255,255,255,.02)';
   row.innerHTML='📦 <b>'+esc(name)+'</b>'+(sub?' <span style="color:#9fb3c8;font-size:12px">'+esc(sub)+'</span>':'')+'<br>'
@@ -718,8 +736,7 @@ function _dbxLinkCard(b, name, link, password, sub){
   const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:6px';
   const cl=document.createElement('button'); cl.textContent='🔗 リンクをコピー'; const cp=document.createElement('button'); cp.textContent='🔑 パスワードをコピー';
   [cl,cp].forEach(x=>x.style.cssText='padding:4px 11px;border-radius:7px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:12px');
-  cl.onclick=()=>{navigator.clipboard.writeText(link);cl.textContent='✓ コピー済';};
-  cp.onclick=()=>{navigator.clipboard.writeText(password);cp.textContent='✓ コピー済';};
+  _copyBtn(cl, link); _copyBtn(cp, password);
   bar.append(cl,cp); row.appendChild(bar); b.appendChild(row);
 }
 async function dropboxTransferFiles(files){
