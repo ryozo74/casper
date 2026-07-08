@@ -503,11 +503,21 @@ def _looks_like_action(msg):
 
 
 def _extract_list_lines(text):
-    """テキストから一覧行を verbatim で抜き出す([PJ]で始まる or · 区切りの短い行)。
-    『上記リストをそのまま』のDMで、LLMに要約させず一覧を忠実に付ける為(kiyotomo殿指摘の項目落ち対策)。"""
+    """テキストから一覧行を verbatim で抜き出す(markdown表の行/[PJ]で始まる/· 区切りの短い行)。
+    『上記リストをそのまま』のDMで、LLMに要約させず一覧を忠実に付ける為(殿御下命『基本リストはそのまま・模造排除』)。"""
     out = []
     for ln in (text or "").split("\n"):
         s = ln.strip()
+        # ① markdown表のデータ行 | a | b | c | → 区切り行/ヘッダを除きセルを整形して1行に(表の中身を verbatim 保持)
+        if s.startswith("|") and s.endswith("|") and s.count("|") >= 3:
+            if re.match(r"^\|[\s:|\-]+\|$", s):            # 区切り行(|---|)はスキップ
+                continue
+            cells = [re.sub(r"\*\*(.+?)\*\*", r"\1", c.strip()) for c in s.strip("|").split("|")]
+            cells = [c for c in cells if c]
+            if cells and not any(h in cells[0] for h in ("プロジェクト名", "タスク名", "名前", "項目", "件名")):
+                out.append("　".join(cells))               # 全角スペース区切り(プレーンテキストで読める)
+            continue
+        # ② 箇条書き/[PJ]/· 区切り行
         s = re.sub(r"^[-・*•●]\s+", "", s)                 # 箇条書き記号
         s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)             # 太字装飾
         if (re.match(r"^\[[^\]]+\]", s) or " · " in s) and 4 < len(s) < 140:
@@ -583,13 +593,28 @@ def _action_router(user_msg, context, who, convo=None):
     m = re.search(r"(\d+)", to)
     to = m.group(1) if m else {v: k for k, v in _ROSTER_MAP.items()}.get(to)
     body = _clean_dm_body(str(d.get("body") or "").strip())   # プレーンテキスト整形(読みやすさ・&amp;除去)
-    # 『上記のリスト/タスクをそのまま』のDMは、qwenに要約させず直前の一覧を verbatim で付ける(項目落ち根治)。
-    if re.search(r"(上記|この|その|それら|これら)\s*(の|、)?\s*(タスク|リスト|一覧|件|もの)", user_msg or ""):
+    # 『上記のリスト/タスクをそのまま』のDMは、qwenに要約させず会話にある一覧を verbatim で付ける
+    # (殿御下命『基本リストはそのまま・模造排除』・項目落ち/再計算をさせぬ)。上記〜件の間に文字を許容＋
+    # 納期超過等の報告/通達依頼でも発火(一覧を verbatim で載せる意図)。
+    _wants_verbatim = bool(re.search(r"(上記|この|その|それら|これら).{0,20}(タスク|リスト|一覧|件|もの|プロジェクト|PJ)", user_msg or "")) \
+        or (bool(re.search(r"納期超過|超過|遅れ|遅延", user_msg or "")) and bool(re.search(r"(通達|報告|確認|連絡|知らせ|一覧|リスト|送)", user_msg or "")))
+    if _wants_verbatim:
         prior_asst = [x for x in conv if x["role"] == "assistant"]
-        items = _extract_list_lines(str(prior_asst[-1].get("content", "")) if prior_asst else "")
+        items = []
+        for m in reversed(prior_asst[-4:]):            # 直近数件から一覧/表を探す(表は少し前の応答のことがある)
+            got = _extract_list_lines(str(m.get("content", "")))
+            if len(got) >= 2:
+                items = got; break
+        _overdue = bool(re.search(r"納期超過|超過|遅れ|遅延", (user_msg or "") + (body or "")))
+        if items and _overdue:                         # 納期超過の話題は該当行だけに絞る(基本リストを verbatim・関連分のみ)
+            od = [it for it in items if re.search(r"納期超過|超過|遅れ", it)]
+            if od:
+                items = od
         if len(items) >= 2:
-            # 用件の骨子(1文)。担当違いの定番は clean template、それ以外はqwen1文目を汎用化。一覧は verbatim。
-            if re.search(r"担当(では|じゃ)?な|担当外|自分の.*でな|私の.*でな", (body or "") + (user_msg or "")):
+            # 用件の骨子(1文)。定番は clean template、それ以外はqwen1文目を汎用化。一覧は verbatim(表の行はそのまま)。
+            if _overdue:
+                intro = "現在、以下のプロジェクトが納期超過となっています。ご確認の上、状況のご報告をお願いします。"
+            elif re.search(r"担当(では|じゃ)?な|担当外|自分の.*でな|私の.*でな", (body or "") + (user_msg or "")):
                 intro = "下記のタスクは私の担当ではないようです。ご確認・アサインの修正をお願いできますでしょうか。"
             else:
                 intro = re.split(r"[。\n！？]", body)[0].strip()   # qwen本文の1文目=用件の骨子
@@ -598,7 +623,7 @@ def _action_router(user_msg, context, who, convo=None):
                 intro = re.sub(r"の\s*(および|、|の|及び)\s*", "", intro).replace("  ", " ").strip()
                 if intro and not re.search(r"[。！？]$", intro):
                     intro += "。"
-            body = (intro + "\n\n" if intro else "") + "\n".join("・" + it for it in items)
+            body = (intro + "\n\n" if intro else "") + "\n".join(items)   # 一覧は verbatim(・を付けず会話のまま)
     if not (to and body):
         return None
     reply = (f"**{_uid_to_name(to)}** 宛に以下のDM下書きを作成しました。↓の承認カードで確認・編集し、"
