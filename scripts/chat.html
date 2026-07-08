@@ -232,7 +232,7 @@
     <div class="tmitem" data-tool="dropbox">📦 Dropboxで送る（大容量・パスワード付きリンク）</div>
   </div>
   <input type="file" id="fileinp" accept="image/*,video/*" style="display:none">
-  <input type="file" id="dbxinp" style="display:none">
+  <input type="file" id="dbxinp" multiple style="display:none">
   <div class="hint">応答に数秒〜十数秒かかることがあります。</div>
 </footer>
 <script>
@@ -708,34 +708,53 @@ document.querySelectorAll('.tmitem').forEach(it=>it.onclick=()=>{
   if(it.dataset.tool==='makedoc'){ docFromLastReply(); }
   if(it.dataset.tool==='dropbox'){ document.getElementById('dbxinp').click(); }
 });
-// 📦 Dropbox転送: ファイル選択→Casper経由でDropboxへ→パスワード付きリンクを表示
-document.getElementById('dbxinp').addEventListener('change',async e=>{
-  const f=e.target.files[0]; e.target.value=''; if(!f)return;
-  const b=el('bot'); b.classList.add('cursor'); render(b,'📦 「'+esc(f.name)+'」を Dropbox へ転送中…（大きいファイルは少々かかり申す）');
+// 📦 Dropbox転送(複数対応): ファイル選択 or ドラッグ&ドロップ→Casper経由でDropboxへ→各パスワード付きリンクを表示
+document.getElementById('dbxinp').addEventListener('change',e=>{ const fs=[...e.target.files]; e.target.value=''; dropboxTransferFiles(fs); });
+function _readDataURL(f){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(new Error('読込失敗')); r.readAsDataURL(f); }); }
+async function dropboxTransferFiles(files){
+  files=[...(files||[])].filter(Boolean); if(!files.length) return;
+  const b=el('bot'); b.classList.add('cursor');
+  render(b,'📦 '+files.length+'件を Dropbox へ転送中…（大きいファイルは少々かかり申す）'); log.scrollTop=log.scrollHeight;
+  const results=[];
+  for(let i=0;i<files.length;i++){ const f=files[i];
+    render(b,'📦 転送中… ('+(i+1)+'/'+files.length+') '+esc(f.name));  log.scrollTop=log.scrollHeight;
+    try{ const du=await _readDataURL(f); const r=await dpost('/api/dropbox/transfer',{filename:f.name,data_b64:du}); results.push({name:f.name,...r}); }
+    catch(err){ results.push({name:f.name,ok:false,error:(err.message||err)}); }
+  }
+  b.classList.remove('cursor');
+  const okn=results.filter(r=>r.ok).length;
+  render(b,'📦 **'+okn+'/'+files.length+'件** を Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。');
+  results.forEach(r=>{
+    const row=document.createElement('div'); row.style.cssText='margin-top:8px;padding:8px 11px;border:1px solid #243049;border-radius:9px;background:rgba(255,255,255,.02)';
+    if(r.ok){ const sz=(r.size/1e6).toFixed(1);
+      row.innerHTML='📄 <b>'+esc(r.name)+'</b> <span style="color:#9fb3c8;font-size:12px">（'+sz+'MB）</span><br>'
+        +'<span style="font-size:12px;color:#9fb3c8">🔗 '+esc(r.link)+'<br>🔑 <code>'+esc(r.password)+'</code></span>';
+      const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:6px';
+      const cl=document.createElement('button'); cl.textContent='🔗 リンク'; const cp=document.createElement('button'); cp.textContent='🔑 パス';
+      [cl,cp].forEach(x=>x.style.cssText='padding:4px 11px;border-radius:7px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:12px');
+      cl.onclick=()=>{navigator.clipboard.writeText(r.link);cl.textContent='✓ コピー済';};
+      cp.onclick=()=>{navigator.clipboard.writeText(r.password);cp.textContent='✓ コピー済';};
+      bar.append(cl,cp); row.appendChild(bar);
+    }else{ row.innerHTML='⚠️ <b>'+esc(r.name)+'</b>: '+esc(r.error||'転送失敗'); }
+    b.appendChild(row);
+  });
   log.scrollTop=log.scrollHeight;
-  const rd=new FileReader();
-  rd.onload=async()=>{
-    try{
-      const r=await dpost('/api/dropbox/transfer',{filename:f.name,data_b64:rd.result});
-      b.classList.remove('cursor');
-      if(r.ok){
-        const sz=(r.size/1e6).toFixed(1);
-        let h='📦 **'+esc(r.name)+'**（'+sz+'MB）を Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。\n\n'
-          +'**リンク**: '+esc(r.link)+'\n\n**パスワード**: `'+esc(r.password)+'`';
-        render(b,h);
-        const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:8px';
-        const cl=document.createElement('button'); cl.textContent='🔗 リンクをコピー';
-        const cp=document.createElement('button'); cp.textContent='🔑 パスワードをコピー';
-        [cl,cp].forEach(x=>x.style.cssText='padding:5px 12px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:13px');
-        cl.onclick=()=>{navigator.clipboard.writeText(r.link);cl.textContent='✓ コピー済';};
-        cp.onclick=()=>{navigator.clipboard.writeText(r.password);cp.textContent='✓ コピー済';};
-        bar.append(cl,cp); b.appendChild(bar);
-      }else{ render(b,'📦 転送に失敗いたした: '+esc(r.error||'不明')); }
-      log.scrollTop=log.scrollHeight;
-    }catch(err){ b.classList.remove('cursor'); render(b,'📦 転送エラー: '+esc(err.message||err)); }
-  };
-  rd.readAsDataURL(f);
-});
+}
+// ドラッグ&ドロップ: ファイルを画面に落とすと Dropbox へ転送(複数可・オーバーレイ表示)
+(function(){
+  const ov=document.createElement('div'); ov.id='dropov';
+  ov.innerHTML='<div style="pointer-events:none">📦 ドロップで Dropbox へ転送<br><span style="font-size:14px;opacity:.8">複数ファイル可</span></div>';
+  ov.style.cssText='position:fixed;inset:14px;z-index:9999;display:none;flex-direction:column;align-items:center;justify-content:center;'
+    +'background:rgba(10,15,25,.78);backdrop-filter:blur(2px);border:3px dashed #38bdf8;border-radius:16px;font-size:22px;color:#cfe8ff;text-align:center';
+  document.body.appendChild(ov);
+  let cnt=0;
+  const hasFiles=e=>e.dataTransfer&&[...(e.dataTransfer.types||[])].includes('Files');
+  window.addEventListener('dragenter',e=>{ if(hasFiles(e)){ cnt++; ov.style.display='flex'; } });
+  window.addEventListener('dragover',e=>{ if(ov.style.display==='flex') e.preventDefault(); });
+  window.addEventListener('dragleave',e=>{ if(hasFiles(e)){ cnt--; if(cnt<=0){ cnt=0; ov.style.display='none'; } } });
+  window.addEventListener('drop',e=>{ if(ov.style.display==='flex'){ e.preventDefault(); cnt=0; ov.style.display='none';
+    const fs=e.dataTransfer.files; if(fs&&fs.length) dropboxTransferFiles(fs); } });
+})();
 function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
 function clearFile(){ pendingFile=null; attachEl.innerHTML=''; }
