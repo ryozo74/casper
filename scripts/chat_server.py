@@ -1463,6 +1463,70 @@ def projects_digest(query):
         return ""
 
 
+_TASKS_CACHE = {"at": 0.0, "items": []}
+
+
+def _all_tasks(ttl=90):
+    """全タスクを取得(ページング)。短命キャッシュ(既定90秒)で連問を高速化。"""
+    import time
+    now = time.time()
+    if _TASKS_CACHE["items"] and now - _TASKS_CACHE["at"] < ttl:
+        return _TASKS_CACHE["items"]
+    if not casper_tools:
+        return []
+    out = []
+    for off in (0, 500, 1000, 1500, 2000):
+        page = casper_tools._get(f"/tasks?limit=500&offset={off}").get("items", [])
+        out += page
+        if len(page) < 500:
+            break
+    if out:
+        _TASKS_CACHE["items"] = out
+        _TASKS_CACHE["at"] = now
+    return out
+
+
+_ACTIVE_TASK_Q_RE = re.compile(
+    r"(動いて(る|いる).{0,6}タスク|進行中.{0,6}タスク|現在.{0,8}タスク|稼働.{0,6}タスク|"
+    r"wip.{0,6}タスク|タスク.{0,6}(動いて|進行中|稼働中))", re.I)
+
+
+def active_tasks_digest(query):
+    """【進行中タスク一覧=retrieve-then-render】『現在動いているタスクは?』に、全PJの進行中(wip/工程)タスクを
+    プロジェクト別に注入する。get_today_tasks(本日締切のみ)に狭めるのを防ぐ——殿指摘『遅延PJが"動いているタスク"に
+    出ず"動いていない"と誤解する』の恒久策(2026-07-08)。"""
+    try:
+        if not query or not _ACTIVE_TASK_Q_RE.search(query):
+            return ""
+        tasks = _all_tasks()
+        if not tasks:
+            return ""
+        active_st = {"wip", "modeling", "lookdev", "caching", "rig", "facial", "in-progress", "in_progress"}
+        act = [t for t in tasks if (t.get("status") or "").lower() in active_st]
+        if not act:
+            return "\n\n## 【現在進行中(wip)のタスク】\n現在 wip 状態のタスクはありません(この事実を答えよ)。"
+        pm = {p.get("id"): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+        try:
+            um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                  for u in casper_tools._get("/users?limit=200").get("items", [])}
+        except Exception:
+            um = {}
+        import collections
+        byp = collections.defaultdict(list)
+        for t in act:
+            byp[pm.get(t.get("project_id"), t.get("project_id") or "?")].append(t)
+        lines = []
+        for pj, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
+            who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
+            lines.append(f"- **{pj}**: 進行中 {len(ts)}件 (担当: {', '.join(who_names[:6])})")
+        return (f"\n\n## 【現在進行中(wip/工程)のタスク一覧(Calendar・確定)】\n"
+                f"全プロジェクトで進行中のタスクは計 {len(act)}件。**この一覧を根拠に答えよ。"
+                "get_today_tasks(本日締切のみ)や特定PJ(marukome等)に狭めず、全PJの進行中を示せ。"
+                "『動いているタスク』の問いには本一覧が答え(本日締切とは別物)**:\n" + "\n".join(lines))
+    except Exception:
+        return ""
+
+
 def open_loop_digest(who):
     """【OPEN LOOPレジストリの先読み注入】この人が依頼元/通知先の"未了の約束"を⚙レコードから注入。
     帯の散文でなくレコードゆえ、Casperは常に把握し漏らさない(Fable5 #2・hori事件の恒久解)。"""
@@ -1624,15 +1688,31 @@ def _calendar_lookup_mcp(args, uid):
                 items = [u for u in items if q in (str(u.get("username") or "") + str(u.get("display_name") or "")).lower()]
             return json.dumps({"total": len(items), "items": items[:40]}, ensure_ascii=False)
         if kind == "tasks":
-            r = casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=actor)
-            d = json.loads(r) if isinstance(r, str) else r
-            items = d.get("items", d if isinstance(d, list) else [])
-            for k in ("query", "status", "assignee"):
-                v = str((args or {}).get(k) or "").lower()
+            _aa = (args or {})
+            _wants_today = bool(re.search(r"本日|今日|today", q + str(_aa.get("due_date") or "")))
+            if _wants_today:                               # 明示的に本日締切を求める時だけ get_today_tasks
+                r = casper_mcp.call_tool("get_today_tasks", {}, token=WRITE_TOKEN, actor=actor)
+                d = json.loads(r) if isinstance(r, str) else r
+                items = d.get("items", d if isinstance(d, list) else [])
+                note = "本日締切のタスク"
+            else:                                          # 既定=全PJの進行中(wip/工程)。本日締切に狭めぬ(殿指摘2026-07-08)
+                tasks = _all_tasks()
+                st = str(_aa.get("status") or "").lower()
+                if st:
+                    items = [t for t in tasks if st in (t.get("status") or "").lower()]
+                else:
+                    _act = {"wip", "modeling", "lookdev", "caching", "rig", "facial", "in-progress", "in_progress"}
+                    items = [t for t in tasks if (t.get("status") or "").lower() in _act]
+                note = "全PJの進行中(wip/工程)タスク。本日締切に限らない"
+            pm = {p.get("id"): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+            for t in items:                                # PJ名を付与(読みやすさ・どのPJか判別)
+                if isinstance(t, dict) and t.get("project_id") in pm:
+                    t["project_name"] = pm[t["project_id"]]
+            for k in ("query", "assignee"):
+                v = str(_aa.get(k) or "").lower()
                 if v:
                     items = [t for t in items if v in json.dumps(t, ensure_ascii=False).lower()]
-            return json.dumps({"total": len(items), "items": items[:40],
-                               "note": "MCPの本日タスク中心(全期間照会は今後)"}, ensure_ascii=False)
+            return json.dumps({"total": len(items), "items": items[:60], "note": note}, ensure_ascii=False)
         # projects(既定)
         r = casper_mcp.call_tool("get_projects", {}, token=WRITE_TOKEN, actor=actor)
         d = json.loads(r) if isinstance(r, str) else r
@@ -3863,6 +3943,7 @@ class H(BaseHTTPRequestHandler):
             cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
             cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
             cal += projects_digest(last_user)         # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
+            cal += active_tasks_digest(last_user)     # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
             cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += open_loop_digest(who)              # 未了の約束(OPEN LOOP)を⚙レコードから注入
             cal += traits_digest(who, last_user)      # 人物の癖(構造化trait)を注入=裏取りの手がかり
@@ -3943,6 +4024,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
         sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
         sysadd += projects_digest(ll_user)               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
+        sysadd += active_tasks_digest(ll_user)           # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
         sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += open_loop_digest(who)                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
         sysadd += traits_digest(who, ll_user)            # 人物の癖(構造化trait)を注入=裏取りの手がかり
