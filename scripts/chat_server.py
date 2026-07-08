@@ -3771,8 +3771,9 @@ class H(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
             try:
                 b64 = req.get("data_b64", "")
-                if "," in b64[:64]:
-                    b64 = b64.split(",", 1)[1]             # data:URL の接頭辞を除去
+                if b64.startswith("data:") and "," in b64:
+                    b64 = b64.split(",", 1)[1]             # data:URL の接頭辞を除去(Office形式のMIMEは77字超ゆえ位置制限せず)
+                b64 += "=" * (-len(b64) % 4)              # base64パディング補正(Incorrect padding対策)
                 data = _b64.b64decode(b64)
                 r = casper_dropbox.transfer(data, req.get("filename", "file"),
                                             password=(req.get("password") or None))
@@ -3787,8 +3788,9 @@ class H(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
             try:
                 b64 = req.get("data_b64", "")
-                if "," in b64[:64]:
-                    b64 = b64.split(",", 1)[1]
+                if b64.startswith("data:") and "," in b64:
+                    b64 = b64.split(",", 1)[1]             # data:URL接頭辞除去(Office形式のMIMEは77字超ゆえ位置制限せず)
+                b64 += "=" * (-len(b64) % 4)              # base64パディング補正
                 data = _b64.b64decode(b64)
                 self._json(casper_dropbox.upload_into(req.get("folder", "batch"), data, req.get("filename", "file")))
             except Exception as e:
