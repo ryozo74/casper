@@ -201,6 +201,34 @@ _TASK_ST_LABEL = {   # status → 表示ラベル(絵文字つき・5カテゴ�
     "todo": "⚪未着手", "in-progress": "🔵進行中", "in_progress": "🔵進行中", "review": "🟡レビュー",
     "completed": "✅完了", "done": "✅完了", "approved": "🟣承認済", "delayed": "🔴遅延", "blocked": "🔴停滞",
 }
+# category(5分類) → 絵文字。ラベル文字は API の status_label を単一ソースに使い、内蔵マップは fallback のみ(ニブ指針2026-07-08)。
+_CAT_EMOJI = {"todo": "⚪", "in_progress": "🔵", "review": "🟡", "completed": "✅", "held": "⏸"}
+
+
+def _task_label(t):
+    """タスクの表示ラベル。API提供の status_label(＋category絵文字)を優先=Calendar単一ソースでドリフト無し。
+    無ければ内蔵 _TASK_ST_LABEL(fallback)。ハードコード非推奨のニブ指針に沿う。"""
+    if isinstance(t, dict) and t.get("status_label"):
+        emo = _CAT_EMOJI.get(t.get("status_category") or "", "")
+        return f"{emo}{t['status_label']}"
+    st = (t.get("status") if isinstance(t, dict) else t) or ""
+    return _TASK_ST_LABEL.get(str(st).lower(), str(st))
+
+
+def _task_is_done(t):
+    """完了か。API提供の status_category=='completed' を優先、無ければ status で判定(deliver+旧値互換)。"""
+    if isinstance(t, dict) and t.get("status_category"):
+        return t["status_category"] == "completed"
+    st = (t.get("status") if isinstance(t, dict) else t) or ""
+    return str(st).lower() in _TASK_DONE
+
+
+def _task_is_moving(t):
+    """『動いている』(進行中)か。category=='in_progress' を優先、無ければ status で判定。"""
+    if isinstance(t, dict) and t.get("status_category"):
+        return t["status_category"] == "in_progress"
+    st = (t.get("status") if isinstance(t, dict) else t) or ""
+    return str(st).lower() in {"wip", "modeling", "lookdev", "caching", "rig", "facial", "in-progress", "in_progress"}
 
 # --- Stage2: 副作用ツールの「承認→実行」フロー(DM代筆・QC提出・参照登録) ---
 PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
@@ -1502,8 +1530,7 @@ def active_tasks_digest(query):
         tasks = _all_tasks()
         if not tasks:
             return ""
-        active_st = {"wip", "modeling", "lookdev", "caching", "rig", "facial", "in-progress", "in_progress"}
-        act = [t for t in tasks if (t.get("status") or "").lower() in active_st]
+        act = [t for t in tasks if _task_is_moving(t)]   # API category=='in_progress' 優先(内蔵setはfallback)
         if not act:
             return "\n\n## 【現在進行中(wip)のタスク】\n現在 wip 状態のタスクはありません(この事実を答えよ)。"
         pm = {p.get("id"): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
@@ -1702,8 +1729,7 @@ def _calendar_lookup_mcp(args, uid):
                 if st:
                     items = [t for t in tasks if st in (t.get("status") or "").lower()]
                 else:
-                    _act = {"wip", "modeling", "lookdev", "caching", "rig", "facial", "in-progress", "in_progress"}
-                    items = [t for t in tasks if (t.get("status") or "").lower() in _act]
+                    items = [t for t in tasks if _task_is_moving(t)]   # API category 優先(内蔵setはfallback)
                 note = "全PJの進行中(wip/工程)タスク。本日締切に限らない"
             pm = {p.get("id"): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
             for t in items:                                # PJ名を付与(読みやすさ・どのPJか判別)
@@ -2376,8 +2402,9 @@ def open_briefing(who):
                     items = d.get("items") if isinstance(d, dict) else (d if isinstance(d, list) else None)
                     break
             if isinstance(items, list):
-                items = [it for it in items                # 完了(deliver)・除外(omit) は残務一覧に出さぬ(新19値対応)
-                         if (it.get("status") or "").lower() not in _TASK_DONE | {"omit"}]
+                items = [it for it in items                # 完了・除外(held/omit) は残務一覧に出さぬ(API category優先)
+                         if not _task_is_done(it) and (it.get("status") or "").lower() != "omit"
+                         and (it.get("status_category") or "") != "held"]
                 task_n = len(items)
                 pmap = {}                                 # project_id→PJ名(高精細表示に必須)
                 try:
@@ -2387,7 +2414,6 @@ def open_briefing(who):
                         pmap = {str(p.get("id")): p.get("name") for p in (pit or [])}
                 except Exception:
                     pass
-                _ST = _TASK_ST_LABEL                       # 新19値の表示ラベル(2026-07-08刷新・旧値も互換)
                 _PR = {"HIGH": "優先高", "MEDIUM": "優先中", "LOW": ""}
                 _tctx = []
                 for it in items[:12]:                     # フィールド名の揺れに頑健(name/title/task_name)
@@ -2395,8 +2421,7 @@ def open_briefing(who):
                     shot = str(it.get("shotID") or it.get("shot") or "").strip()   # カット番号(c12等)を頭に付け同名タスクを区別
                     if shot and shot.lower() not in nm.lower():
                         nm = f"{shot} {nm}"
-                    st = it.get("status") or ""
-                    stj = _ST.get(st, st)
+                    stj = _task_label(it)                 # API の status_label を単一ソースに(内蔵マップは fallback・ニブ指針)
                     pjn = pmap.get(str(it.get("project_id")), "")
                     due = str(it.get("due_date") or "")[:10]
                     prj = _PR.get((it.get("priority") or "").upper(), "")
