@@ -4,12 +4,12 @@
 <title>Casper アーキテクチャ — React Flow</title>
 <link rel="stylesheet" href="https://unpkg.com/reactflow@11.11.4/dist/style.css">
 <style>
-  html,body,#root{margin:0;height:100%;background:#eef2f7;font-family:-apple-system,"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif}
-  .top{position:fixed;top:0;left:0;right:0;z-index:10;padding:9px 16px;background:#fff;border-bottom:1px solid #dbe2ea;box-shadow:0 1px 4px rgba(0,0,0,.05)}
-  .top h1{font-size:15px;margin:0;color:#0f172a} .top .sub{font-size:12px;color:#64748b;margin-top:2px}
+  html,body,#root{margin:0;height:100%;background:#0b1220;font-family:-apple-system,"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif}
+  .top{position:fixed;top:0;left:0;right:0;z-index:10;padding:9px 16px;background:rgba(11,18,32,.94);border-bottom:1px solid #22304a}
+  .top h1{font-size:15px;margin:0;color:#e6edf6} .top .sub{font-size:12px;color:#64748b;margin-top:2px}
   .top .sub b{color:#dc2626}
   .react-flow__attribution{display:none}
-  .loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#64748b;font-size:14px}
+  .loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#93a4bd;font-size:14px}
   .err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#dc2626;font-size:13px;padding:30px;text-align:center}
 </style></head>
 <body>
@@ -89,9 +89,9 @@
       var bg,bd,col,fw='600', fs='12px';
       if(root){ bg='#0f172a'; bd='#334155'; col='#fff'; fw='800'; fs='14px'; }
       else if(l1){ bg=mycc; bd='#ffffff88'; col='#fff'; fw='800'; }
-      else { bg='#ffffff'; bd=hexA(mycc||'#64748b',.55); col='#1e293b'; }
-      if(todo){ bg='#fee2e2'; bd='#dc2626'; col='#991b1b'; fw='800'; }
-      if(nw){ bg='#dcfce7'; bd='#16a34a'; col='#166534'; fw='800'; }   // 実装済(NEW・緑)
+      else { bg='#141d2e'; bd=hexA(mycc||'#64748b',.6); col='#dbe4f0'; }
+      if(todo){ bg='#3a1620'; bd='#f0679a'; col='#ffd7e6'; fw='800'; }
+      if(nw){ bg='#122a1c'; bd='#22c55e'; col='#a7f3c9'; fw='800'; }   // 実装済(NEW・緑)
       if(brain){ fs='14px'; bd='#ffffff'; }               // 両脳=白縁+大きめ文字で対等強調
       var label=node.n+(todo?'  🔴 未実装':(nw?'  ✅ 実装済':''));
       var sh = brain ? '0 0 0 5px '+hexA(mycc,.28)+', 0 6px 16px rgba(0,0,0,.28)'
@@ -127,12 +127,12 @@
 
     function App(){
       return h(ReactFlowC,{ defaultNodes:nodes, defaultEdges:edges, fitView:true, minZoom:0.12, maxZoom:3,
-        nodesDraggable:true, proOptions:{hideAttribution:true}, style:{background:'#eef2f7'} },
-        h(Background,{color:'#cbd5e1', gap:22, size:1}),
+        nodesDraggable:true, proOptions:{hideAttribution:true}, style:{background:'#0b1220'} },
+        h(Background,{color:'#1c2942', gap:22, size:1}),
         h(Controls,{showInteractive:false}),
         h(MiniMap,{pannable:true, zoomable:true,
           nodeColor:function(n){ return (n.style&&n.style.border||'').indexOf('dc2626')>=0?'#dc2626':(n.style&&n.style.background)||'#94a3b8'; },
-          style:{background:'#fff',border:'1px solid #dbe2ea'} })
+          style:{background:'#0e1626',border:'1px solid #22304a'} })
       );
     }
     document.getElementById('root').innerHTML='';
