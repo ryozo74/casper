@@ -14,8 +14,7 @@
 </style></head>
 <body>
 <div class="top"><h1>Casper 現状アーキテクチャ — React Flow（触れる・ズーム・ドラッグ）</h1>
-<div class="sub"><b>🔴 未実装＝tool化されていない6項目（赤ノード）</b> ／ カテゴリ色分け ｜
-🖥️入口 ⚙️サーバ 🎯接地 📤アクション 🔧ツール 📚知識 🧠左脳 🔗外部 🔄自己改善 🎛️モデル ✨機能</div></div>
+<div class="sub">根幹＝<b style="color:#9333ea">🧠 デュアルブレイン</b>：<b style="color:#7e22ce">左脳=構造化データ(事実)</b>＋<b style="color:#15803d">右脳=知識/記憶(文脈)</b>。伴走機構が両脳から接地(retrieve-then-render)して応答 ｜ <b style="color:#dc2626">🔴 未実装6項目=赤</b></div></div>
 <div id="root"><div class="loading">読み込み中…（React Flow を unpkg から取得）</div></div>
 
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
@@ -30,32 +29,36 @@
     var Background=RF.Background, Controls=RF.Controls, MiniMap=RF.MiniMap;
     var h=React.createElement;
 
-    var T={n:"Casper",root:true,c:[
-      {n:"🖥️ 入口 フロント\nchat.html",c:[
-        {n:"チャットUI\n疑似ストリーミング"},{n:"開門ブリーフィング"},{n:"承認カード\n副作用ゲート"},
-        {n:"フィードバック\n🙅→修正リスト"},{n:"資料パネル\n節編集/版"},
-        {n:"+ メニュー\nScore/報告書/Dropbox"},{n:"整理術 seiri"},{n:"描画\nmd/表/mermaid/canvas"}
+    // Casperの根幹=デュアルブレイン(左脳=事実 / 右脳=知識)。伴走機構が両脳から接地して応答。
+    var T={n:"Casper\n入力負担ゼロ 伴走AI",root:true,c:[
+      {n:"🧠 左脳\n構造化データ＝事実",brain:true,c:[
+        {n:"Calendar\n真実源(Nibu)"},{n:"Score\nBFF(Elvis)"},
+        {n:"casper_mcp\nMCPブリッジ"},{n:"casper_tools\nREST読取"},
+        {n:"tasks 新19値\nAPI単一ソース"},{n:"projects\nisOverdue派生"},{n:"meetings\n議事録(ローカル生成)"},{n:"users\nroster永続"}
       ]},
-      {n:"⚙️ サーバ\nchat_server.py:8770",c:[
-        {n:"identify 認証"},{n:"digests注入\nretrieve-then-render"},{n:"ollama_chat\nツールループ"},
-        {n:"salvage 漏れ救済"},{n:"exit検問 P1"},{n:"履歴を直近に絞る"},{n:"backend切替\nqwen/Claude"}
+      {n:"📚 右脳\n知識・記憶・文脈",brain:true,c:[
+        {n:"vault\nObsidian"},{n:"people 人物"},{n:"activity 動向層"},{n:"culture_rules 掟"},
+        {n:"postmortems 反省"},{n:"asset_shadows\n資産影"},
+        {n:"RAG\nトライグラム"},{n:"embed bge-m3\n意味検索"},{n:"traits 人の癖"},{n:"openloop\n未了の約束"}
       ]},
-      {n:"🎯 接地機構\ngrounding",c:[
-        {n:"projects_digest"},{n:"active_tasks_digest"},{n:"verify_digest\nlive裏取り"},
-        {n:"existence_digest\n捏造禁止"},{n:"manifest\n資産台帳=真実源"}
+      {n:"🎯 接地機構\n両脳から事実を引く",c:[
+        {n:"digests 15種\nretrieve-then-render"},{n:"projects_digest"},{n:"active_tasks_digest"},
+        {n:"verify_digest\nlive裏取り"},{n:"existence_digest\n捏造禁止"},{n:"manifest\n資産台帳=真実源"}
       ]},
-      {n:"📤 アクション機構",c:[
+      {n:"📤 アクション機構\npropose→execute",c:[
         {n:"P2 action_router\nDM型付き"},{n:"salvage\n漏れツール救済"},{n:"P1\n完了詐称の打消"},
         {n:"一覧はverbatim"},{n:"outbox 状態機械"}
       ]},
       {n:"🔧 ツール\nqwen function-calling",c:[
-        {n:"search_vault RAG"},{n:"calendar_lookup 左脳"},{n:"send_message\nDM代筆"},{n:"update_task"}
+        {n:"search_vault\n右脳RAG"},{n:"calendar_lookup\n左脳"},{n:"send_message\nDM代筆"},{n:"update_task"}
       ]},
-      {n:"📚 知識層 右脳\nvault Obsidian",c:[
-        {n:"people/meetings\nactivity/rules"},{n:"RAG トライグラム"},{n:"embed bge-m3"},{n:"traits/openloop"}
+      {n:"🎛️ モデル\nqwen=言語の処理器",c:[
+        {n:"qwen3.6:27b\n@z8a"},{n:"num_ctx 12288\nkeep_alive常駐"},{n:"format json\n制約デコード"},{n:"クラウドClaude\n縮退時"}
       ]},
-      {n:"🧠 左脳\nCalendar/Score",c:[
-        {n:"casper_mcp ブリッジ"},{n:"tasks 新19値\nAPI単一ソース"},{n:"projects\nisOverdue派生"},{n:"users roster永続"}
+      {n:"🖥️ 入口 フロント\nchat.html",c:[
+        {n:"チャットUI\n疑似ストリーミング"},{n:"開門ブリーフィング"},{n:"承認カード\n副作用ゲート"},
+        {n:"フィードバック\n🙅→修正リスト"},{n:"資料パネル\n節編集/版"},
+        {n:"+ メニュー\nScore/報告書/Dropbox"},{n:"整理術 seiri"},{n:"描画\nmd/表/mermaid/canvas"}
       ]},
       {n:"🔗 外部連携",c:[
         {n:"Aurora 図書館"},{n:"Dropbox\n複数1リンク"},{n:"Vimeo tus再開可"},{n:"Discord nibu ch"}
@@ -65,17 +68,14 @@
         {n:"fewshot_digest",todo:true},{n:"health 稼働\n15分cron"},{n:"circuit breaker",todo:true},
         {n:"設定のデータ化\ndigests.yaml",todo:true},{n:"origin field",todo:true},{n:"attention\n今日の3件",todo:true}
       ]},
-      {n:"🎛️ モデル構成",c:[
-        {n:"qwen3.6:27b\n@z8a"},{n:"num_ctx 12288\nkeep_alive常駐"},{n:"format json\n制約デコード"},{n:"クラウドClaude\n縮退時"}
-      ]},
       {n:"✨ 主要機能",c:[
         {n:"朝ブリーフィング\nDM代筆"},{n:"資料作り\n報告書ビルダー"},{n:"整理術\n逆インタビュー"},{n:"Score Uploader\n結晶化"}
       ]}
     ]};
 
-    var CAT={'🖥️':'#2563eb','⚙️':'#6366f1','🎯':'#0d9488','📤':'#ea580c','🔧':'#0891b2','📚':'#16a34a',
-      '🧠':'#9333ea','🔗':'#db2777','🔄':'#ca8a04','🎛️':'#475569','✨':'#7c3aed'};
-    function catOf(name){ var k=name.trim().slice(0,2); return CAT[name.trim()[0]+name.trim()[1]]||CAT[Object.keys(CAT).find(function(e){return name.indexOf(e)>=0;})]||'#64748b'; }
+    var CAT={'🧠':'#9333ea','📚':'#16a34a','🎯':'#0d9488','📤':'#ea580c','🔧':'#0891b2',
+      '🎛️':'#475569','🖥️':'#2563eb','🔗':'#db2777','🔄':'#ca8a04','✨':'#7c3aed'};
+    function catOf(name){ for(var e in CAT){ if(name.indexOf(e)>=0) return CAT[e]; } return '#64748b'; }
     function hexA(hex,a){ var n=parseInt(hex.slice(1),16); return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
 
     var idc=0, nodes=[], edges=[], byId={};
@@ -83,18 +83,21 @@
       var id='n'+(idc++); node._id=id;
       var lines=node.n.split('\n'); var w=Math.max(130, Math.max.apply(null,lines.map(function(l){return l.length;}))*13+30);
       var hh=26+lines.length*17; node._w=w; node._h=hh;
-      var todo=!!node.todo, root=!!node.root, l1=depth===1;
+      var todo=!!node.todo, root=!!node.root, l1=depth===1, brain=!!node.brain;
+      if(brain){ w+=26; hh+=14; node._w=w; node._h=hh; }   // 両脳は一回り大きく=対等に際立たせる
       var mycc = l1 ? catOf(node.n) : cc;
-      var bg,bd,col,fw='600';
-      if(root){ bg='#0f172a'; bd='#334155'; col='#fff'; fw='800'; }
+      var bg,bd,col,fw='600', fs='12px';
+      if(root){ bg='#0f172a'; bd='#334155'; col='#fff'; fw='800'; fs='14px'; }
       else if(l1){ bg=mycc; bd='#ffffff88'; col='#fff'; fw='800'; }
       else { bg='#ffffff'; bd=hexA(mycc||'#64748b',.55); col='#1e293b'; }
       if(todo){ bg='#fee2e2'; bd='#dc2626'; col='#991b1b'; fw='800'; }
+      if(brain){ fs='14px'; bd='#ffffff'; }               // 両脳=白縁+大きめ文字で対等強調
       var label=node.n+(todo?'  🔴 未実装':'');
+      var sh = brain ? '0 0 0 5px '+hexA(mycc,.28)+', 0 6px 16px rgba(0,0,0,.28)'
+             : (todo?'0 0 0 4px rgba(220,38,38,.15)':(l1?'0 2px 8px rgba(0,0,0,.15)':'0 1px 3px rgba(0,0,0,.08)'));
       var rf={ id:id, data:{label:label}, position:{x:0,y:0},
-        style:{ background:bg, color:col, border:'2px solid '+bd, borderRadius:'11px', fontSize:'12px',
-          fontWeight:fw, padding:'7px 11px', width:w, whiteSpace:'pre-line', textAlign:'center',
-          boxShadow: todo?'0 0 0 4px rgba(220,38,38,.15)':(l1?'0 2px 8px rgba(0,0,0,.15)':'0 1px 3px rgba(0,0,0,.08)') },
+        style:{ background:bg, color:col, border:(brain?'3px':'2px')+' solid '+bd, borderRadius:'13px', fontSize:fs,
+          fontWeight:fw, padding:brain?'10px 14px':'7px 11px', width:w, whiteSpace:'pre-line', textAlign:'center', boxShadow:sh },
         _w:w, _h:hh };
       nodes.push(rf); byId[id]=rf;
       if(parent!==null) edges.push({ id:'e'+parent+'-'+id, source:parent, target:id, type:'straight',
