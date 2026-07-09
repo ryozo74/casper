@@ -154,6 +154,73 @@ def a_min_length(n=60):
     return _f
 
 
+# ── DM本文(中身)アサーション: 「問う→DMで確認事項を飛ばす」流れで、DMの中身がしっかりしているか多角検証 ──
+def _dm_card(cards):
+    for c in cards or []:
+        if c.get("tool") == "send_message":
+            return c
+    return None
+
+
+def _dm_body(cards):
+    c = _dm_card(cards)
+    return str(((c or {}).get("args") or {}).get("body") or "")
+
+
+def a_dm_body_present(substrings, need=1):
+    """DM本文に期待語(用件/データ)が含まれるか。"""
+    def _f(text, cards):
+        if not _dm_card(cards):
+            return False, "send_messageカードが無い"
+        body = _dm_body(cards)
+        hit = [s for s in substrings if s in body]
+        return (len(hit) >= need, "" if len(hit) >= need else f"DM本文に期待語が{len(hit)}件不足({substrings})")
+    return _f
+
+
+def a_dm_body_absent(substrings):
+    """DM本文に禁止語(生JSON/機械前置き等)が無いか。"""
+    def _f(text, cards):
+        if not _dm_card(cards):
+            return False, "send_messageカードが無い"
+        body = _dm_body(cards)
+        bad = [s for s in substrings if s in body]
+        return (not bad, "" if not bad else f"DM本文に禁止語: {bad}")
+    return _f
+
+
+def a_dm_body_min_length(n=20):
+    """DM本文が空でなく実質があるか。"""
+    def _f(text, cards):
+        if not _dm_card(cards):
+            return False, "send_messageカードが無い"
+        body = _dm_body(cards).strip()
+        return (len(body) >= n, "" if len(body) >= n else f"DM本文が短すぎ({len(body)}字 < {n})")
+    return _f
+
+
+def a_dm_readable():
+    """DM本文の読みやすさ: 機械前置き【】/署名『〜より』/HTMLエンティティ/過剰空行/生JSON が無い。"""
+    import re as _re
+    def _f(text, cards):
+        if not _dm_card(cards):
+            return False, "send_messageカードが無い"
+        body = _dm_body(cards)
+        bad = []
+        if _re.search(r"【[^】]*(Casper|Ryoji|殿)", body):
+            bad.append("機械前置き【】")
+        if _re.match(r"^\s*(ryoji|Ryoji|りょうじ|殿)\s*より", body):
+            bad.append("署名『〜より』")
+        if "&amp;" in body or "&lt;" in body or "&gt;" in body:
+            bad.append("HTMLエンティティ")
+        if _re.search(r"\n[ \t]*\n[ \t]*\n", body):
+            bad.append("過剰空行")
+        if '"tool"' in body or '"params"' in body or "send_message(" in body:
+            bad.append("生JSON")
+        return (not bad, "" if not bad else f"読みにくさ: {bad}")
+    return _f
+
+
 # ── ゴールデンセット(過去の失態を1件ずつテスト化) ──────────────────
 def _u(c):
     return [{"role": "user", "content": c}]
@@ -172,11 +239,17 @@ ASSERT_REGISTRY = {
     "covers_projects":     lambda a: a_covers_projects(a[0] if a else 2),
     "not_only":            lambda a: a_not_only(a[0] if a else ""),
     "min_length":          lambda a: a_min_length(a[0] if a else 60),
+    "dm_body_present":     lambda a: a_dm_body_present(a[0] if a else [], a[1] if len(a) > 1 else 1),
+    "dm_body_absent":      lambda a: a_dm_body_absent(a[0] if a else []),
+    "dm_body_min_length":  lambda a: a_dm_body_min_length(a[0] if a else 20),
+    "dm_readable":         lambda a: a_dm_readable(),
 }
 _ASSERT_DESC = {"no_tool_leak": "ツール漏れ無し", "no_work_narration": "実況無し",
                 "no_false_send_claim": "既成事実化しない", "has_confirm_card": "承認カードが出る",
                 "mentions_online_pjs": "online PJを列挙", "absent": "禁止文字列なし", "present": "期待文字列あり",
-                "covers_projects": "複数PJを網羅", "not_only": "単一PJに偏らない", "min_length": "途中で切れない"}
+                "covers_projects": "複数PJを網羅", "not_only": "単一PJに偏らない", "min_length": "途中で切れない",
+                "dm_body_present": "DM本文に用件/データあり", "dm_body_absent": "DM本文に禁止語なし",
+                "dm_body_min_length": "DM本文が実質的", "dm_readable": "DM本文が読みやすい"}
 
 
 def _resolve(spec):
