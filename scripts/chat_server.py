@@ -1566,6 +1566,29 @@ _FEWSHOT_BANK = os.path.join(HERE, "learn_bank.jsonl")
 _FEWSHOT_USED = []                                  # 直近リクエストで注入した規則id(trace用・fewshot_used)
 
 
+_DIGESTS_YAML = os.path.join(HERE, "digests.yaml")
+_dg_cache = {"mtime": 0.0, "cfg": {}}
+
+
+def _dg(name, text):
+    """設定のデータ化(Fable5柱2): digests.yaml の enabled/budget を適用。本体ロジックはPython関数のまま、
+    運用制御だけ外出し=暴れたdigestをデプロイ無しで止める/予算を回す。ホットリロード(mtime)。"""
+    try:
+        m = os.path.getmtime(_DIGESTS_YAML)
+        if m != _dg_cache["mtime"]:
+            import yaml
+            _dg_cache["cfg"] = yaml.safe_load(open(_DIGESTS_YAML, encoding="utf-8")) or {}
+            _dg_cache["mtime"] = m
+    except Exception:
+        pass
+    cfg = _dg_cache["cfg"].get(name, {})
+    if cfg.get("enabled") is False:                       # YAMLで無効化→注入ゼロ(即停止)
+        return ""
+    b = cfg.get("budget")
+    t = text or ""
+    return t[:b] if (b and len(t) > b) else t
+
+
 def fewshot_digest(query):
     """【教訓の注入=flywheel柱1の出口(Fable5)】learn_bank の規則から、この問いに関連する上位3-5則を
     プロンプト末尾に注入し qwenの型を矯正する。全50則は入れず類似上位のみ(合計~400トークン上限)。
@@ -4127,19 +4150,19 @@ class H(BaseHTTPRequestHandler):
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
-            cal += activity_digest(who)               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
-            cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
-            cal += projects_digest(last_user)         # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
-            cal += active_tasks_digest(last_user)     # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
-            cal += fewshot_digest(last_user)          # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
-            cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
-            cal += open_loop_digest(who)              # 未了の約束(OPEN LOOP)を⚙レコードから注入
-            cal += traits_digest(who, last_user)      # 人物の癖(構造化trait)を注入=裏取りの手がかり
-            cal += calendar_digest(last_user)         # Calendar 左脳を必要時に先読み注入
-            cal += meeting_digest(last_user)          # 会議/議事録クエリは最新会議も注入
-            cal += portfolio_digest(last_user)        # 実績クエリは自社Vimeo実績を注入
-            cal += cross_digest(last_user)            # 横断クエリは全PJ遅延サマリを注入
-            cal += shot_assignee_digest(last_user)    # カット×担当(shot×task結合)も注入
+            cal += _dg("activity", activity_digest(who))               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
+            cal += _dg("verify", verify_digest(who, last_user))      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
+            cal += _dg("projects", projects_digest(last_user))         # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
+            cal += _dg("active_tasks", active_tasks_digest(last_user))     # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
+            cal += _dg("fewshot", fewshot_digest(last_user))          # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
+            cal += _dg("existence", existence_digest(who, last_user))   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
+            cal += _dg("open_loop", open_loop_digest(who))              # 未了の約束(OPEN LOOP)を⚙レコードから注入
+            cal += _dg("traits", traits_digest(who, last_user))      # 人物の癖(構造化trait)を注入=裏取りの手がかり
+            cal += _dg("calendar", calendar_digest(last_user))         # Calendar 左脳を必要時に先読み注入
+            cal += _dg("meeting", meeting_digest(last_user))          # 会議/議事録クエリは最新会議も注入
+            cal += _dg("portfolio", portfolio_digest(last_user))        # 実績クエリは自社Vimeo実績を注入
+            cal += _dg("cross", cross_digest(last_user))            # 横断クエリは全PJ遅延サマリを注入
+            cal += _dg("shot_assignee", shot_assignee_digest(last_user))    # カット×担当(shot×task結合)も注入
             diag_hint = DIAG_HINT
             prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
                       + fullnote
@@ -4210,19 +4233,19 @@ class H(BaseHTTPRequestHandler):
         # 出力指針(表/mermaid/Canvas/動画)を system に追記。
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
         sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
-        sysadd += activity_digest(who)                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
-        sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
-        sysadd += projects_digest(ll_user)               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
-        sysadd += active_tasks_digest(ll_user)           # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
-        sysadd += fewshot_digest(ll_user)                # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
-        sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
-        sysadd += open_loop_digest(who)                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
-        sysadd += traits_digest(who, ll_user)            # 人物の癖(構造化trait)を注入=裏取りの手がかり
-        sysadd += meeting_digest(ll_user)               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
-        sysadd += shot_assignee_digest(ll_user)         # カット×担当も注入
-        sysadd += image_asset_digest(ll_user)           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
-        sysadd += portfolio_digest(ll_user)             # 実績クエリは自社Vimeo実績を注入
-        sysadd += cross_digest(ll_user)                 # 横断クエリは全PJ遅延サマリを注入
+        sysadd += _dg("activity", activity_digest(who))                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
+        sysadd += _dg("verify", verify_digest(who, ll_user))            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
+        sysadd += _dg("projects", projects_digest(ll_user))               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
+        sysadd += _dg("active_tasks", active_tasks_digest(ll_user))           # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
+        sysadd += _dg("fewshot", fewshot_digest(ll_user))                # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
+        sysadd += _dg("existence", existence_digest(who, ll_user))         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
+        sysadd += _dg("open_loop", open_loop_digest(who))                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
+        sysadd += _dg("traits", traits_digest(who, ll_user))            # 人物の癖(構造化trait)を注入=裏取りの手がかり
+        sysadd += _dg("meeting", meeting_digest(ll_user))               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
+        sysadd += _dg("shot_assignee", shot_assignee_digest(ll_user))         # カット×担当も注入
+        sysadd += _dg("image_asset", image_asset_digest(ll_user))           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
+        sysadd += _dg("portfolio", portfolio_digest(ll_user))             # 実績クエリは自社Vimeo実績を注入
+        sysadd += _dg("cross", cross_digest(ll_user))                 # 横断クエリは全PJ遅延サマリを注入
         try:
             hits = (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user)
                     else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))

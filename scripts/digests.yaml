@@ -1,0 +1,60 @@
+active_tasks:
+  budget: 4000
+  enabled: true
+  note: 全PJの進行中wip
+activity:
+  budget: 3000
+  enabled: true
+  note: 動向層
+calendar:
+  budget: 4000
+  enabled: true
+  note: 左脳照会
+cross:
+  budget: 3000
+  enabled: true
+  note: 全PJ遅延サマリ
+existence:
+  budget: 3000
+  enabled: true
+  note: 資料有無は捏造禁止
+fewshot:
+  budget: 700
+  enabled: true
+  note: 過去の教訓(learn_bank)
+image_asset:
+  budget: 2500
+  enabled: true
+  note: 画像資産
+meeting:
+  budget: 3000
+  enabled: true
+  note: 議事録
+open_loop:
+  budget: 2500
+  enabled: true
+  note: 未了の約束
+portfolio:
+  budget: 3000
+  enabled: true
+  note: Vimeo実績
+projects:
+  budget: 4000
+  enabled: true
+  note: 進行中PJ一覧
+shot_assignee:
+  budget: 2000
+  enabled: true
+  note: カット担当
+traits:
+  budget: 2000
+  enabled: true
+  note: 人の癖
+user_profile:
+  budget: 2000
+  enabled: true
+  note: 蓄積理解
+verify:
+  budget: 3000
+  enabled: true
+  note: 状態はlive裏取り
