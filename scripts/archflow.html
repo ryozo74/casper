@@ -14,7 +14,7 @@
 </style></head>
 <body>
 <div class="top"><h1>Casper 現状アーキテクチャ — React Flow（触れる・ズーム・ドラッグ）</h1>
-<div class="sub">根幹＝<b style="color:#9333ea">🧠 デュアルブレイン</b>：<b style="color:#7e22ce">左脳=構造化データ(事実)</b>＋<b style="color:#15803d">右脳=知識/記憶(文脈)</b>。伴走機構が両脳から接地(retrieve-then-render)して応答 ｜ <b style="color:#dc2626">🔴 未実装6項目=赤</b></div></div>
+<div class="sub">根幹＝<b style="color:#9333ea">🧠 デュアルブレイン</b>：<b style="color:#7e22ce">左脳=構造化データ(事実)</b>＋<b style="color:#15803d">右脳=知識/記憶(文脈)</b>。伴走機構が両脳から接地(retrieve-then-render)して応答 ｜ <b style="color:#16a34a">✅ 自己改善ループ6項目=全実装済(緑・2026-07-09配線完了)</b></div></div>
 <div id="root"><div class="loading">読み込み中…（React Flow を unpkg から取得）</div></div>
 
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
@@ -64,9 +64,9 @@
         {n:"Aurora 図書館"},{n:"Dropbox\n複数1リンク"},{n:"Vimeo tus再開可"},{n:"Discord nibu ch"}
       ]},
       {n:"🔄 自己改善ループ\nFable5 北極星",c:[
-        {n:"trace 稼働"},{n:"eval\ngolden/gen_pending"},{n:"learn_bank\nfew-shot bank",todo:true},
-        {n:"fewshot_digest",todo:true},{n:"health 稼働\n15分cron"},{n:"circuit breaker",todo:true},
-        {n:"設定のデータ化\ndigests.yaml",todo:true},{n:"origin field",todo:true},{n:"attention\n今日の3件",todo:true}
+        {n:"trace 稼働"},{n:"eval\ngolden/gen_pending"},{n:"learn_bank\nfew-shot bank",nw:true},
+        {n:"fewshot_digest",nw:true},{n:"health 稼働\n15分cron"},{n:"circuit breaker",nw:true},
+        {n:"設定のデータ化\ndigests.yaml",nw:true},{n:"origin field",nw:true},{n:"attention\n今日の3件",nw:true}
       ]},
       {n:"✨ 主要機能",c:[
         {n:"朝ブリーフィング\nDM代筆"},{n:"資料作り\n報告書ビルダー"},{n:"整理術\n逆インタビュー"},{n:"Score Uploader\n結晶化"}
@@ -83,7 +83,7 @@
       var id='n'+(idc++); node._id=id;
       var lines=node.n.split('\n'); var w=Math.max(130, Math.max.apply(null,lines.map(function(l){return l.length;}))*13+30);
       var hh=26+lines.length*17; node._w=w; node._h=hh;
-      var todo=!!node.todo, root=!!node.root, l1=depth===1, brain=!!node.brain;
+      var todo=!!node.todo, nw=!!node.nw, root=!!node.root, l1=depth===1, brain=!!node.brain;
       if(brain){ w+=26; hh+=14; node._w=w; node._h=hh; }   // 両脳は一回り大きく=対等に際立たせる
       var mycc = l1 ? catOf(node.n) : cc;
       var bg,bd,col,fw='600', fs='12px';
@@ -91,8 +91,9 @@
       else if(l1){ bg=mycc; bd='#ffffff88'; col='#fff'; fw='800'; }
       else { bg='#ffffff'; bd=hexA(mycc||'#64748b',.55); col='#1e293b'; }
       if(todo){ bg='#fee2e2'; bd='#dc2626'; col='#991b1b'; fw='800'; }
+      if(nw){ bg='#dcfce7'; bd='#16a34a'; col='#166534'; fw='800'; }   // 実装済(NEW・緑)
       if(brain){ fs='14px'; bd='#ffffff'; }               // 両脳=白縁+大きめ文字で対等強調
-      var label=node.n+(todo?'  🔴 未実装':'');
+      var label=node.n+(todo?'  🔴 未実装':(nw?'  ✅ 実装済':''));
       var sh = brain ? '0 0 0 5px '+hexA(mycc,.28)+', 0 6px 16px rgba(0,0,0,.28)'
              : (todo?'0 0 0 4px rgba(220,38,38,.15)':(l1?'0 2px 8px rgba(0,0,0,.15)':'0 1px 3px rgba(0,0,0,.08)'));
       var rf={ id:id, data:{label:label}, position:{x:0,y:0},
@@ -101,7 +102,7 @@
         _w:w, _h:hh };
       nodes.push(rf); byId[id]=rf;
       if(parent!==null) edges.push({ id:'e'+parent+'-'+id, source:parent, target:id, type:'straight',
-        animated:todo, style:{stroke: todo?'#dc2626':hexA(mycc||'#94a3b8',.65), strokeWidth: todo?2.5:1.4} });
+        animated:(todo||nw), style:{stroke: todo?'#dc2626':(nw?'#16a34a':hexA(mycc||'#94a3b8',.65)), strokeWidth: todo?2.5:1.4} });
       (node.c||[]).forEach(function(c){ walk(c,id,depth+1,mycc); });
     }
     walk(T,null,0,null);
