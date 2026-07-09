@@ -367,6 +367,36 @@ def _register_pending(tool, args, uid, summary, thread=None, origin="user", quer
     return pid
 
 
+_DRAFT_SURFACE_RE = re.compile(r"((下書き|承認待ち|滞留|気にかけ|今日の3件).{0,14}(見せ|見た|確認|どう|選択|処理|対応|出し|表示|一覧|中身|内容)|"
+                               r"(見せ|表示|確認|処理).{0,6}(下書き|承認待ち)|溜まって.{0,6}(下書き|承認))", re.I)
+
+
+def _surface_pending_drafts(who, pending_actions, limit=6):
+    """滞留proposed下書きを『承認カード』として再浮上させる=内容が見え・承認/却下ボタンで選択できる状態にする。
+    (Casperが『下書きがある』と言うだけで内容も選択手段も示さぬ問題の解=決定は散文でなくカードで・殿指摘)。
+    返り (総件数, 案内テキスト)。カードは pending_actions に積むとチャット末尾で confirm カードとして描画される。"""
+    if not casper_outbox:
+        return 0, ""
+    try:
+        props = [r for r in casper_outbox.pending(who.get("uid"))
+                 if r.get("tool") in ("send_message", "aurora_create", "aurora_append")]
+    except Exception:
+        return 0, ""
+    props.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    for r in props[:limit]:
+        pid = r["id"]; args = r.get("args") or {}
+        PENDING_ACTIONS[pid] = {"tool": r["tool"], "args": args, "uid": r.get("uid"),
+                                "summary": r.get("summary"), "thread": r.get("thread")}
+        pending_actions.append({"id": pid, "tool": r["tool"], "args": args, "summary": r.get("summary")})
+    if not props:
+        return 0, ""
+    note = (f"承認待ちの下書きが **{len(props)}件** ございます。下の各カードで**内容を確認**し、"
+            "**「送信」か「破棄」を選択**してくだされ（本文の編集も可）。")
+    if len(props) > limit:
+        note += f"（多いため直近{limit}件を表示。残りは順次）"
+    return len(props), note
+
+
 def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None):
     """qwenが send_message を呼ばず DM をテキストで書いた場合の救済(JSONブロック＋プロセ両対応)。
     宛先uid/名＋本文を拾い pending 登録→承認カードを出す(ローカルqwenのfunction-calling不発対策)。"""
@@ -4396,7 +4426,15 @@ class H(BaseHTTPRequestHandler):
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
         # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
         routed = _action_router(ll_user, sysadd, who, convo=msgs) if _looks_like_action(ll_user) else None
-        if routed:
+        # 滞留下書きの浮上: 『下書き見せて/承認待ち確認/気にかけどころ処理』等→実カード(内容+承認/却下)を出す
+        # (決定は散文でなくカードで=殿指摘。新規DM作成意図でない時のみ)
+        if not routed and _DRAFT_SURFACE_RE.search(ll_user) and not _looks_like_action(ll_user):
+            _n, _note = _surface_pending_drafts(who, pending_actions)
+            if pending_actions:
+                routed = {"_surfaced": True, "reply": _note}
+        if routed and routed.get("_surfaced"):      # 浮上=カードは積み済・reply表示のみ(起票しない)
+            final = routed["reply"]
+        elif routed:
             try:
                 summary = _action_summary(routed["tool"], routed["args"])
                 pid = _register_pending(routed["tool"], routed["args"], who.get("uid"), summary,
