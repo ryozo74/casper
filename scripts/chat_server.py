@@ -1558,6 +1558,51 @@ def active_tasks_digest(query):
         return ""
 
 
+_FEWSHOT_BANK = os.path.join(HERE, "learn_bank.jsonl")
+_FEWSHOT_USED = []                                  # 直近リクエストで注入した規則id(trace用・fewshot_used)
+
+
+def fewshot_digest(query):
+    """【教訓の注入=flywheel柱1の出口(Fable5)】learn_bank の規則から、この問いに関連する上位3-5則を
+    プロンプト末尾に注入し qwenの型を矯正する。全50則は入れず類似上位のみ(合計~400トークン上限)。
+    人が触れた失敗から蒸留された規則ゆえ『使うほど型が矯正される』。"""
+    global _FEWSHOT_USED
+    _FEWSHOT_USED = []
+    try:
+        if not query or not os.path.exists(_FEWSHOT_BANK):
+            return ""
+        rules = []
+        for ln in open(_FEWSHOT_BANK, encoding="utf-8"):
+            if ln.strip():
+                try:
+                    rules.append(json.loads(ln))
+                except Exception:
+                    pass
+        if not rules:
+            return ""
+        # 簡易関連度: 問いと規則(situation)の文字bigram重なり(日本語は空白無しゆえ語分割でなくn-gram)。閾値未満は注入ゼロ。
+        def _bg(s):
+            s = re.sub(r"[\s、。・！？]", "", str(s))
+            return set(s[i:i + 2] for i in range(len(s) - 1))
+        qset = _bg(query)
+        scored = []
+        for r in rules:
+            rset = _bg(str(r.get("situation", "")) + str(r.get("lesson", "")))
+            ov = len(qset & rset)
+            if ov >= 3:                              # 閾値: bigram3個以上一致(無関係な規則を注入せぬ)
+                scored.append((ov, r))
+        scored.sort(key=lambda x: -x[0])
+        top = [r for _, r in scored[:5]]
+        if not top:
+            return ""
+        _FEWSHOT_USED = [r.get("id") for r in top]
+        lines = "\n".join("・" + str(r.get("lesson", "")) for r in top)
+        return ("\n\n## 【過去の教訓(必ず守れ・人の修正から学習)】\n"
+                "同種の状況で以前 利用者に指摘・修正された点。今回もこれらを守って答えよ:\n" + lines)
+    except Exception:
+        return ""
+
+
 def open_loop_digest(who):
     """【OPEN LOOPレジストリの先読み注入】この人が依頼元/通知先の"未了の約束"を⚙レコードから注入。
     帯の散文でなくレコードゆえ、Casperは常に把握し漏らさない(Fable5 #2・hori事件の恒久解)。"""
@@ -4074,6 +4119,7 @@ class H(BaseHTTPRequestHandler):
             cal += verify_digest(who, last_user)      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
             cal += projects_digest(last_user)         # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
             cal += active_tasks_digest(last_user)     # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
+            cal += fewshot_digest(last_user)          # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
             cal += existence_digest(who, last_user)   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += open_loop_digest(who)              # 未了の約束(OPEN LOOP)を⚙レコードから注入
             cal += traits_digest(who, last_user)      # 人物の癖(構造化trait)を注入=裏取りの手がかり
@@ -4156,6 +4202,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += verify_digest(who, ll_user)            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
         sysadd += projects_digest(ll_user)               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
         sysadd += active_tasks_digest(ll_user)           # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
+        sysadd += fewshot_digest(ll_user)                # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
         sysadd += existence_digest(who, ll_user)         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += open_loop_digest(who)                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
         sysadd += traits_digest(who, ll_user)            # 人物の癖(構造化trait)を注入=裏取りの手がかり
@@ -4366,7 +4413,7 @@ class H(BaseHTTPRequestHandler):
                                    "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
                                    "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val,
                                    "guarded_claim": _grd, "abstained": _abstain,   # 棄権(Fable #3-5/7-5: 棄権率の定点観測)
-                                   "final_len": len(final), "cards": len(pending_actions)})
+                                   "final_len": len(final), "cards": len(pending_actions), "fewshot_used": list(_FEWSHOT_USED)})
             except Exception:
                 pass
         final, diagram = render_diagram(final)
