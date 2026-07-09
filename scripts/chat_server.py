@@ -488,11 +488,25 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
 def _strip_tool_leak(text):
     """qwenがツール呼びをテキスト(```tool ... / 生JSON)で書いた漏れ、及び『〜を取得します』等の作業実況を除去。
     (retrieve-then-renderで事実は注入済ゆえツールは不要。漏れた宣言だけ残るのを掃除)。"""
-    if not text or ("```" not in text and "します" not in text and '"tool"' not in text):
+    if not text or ("```" not in text and "します" not in text and '"tool"' not in text
+                    and "<tool" not in text and '"name"' not in text):
         return text
     text = re.sub(r"```tool.*?```", "", text, flags=re.S)          # ツール呼びの漏れブロック
+    text = re.sub(r"</?tool_(?:code|call)>", "", text)             # <tool_code>/<tool_call> タグ(qwenのXML風漏れ)
     text = re.sub(r"```(?:python|json|tool_code)?\s*(?:calendar_lookup|get_projects|get_today_tasks|get_events)\([^`]*?```",
                   "", text, flags=re.S)
+    # {"name":"<tool名>","arguments"/"parameters":{..}} 形式の漏れ(括弧の釣り合いで除去・calendar_lookup等)
+    _nm = re.search(r'\{\s*"name"\s*:\s*"(calendar_lookup|get_[a-z_]+|search_vault|aurora_\w+|vimeo_\w+|update_task|send_message)"', text)
+    if _nm:
+        _st = _nm.start(); _d = 0
+        for _j in range(_st, len(text)):
+            if text[_j] == "{":
+                _d += 1
+            elif text[_j] == "}":
+                _d -= 1
+                if _d == 0:
+                    text = text[:_st] + text[_j + 1:]; break
+    text = re.sub(r"(?m)^\s*【?live】?[^\n]*?(取得|照会|確認)(して|し).*?(します|確認).*$", "", text)   # 【live】取得して確認します 等の実況
     # 生JSONのtool-call漏れ {"tool":"..","params"/"arguments":{..}} を除去(salvageが拾えなかった残り・生JSONを殿に見せぬ)
     if '"tool"' in text:
         _ti = text.find('"tool"'); _st = text.rfind("{", 0, _ti) if _ti >= 0 else -1
@@ -1472,10 +1486,15 @@ def projects_digest(query):
     (cal_projects.json)から online PJ を本日日付＋納期超過印つきで注入し、ツールを呼ばず一覧から答えさせる
     (qwenのツール呼び失敗＋"上記"=直前回答を参照できぬ文脈欠落 の両方を機構で回避)。"""
     try:
-        if not query or not _PROJ_Q_RE.search(query):
+        if not query:
             return ""
         items = json.load(open("/tmp/cal_projects.json")).get("items", [])
         online = [p for p in items if str(p.get("display_status") or "online") == "online"]
+        # 発火: 一般PJ語(_PROJ_Q_RE) or online PJ名を直接含む問い(『marukomeは今どうなってる?』等の個別PJ照会=
+        # ツール呼びの漏れを防ぐ・データを注入して一覧から答えさせる)
+        _name_hit = any(len(str(p.get("name") or "")) >= 3 and str(p.get("name")) in query for p in online)
+        if not (_PROJ_Q_RE.search(query) or _name_hit):
+            return ""
         if not online:
             return ""
         today = datetime.date.today().isoformat()
@@ -4442,6 +4461,8 @@ class H(BaseHTTPRequestHandler):
         _val = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
         _grd = final != _pre
+        if not final.strip():                                        # 出口検問で全消し(応答全体がツール漏れ等)→空を返さず graceful に
+            final = "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。"
         if casper_breaker:                          # z8a(qwen)の健全性を記録: 成功可否+レイテンシ→連続失敗でred=クラウド縮退の判断材料
             try:
                 casper_breaker.record("z8a", ok=not final.startswith("[error]"),
