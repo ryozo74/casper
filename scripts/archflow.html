@@ -13,7 +13,8 @@
 </style></head>
 <body>
 <div class="top"><h1>Casper 現状アーキテクチャ — React Flow（触れる・ズーム・ドラッグ）</h1>
-<div class="sub"><b>🔴 赤＝tool化されていない未実装6項目</b> ／ 青系＝稼働中。2026-07-09 実コード基準。</div></div>
+<div class="sub"><b>🔴 未実装＝tool化されていない6項目</b> ／ <span style="color:#7dd3fc">✅ 稼働中</span> ｜
+🖥️入口 ⚙️サーバ 🎯接地機構 📤アクション 🔧ツール 📚知識 🧠左脳 🔗外部連携 🔄自己改善 🎛️モデル ✨機能</div></div>
 <div id="root"><div class="loading">読み込み中…（React Flow を CDN から取得）</div></div>
 <script type="module">
 import React from 'https://esm.sh/react@18.3.1';
@@ -89,18 +90,26 @@ const T = {n:"Casper 伴走AI", root:true, c:[
   ]}
 ]};
 
+// ── カテゴリ別アイコン(一目で分かるように) ──
+const ICON={'入口':'🖥️','サーバ':'⚙️','接地':'🎯','アクション':'📤','ツール':'🔧','知識':'📚',
+  '左脳':'🧠','外部':'🔗','自己改善':'🔄','モデル':'🎛️','主要機能':'✨'};
+function iconFor(name){ for(const k in ICON){ if(name.indexOf(k)===0){ return ICON[k]; } } return ''; }
+
 // ── 木 → nodes/edges ──
 let idc=0; const nodes=[], edges=[];
 function walk(node, parent, depth){
   const id='n'+(idc++);
-  const lines=node.n.split('\n'); const w=Math.max(120, Math.max(...lines.map(l=>l.length))*13+24);
+  const lines=node.n.split('\n'); const w=Math.max(128, Math.max(...lines.map(l=>l.length))*13+34);
   const hgt=26+lines.length*16;
   const todo=!!node.todo, root=!!node.root, l1=depth===1;
   let bg='#132033', bd='#2a3b57', col='#cfe0f5', fw='500';
   if(root){ bg='#1e3a5f'; bd='#3b82f6'; col='#fff'; fw='700'; }
   else if(l1){ bg='#182a44'; bd='#38598c'; col='#dbeafe'; fw='700'; }
   if(todo){ bg='#3a1626'; bd='#f0679a'; col='#ffd7e6'; fw='800'; }
-  nodes.push({ id, data:{label: node.n + (todo?'  🔴':'')}, position:{x:0,y:0},
+  // ラベル: root=🤖 / カテゴリ(第1層)=専用アイコン / 未実装=🔴末尾。稼働の第1層には✅も添える
+  let icon = root ? '🤖 ' : (l1 ? (iconFor(node.n)+' ') : '');
+  let label = icon + node.n + (todo ? '  🔴 未実装' : (l1 ? '  ✅' : ''));
+  nodes.push({ id, data:{label}, position:{x:0,y:0},
     style:{ background:bg, color:col, border:'1.5px solid '+bd, borderRadius:'10px', fontSize:'12px',
             fontWeight:fw, padding:'6px 10px', width:w, whiteSpace:'pre-line', textAlign:'center',
             boxShadow: todo?'0 0 0 3px rgba(240,103,154,.18)':'none' },
