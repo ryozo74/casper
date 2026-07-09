@@ -58,11 +58,14 @@ def _key(tool, args, uid):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def propose(tool, args, uid, summary, thread=None):
-    """アクションを台帳に proposed で起票。返り=レコード(id を含む)。"""
+def propose(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None):
+    """アクションを台帳に proposed で起票。返り=レコード(id を含む)。
+    origin: user(利用者の依頼)|casper(先回り提案) / query: 発端の発話 / trace_id: 対応トレース。
+    query+trace_id は教師信号の三つ組(文脈,モデル案,人の完成形)の"文脈"を後で復元する為に必須(Fable5指摘)。"""
     rec = {"id": uuid.uuid4().hex[:12], "key": _key(tool, args, uid), "ts": _now(),
            "tool": tool, "args": args, "uid": str(uid or ""), "summary": summary,
-           "thread": thread, "state": "proposed", "result": None, "updated": _now()}
+           "thread": thread, "state": "proposed", "result": None, "updated": _now(),
+           "origin": origin, "query": query, "trace_id": trace_id}
     with _LOCK:
         with open(STORE, "a", encoding="utf-8") as f:      # O_APPEND(transition の再load-merge と直列化)
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

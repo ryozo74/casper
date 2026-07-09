@@ -345,22 +345,25 @@ def _action_summary(tool, args):
     except Exception:
         return tool
 
-def _register_pending(tool, args, uid, summary, thread=None):
+def _register_pending(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None):
+    # query(発端の発話)+trace_id: 承認時の編集差分から教師信号の三つ組を復元する為に必須(Fable5指摘・A実装)
     if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
         try:
-            pid = casper_outbox.propose(tool, args, uid, summary, thread=thread)["id"]
+            pid = casper_outbox.propose(tool, args, uid, summary, thread=thread,
+                                        origin=origin, query=query, trace_id=trace_id)["id"]
         except Exception:
             pid = uuid.uuid4().hex[:12]
     else:
         pid = uuid.uuid4().hex[:12]
-    PENDING_ACTIONS[pid] = {"tool": tool, "args": args, "uid": str(uid or ""), "summary": summary}
+    PENDING_ACTIONS[pid] = {"tool": tool, "args": args, "uid": str(uid or ""), "summary": summary,
+                            "origin": origin, "query": query, "trace_id": trace_id}
     if len(PENDING_ACTIONS) > 50:                  # 古いものから間引き(メモリキャッシュの肥大防止・真実源はoutbox)
         for k in list(PENDING_ACTIONS)[:-50]:
             PENDING_ACTIONS.pop(k, None)
     return pid
 
 
-def _salvage_text_toolcall(final, who, pending_actions):
+def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None):
     """qwenが send_message を呼ばず DM をテキストで書いた場合の救済(JSONブロック＋プロセ両対応)。
     宛先uid/名＋本文を拾い pending 登録→承認カードを出す(ローカルqwenのfunction-calling不発対策)。"""
     if pending_actions:                            # 既にツール呼出で pending 済なら不要
@@ -380,7 +383,7 @@ def _salvage_text_toolcall(final, who, pending_actions):
             if who.get("uid"):
                 args["actor_id"] = who["uid"]
             summary = _action_summary("aurora_create", args)
-            pid = _register_pending("aurora_create", args, who.get("uid"), summary)
+            pid = _register_pending("aurora_create", args, who.get("uid"), summary, origin="user", query=query, trace_id=trace_id)
             pending_actions.append({"id": pid, "tool": "aurora_create", "args": args, "summary": summary})
             f2 = re.sub(r"(作成します|保存します|作成しました|保存しました|作成しますか)", "下書きしました", f)
             return f2 + f"\n\n（↓の承認カードで確認し、ボタンを押すと Aurora に「{title}」として保存されます）"
@@ -465,7 +468,7 @@ def _salvage_text_toolcall(final, who, pending_actions):
     if who.get("uid"):
         args["actor_id"] = who["uid"]
     summary = _action_summary("send_message", args)
-    pid = _register_pending("send_message", args, who.get("uid"), summary)
+    pid = _register_pending("send_message", args, who.get("uid"), summary, origin="user", query=query, trace_id=trace_id)
     pending_actions.append({"id": pid, "tool": "send_message", "args": args, "summary": summary})
     if cut:
         f = (f[:cut[0]] + f[cut[1]:]).strip()
@@ -3896,6 +3899,8 @@ class H(BaseHTTPRequestHandler):
                     pend["args"] = appr["args"]            # outboxの確定args(本文編集反映済)を採用
                 casper_outbox.mark_executing(pid)
             elif body_edit is not None and isinstance(pend.get("args"), dict):
+                if body_edit != pend["args"].get("body"):    # 教師信号: LLM原案を body_orig へ退避(outbox不在時の漏れ穴を塞ぐ・Fable指摘)
+                    pend["body_orig"] = pend["args"].get("body")
                 pend["args"]["body"] = body_edit
             PENDING_ACTIONS.pop(pid, None)                 # キャッシュから除去(以後の真実源はoutboxのstate)
             pend["summary"] = _action_summary(pend["tool"], pend["args"])
@@ -4096,6 +4101,7 @@ class H(BaseHTTPRequestHandler):
         # --- Ollama(local) backend (qwen3.6:27b 等・自律 tool-calling) ---
         ll_user = next((m.get("content", "") for m in reversed(msgs)
                         if m.get("role") == "user"), "")
+        _tid = uuid.uuid4().hex[:12]                 # このリクエストのtrace_id(outbox↔trace 結線・教師信号の文脈復元用・A実装)
         if not _qwen_is_warm():                     # 縮退(Fable): 冷間なら"少々お待ちを"を即返す(本回答は同一ストリームで続く)
             try:
                 self.wfile.write((json.dumps({"status": "🔥 Casper を起こしております、少々お待ちを…（初回は十数秒かかり申す）"},
@@ -4201,7 +4207,8 @@ class H(BaseHTTPRequestHandler):
         if routed:
             try:
                 summary = _action_summary(routed["tool"], routed["args"])
-                pid = _register_pending(routed["tool"], routed["args"], who.get("uid"), summary)
+                pid = _register_pending(routed["tool"], routed["args"], who.get("uid"), summary,
+                                        origin="user", query=str(ll_user)[:400], trace_id=_tid)
                 try:
                     PENDING_ACTIONS[pid]["thread"] = thr
                 except Exception:
@@ -4236,7 +4243,8 @@ class H(BaseHTTPRequestHandler):
                                 args["actor_id"] = who["uid"]          # actor_id を本人uidで強制(qwen のspoof防止・schema必須対応)
                             if fn in MCP_SIDE_EFFECT:                  # 副作用系=Stage2 承認ゲート(pending 登録・自動実行せず)
                                 summary = _action_summary(fn, args)
-                                pid = _register_pending(fn, args, who.get("uid"), summary)
+                                pid = _register_pending(fn, args, who.get("uid"), summary,
+                                                        origin="user", query=str(ll_user)[:400], trace_id=_tid)
                                 pending_actions.append({"id": pid, "tool": fn, "args": args, "summary": summary})
                                 result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
                                           "⚠️ **まだ実行しておらぬ**。ユーザーが画面下の承認ボタンを押すまで送信/実行されぬ。"
@@ -4266,7 +4274,8 @@ class H(BaseHTTPRequestHandler):
                                 elif fn == "aurora_append" and not args.get("doc_id") and cur:
                                     args["doc_id"] = cur["doc_id"]
                                 summary = _action_summary(efn, args)
-                                pid = _register_pending(efn, args, who.get("uid"), summary)
+                                pid = _register_pending(efn, args, who.get("uid"), summary,
+                                                        origin="user", query=str(ll_user)[:400], trace_id=_tid)
                                 PENDING_ACTIONS[pid]["thread"] = thr
                                 PENDING_ACTIONS[pid]["title"] = args.get("title", "")
                                 pending_actions.append({"id": pid, "tool": efn, "args": args, "summary": summary})
@@ -4293,7 +4302,7 @@ class H(BaseHTTPRequestHandler):
             final = "(応答を得られませなんだ)"
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
         _pre = final
-        final = _salvage_text_toolcall(final, who, pending_actions)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
+        final = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         _salv = final != _pre; _pre = final
         final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
         _val = final != _pre; _pre = final
@@ -4303,7 +4312,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 _abstain = bool(re.search(r"(見当たら|確認できた範囲|わかりませ|分かりませ|存じませ|"
                                           r"該当(する|情報|資料).{0,8}(見つか|ありませ|無い|なし))", final))
-                casper_trace.emit({"query": str(ll_user)[:200], "actor": who.get("uid"), "thread": thr,
+                casper_trace.emit({"trace_id": _tid, "query": str(ll_user)[:200], "actor": who.get("uid"), "thread": thr,
                                    "routed": bool(routed), "action": (routed or {}).get("tool"),
                                    "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
                                    "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val,
