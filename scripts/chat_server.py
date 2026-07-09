@@ -65,6 +65,10 @@ try:
 except Exception:
     casper_health = None
 try:
+    import casper_breaker                          # サーキットブレーカー(依存ごと縮退/自動復帰・Fable北極星 柱2)
+except Exception:
+    casper_breaker = None
+try:
     import casper_doc                             # 節構造ドキュメント(資料作り・節単位再生成/版管理・Fable UI設計)
 except Exception:
     casper_doc = None
@@ -4412,6 +4416,12 @@ class H(BaseHTTPRequestHandler):
         _val = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
         _grd = final != _pre
+        if casper_breaker:                          # z8a(qwen)の健全性を記録: 成功可否+レイテンシ→連続失敗でred=クラウド縮退の判断材料
+            try:
+                casper_breaker.record("z8a", ok=not final.startswith("[error]"),
+                                      latency_ms=int((time.time() - _t0) * 1000))
+            except Exception:
+                pass
         if casper_trace:                            # トレース: 判断点を1req=1行で記録(事後分析基盤・Fable #7-1)
             try:
                 _abstain = bool(re.search(r"(見当たら|確認できた範囲|わかりませ|分かりませ|存じませ|"
