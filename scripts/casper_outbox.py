@@ -22,7 +22,7 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.join(HERE, "casper_outbox.jsonl")
 _LOCK = threading.Lock()
-_TERMINAL = {"sent", "rejected"}
+_TERMINAL = {"sent", "rejected", "expired"}
 
 
 def _now():
@@ -129,6 +129,10 @@ def mark_failed(pid, err=""):
 
 def reject(pid, uid=None):
     return _transition(pid, "rejected", expect="proposed", uid=uid)
+
+
+def expire(pid):                                       # proposed>7日を自動失効(台帳を生きた承認待ちに保つ・attention)
+    return _transition(pid, "expired", expect="proposed")
 
 
 def pending(uid=None):

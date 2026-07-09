@@ -2585,6 +2585,14 @@ def open_briefing(who):
         lines += dm_lines
     if uid is None and not who.get("authed"):
         lines.append("ログイン頂ければ、本日のタスク・新着DMもお知らせいたす。")
+    if uid:                                               # 今日の3件(attention・柱3の燃料ポンプ): 滞留下書き/未了/納期超過を先回り提示
+        try:
+            import attention as _att
+            _al = _att.briefing_lines(uid)
+            if _al:
+                lines.append(_al)
+        except Exception:
+            pass
     return "\n".join(lines)
 
 
@@ -4631,6 +4639,13 @@ def _events_puller():
                 if h.get("deviations"):
                     print(f"[health] 🔴 逸脱 {len(h['deviations'])}件: "
                           + ", ".join(d['metric'] for d in h['deviations']), flush=True)
+            except Exception:
+                pass
+            try:                                        # attention: proposed>7日を自動失効(台帳を生きた承認待ちに保つ)
+                import attention as _att
+                _ex = _att.expire_stale()
+                if _ex:
+                    print(f"[attention] proposed>7日 {_ex}件を expired 化", flush=True)
             except Exception:
                 pass
         try:                                               # OPEN LOOP 自動追跡: 完了プローブが満たされたら閉じる
