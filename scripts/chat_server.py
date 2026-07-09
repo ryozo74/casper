@@ -520,7 +520,7 @@ def _strip_tool_leak(text):
                     if _d == 0:
                         text = (text[:_st] + text[_j + 1:]); break
         text = re.sub(r"```(?:json)?\s*```", "", text)             # 空になったコードフェンス
-    text = re.sub(r"(?m)^.{0,40}(を確認するため.*?|を)(取得|照会|確認)します。?\s*$", "", text)   # 作業実況行
+    text = re.sub(r"(?m)^.{0,70}(を|から)[^。\n]{0,25}(取得|照会|確認|参照|チェック)(し|いた)ます。?\s*$", "", text)   # 作業実況行(『〜をCalendarから照会します』等)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -1580,6 +1580,26 @@ def active_tasks_digest(query):
                 f"全プロジェクトで進行中のタスクは計 {len(act)}件。**この一覧を根拠に答えよ。"
                 "get_today_tasks(本日締切のみ)や特定PJ(marukome等)に狭めず、全PJの進行中を示せ。"
                 "『動いているタスク』の問いには本一覧が答え(本日締切とは別物)**:\n" + "\n".join(lines))
+    except Exception:
+        return ""
+
+
+def _pj_status_fallback(query):
+    """出口検問で全消し(qwenがナレーションだけ吐いた等)の救済: 問いが指す online PJ の状態を
+    Calendarデータから決定的に答える(retrieve-then-render・LLM非依存)。無ければ空。"""
+    try:
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        today = datetime.date.today().isoformat()
+        for p in items:
+            nm = str(p.get("name") or "")
+            if len(nm) >= 3 and nm in (query or "") and str(p.get("display_status") or "online") == "online":
+                due = str(p.get("end_date") or "")[:10]
+                late = bool(due) and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled")
+                line = f"**{nm}** の現状:\n・ステータス: {p.get('status')}"
+                if due:
+                    line += f"\n・納期: {due}" + ("（🔴 納期超過）" if late else "（予定内）")
+                return line
+        return ""
     except Exception:
         return ""
 
@@ -4461,8 +4481,8 @@ class H(BaseHTTPRequestHandler):
         _val = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
         _grd = final != _pre
-        if not final.strip():                                        # 出口検問で全消し(応答全体がツール漏れ等)→空を返さず graceful に
-            final = "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。"
+        if not final.strip() and not pending_actions:                # 出口検問で全消し(ツール漏れ等)かつカード無し→PJ状態を救済 or graceful
+            final = _pj_status_fallback(ll_user) or "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。"
         if casper_breaker:                          # z8a(qwen)の健全性を記録: 成功可否+レイテンシ→連続失敗でred=クラウド縮退の判断材料
             try:
                 casper_breaker.record("z8a", ok=not final.startswith("[error]"),
