@@ -3097,6 +3097,8 @@ class H(BaseHTTPRequestHandler):
             page = "play.html"
         elif self.path in ("/seiri", "/seiri.html"):
             page = "seiri.html"
+        elif self.path in ("/arch", "/arch.html"):     # 現状アーキテクチャ マインドマップ(mermaid・Casperがscript実行)
+            page = "arch.html"
         elif self.path == "/api/seiri/projects":       # ① online PJ 一覧(整理対象の候補)
             try:
                 self._json({"projects": seiri_projects(identify(self))})

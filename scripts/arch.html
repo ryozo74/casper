@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Casper アーキテクチャ マインドマップ</title>
+<style>
+  body{margin:0;background:#0b1220;color:#e6edf6;font-family:-apple-system,"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif}
+  .top{padding:16px 20px;border-bottom:1px solid #22304a}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:#93a4bd;font-size:13px}
+  .legend{margin-top:8px;font-size:12.5px;color:#93a4bd}
+  .legend b{color:#f0679a}
+  .mmwrap{padding:10px;overflow:auto}
+  .mermaid{min-width:1200px}
+  .err{color:#f0679a;padding:20px;white-space:pre-wrap;font-size:13px}
+</style></head>
+<body>
+<div class="top">
+  <h1>Casper 現状アーキテクチャ — マインドマップ</h1>
+  <div class="sub">2026-07-09 実コード基準（chat_server.py + casper_*.py 17モジュール + chat.html）</div>
+  <div class="legend"><b>🔴 = tool化（program化）されていない＝未実装</b>（6項目・すべて自己改善ループの配線待ち）</div>
+</div>
+<div class="mmwrap"><pre class="mermaid" id="mm">
+mindmap
+  root((Casper 伴走AI))
+    入口 フロント chat.html
+      チャットUI 疑似ストリーミング
+      開門ブリーフィング 挨拶+本日タスク+新着DM+逆IV
+      承認カード 副作用は必ず承認ゲート
+      フィードバック 5評価
+        🙅ヒアリング→修正リスト corrections
+      資料パネル 節ごと編集/再生成/版
+      + メニュー
+        Score Uploader
+        報告書ビルダー
+        資料化 makedoc
+        Dropbox 複数D&D 1リンク
+      整理術 seiri
+      描画 md/表/mermaid/canvas/引用
+      コピー execCommandフォールバック HTTP対応
+    サーバ chat_server.py 8770
+      リクエスト処理
+        identify 認証 who/uid
+        digests注入 retrieve-then-render
+        build_sys 日付は末尾でKV安定
+        ollama_chat ツールループ
+        salvage 漏れ救済
+        exit検問 P1
+        履歴を直近に絞る
+        疑似ストリーム配信
+      backend切替
+        ローカルqwen z8a 主
+        クラウドClaude sonnet 縮退迂回
+    接地機構 grounding
+      digests 15種
+        projects_digest 進行中PJ
+        active_tasks_digest 全PJのwip
+        verify_digest 状態はlive裏取り
+        existence_digest 資料有無は捏造禁止
+        open_loop_digest 未了の約束
+        calendar meeting portfolio cross traits activity 他
+      manifest 資産台帳 唯一の真実源
+      原則 事実は機構 LLMは修辞
+    アクション機構 propose-execute-render
+      P2 action_router DM意図の型付き抽出
+        指示語の捏造防止
+        一覧はverbatim 表の行も再現
+      salvage 漏れたツール呼び救済
+      P1 完了詐称の打消
+      clean_dm_body 読みやすさ 署名除去
+      outbox 状態機械 proposed approved sent
+    ツール qwen function-calling
+      search_vault 右脳RAG
+      calendar_lookup 左脳
+      MCP send_message DM代筆
+      MCP update_task
+      MCP upload_asset get_messages
+    知識層 右脳 vault Obsidian
+      人物 議事録 動向層 掟 反省 資産影
+      health セルフヘルス
+      RAG casper_rag トライグラム
+      embed casper_embed bge-m3
+      traits 人の癖
+      openloop 未了レジストリ
+    左脳 Calendar Score
+      casper_mcp MCPブリッジ
+      casper_tools REST読取
+      tasks 新19値 APIが単一ソース
+      projects isOverdue派生
+      users roster永続キャッシュ
+    外部連携
+      Aurora 図書館
+      Dropbox 複数1リンク パスワード付
+      Vimeo tus再開可能
+      Discord nibu ch
+      Score BFF Calendar 真実源
+    自己改善ループ 北極星 Fable5
+      柱1 flywheel
+        trace 稼働
+        eval golden gen_pending 部品
+        🔴 learn_bank 未実装
+        🔴 fewshot_digest 未実装
+      柱2 self-repair
+        health 稼働 15分cron
+        🔴 circuit breaker 未実装
+        🔴 設定のデータ化 digests.yaml 未実装
+      柱3 co-working
+        🔴 origin field 未実装
+        🔴 attention 今日の3件 未実装
+      教師信号 body_edit corrections feedback
+    モデル構成
+      qwen3.6 27b z8a
+      num_ctx 12288 keep_alive常駐
+      format json 制約デコード
+      クラウドClaude 縮退時
+    主要機能
+      朝ブリーフィング DM代筆
+      資料作り 報告書ビルダー
+      整理術 逆インタビュー
+      PJ取込 Score Uploader
+      結晶化 Dropbox Vimeo
+</pre></div>
+<script type="module">
+  try{
+    const mermaid = (await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')).default;
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', mindmap: { padding: 8 }, maxTextSize: 90000 });
+    await mermaid.run({ querySelector: '.mermaid' });
+  }catch(e){
+    document.body.insertAdjacentHTML('beforeend','<div class="err">マインドマップ描画に失敗: '+(e&&e.message||e)+'</div>');
+  }
+</script>
+</body></html>
