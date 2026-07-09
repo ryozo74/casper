@@ -1795,6 +1795,46 @@ def ollama_chat(messages, tools=None, num_predict=1536):
         return json.load(r)
 
 
+def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None):
+    """本物のストリーミング版(B・Fable指摘の最大の一手): Ollama stream:True(NDJSON)を読み、content片を
+    emit_fn(chunk)で即クライアントへ→TTFT短縮。返り=組み立てたレスポンス({message:{content,tool_calls}})。
+    tool_call応答はcontentが空ゆえ何も流れない(=text応答だけがストリームされる)。"""
+    body = {"model": A.model, "messages": messages, "stream": True, "think": False,
+            "keep_alive": -1,
+            "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": 0.15, "top_p": 0.9}}
+    if tools:
+        body["tools"] = tools
+    req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    content = ""
+    tcs = None
+    with urllib.request.urlopen(req, timeout=300) as r:
+        for line in r:
+            if not line.strip():
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            mm = o.get("message") or {}
+            c = mm.get("content") or ""
+            if c:
+                content += c
+                if emit_fn:
+                    try:
+                        emit_fn(c)
+                    except Exception:
+                        pass
+            if mm.get("tool_calls"):
+                tcs = mm["tool_calls"]
+            if o.get("done"):
+                break
+    msg = {"role": "assistant", "content": content}
+    if tcs:
+        msg["tool_calls"] = tcs
+    return {"message": msg}
+
+
 def strip_think(s):
     import re
     return re.sub(r"<think>.*?</think>", "", s or "", flags=re.S).strip()
@@ -4217,13 +4257,22 @@ class H(BaseHTTPRequestHandler):
                 final = routed["reply"]
             except Exception:
                 routed = None                       # 起票失敗→通常経路へフォールバック
+        # B) 本物のストリーミング(Fable最大の一手・TTFT短縮): text応答をトークン単位でクライアントへ即送出。
+        # tool_call応答はcontentが空ゆえ流れない。routed(P2アクション)時はカード返信ゆえストリームせず。
+        _sbuf = [""]; _did_stream = [False]
+        def _semit(c):
+            _sbuf[0] += c; _did_stream[0] = True
+            try:
+                self._emit(c)
+            except Exception:
+                pass
         try:
             for it in range(MAXIT):
                 if routed:                          # P2でアクション確定済 → 生成ループをスキップ
                     break
                 last = (it == MAXIT - 1)
                 # 最終反復は tool 無しで強制的に回答させる(空振り無限ループ防止)
-                resp = ollama_chat(working, tools=(None if last else tools))
+                resp = ollama_chat_stream(working, tools=(None if last else tools), emit_fn=_semit)
                 m = resp.get("message", {}) or {}
                 tcs = m.get("tool_calls")
                 if tcs and not last:
@@ -4324,8 +4373,18 @@ class H(BaseHTTPRequestHandler):
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
         dev_log(who, ll_user, final, {"model": A.model, "backend": "ollama"})
-        for i in range(0, len(final), 36):          # 疑似ストリーミング
-            self._emit(final[i:i + 36])
+        # B) 送出: 既にストリーム済(text応答)なら二重送出せず——ただし出口検問/salvage/diagram で本文が
+        #    変わった時のみ replace で差し替え(Fable: 検問はバッファに、修正時のみ末尾で訂正)。
+        _stream_clean = re.sub(r"\n{3,}", "\n\n", _sbuf[0]).strip()
+        if _did_stream[0]:
+            if final != _stream_clean or diagram:
+                try:
+                    self.wfile.write((json.dumps({"replace": final}) + "\n").encode()); self.wfile.flush()
+                except Exception:
+                    pass
+        else:
+            for i in range(0, len(final), 36):      # 未ストリーム(routed等)→従来の疑似ストリーミング
+                self._emit(final[i:i + 36])
         try:
             if diagram:
                 self.wfile.write((json.dumps({"diagram": diagram}) + "\n").encode())

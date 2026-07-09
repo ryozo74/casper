@@ -456,6 +456,7 @@ async function ask(){
         let j; try{ j=JSON.parse(line);}catch(e){ continue; }
         if(j.error){ acc+='\n[error] '+j.error; }
         else if(j.status){ if(!acc){ b.textContent=j.status; log.scrollTop=log.scrollHeight; } continue; }  // 縮退: 本回答前の"少々お待ちを"(accには足さず、本文が来たら上書きされる)
+        else if(j.replace!==undefined){ acc=j.replace; }   // B) 出口検問/salvageで本文が変わった時の差し替え(ストリーム済を訂正)
         else if(j.message&&j.message.content){ acc+=j.message.content; }
         else if(j.diagram){ diagramUrl=j.diagram; }
         else if(j.confirm){ pendingConfirms.push(j.confirm); }
