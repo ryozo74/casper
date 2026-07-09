@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Casper アーキテクチャ — React Flow</title>
+<link rel="stylesheet" href="https://esm.sh/@xyflow/react@12/dist/style.css">
+<style>
+  html,body,#root{margin:0;height:100%;background:#0b1220;color:#e6edf6;font-family:-apple-system,"Hiragino Kaku Gothic ProN","Yu Gothic",system-ui,sans-serif}
+  .top{position:fixed;top:0;left:0;right:0;z-index:10;padding:10px 16px;background:rgba(11,18,32,.92);border-bottom:1px solid #22304a}
+  .top h1{font-size:16px;margin:0} .top .sub{font-size:12px;color:#93a4bd;margin-top:2px}
+  .top .sub b{color:#f0679a}
+  .react-flow__attribution{display:none}
+  .loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#93a4bd;font-size:14px}
+</style></head>
+<body>
+<div class="top"><h1>Casper 現状アーキテクチャ — React Flow（触れる・ズーム・ドラッグ）</h1>
+<div class="sub"><b>🔴 赤＝tool化されていない未実装6項目</b> ／ 青系＝稼働中。2026-07-09 実コード基準。</div></div>
+<div id="root"><div class="loading">読み込み中…（React Flow を CDN から取得）</div></div>
+<script type="module">
+import React from 'https://esm.sh/react@18.3.1';
+import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client';
+import { ReactFlow, Background, Controls, MiniMap, Handle, Position } from 'https://esm.sh/@xyflow/react@12?deps=react@18.3.1,react-dom@18.3.1';
+import dagre from 'https://esm.sh/@dagrejs/dagre@1';
+const h = React.createElement;
+
+// ── 現状アーキテクチャ(木)。todo=tool化されていない(未実装) ──
+const T = {n:"Casper 伴走AI", root:true, c:[
+  {n:"入口 フロント\nchat.html", c:[
+    {n:"チャットUI\n疑似ストリーミング"},{n:"開門ブリーフィング"},{n:"承認カード\n副作用ゲート"},
+    {n:"フィードバック5評価", c:[{n:"🙅→修正リスト\ncorrections"}]},
+    {n:"資料パネル\n節編集/再生成/版"},
+    {n:"+ メニュー", c:[{n:"Score Uploader"},{n:"報告書ビルダー"},{n:"資料化 makedoc"},{n:"Dropbox\n複数D&D 1リンク"}]},
+    {n:"整理術 seiri"},{n:"描画 md/表/mermaid/canvas"},{n:"コピー\nexecCmdフォールバック"}
+  ]},
+  {n:"サーバ\nchat_server.py:8770", c:[
+    {n:"リクエスト処理", c:[
+      {n:"identify 認証"},{n:"digests注入\nretrieve-then-render"},{n:"build_sys"},{n:"ollama_chat\nツールループ"},
+      {n:"salvage 漏れ救済"},{n:"exit検問 P1"},{n:"履歴を直近に絞る"},{n:"疑似ストリーム配信"}
+    ]},
+    {n:"backend切替", c:[{n:"ローカルqwen z8a 主"},{n:"クラウドClaude 縮退"}]}
+  ]},
+  {n:"接地機構\ngrounding", c:[
+    {n:"digests 15種", c:[
+      {n:"projects_digest"},{n:"active_tasks_digest"},{n:"verify_digest\nlive裏取り"},
+      {n:"existence_digest\n捏造禁止"},{n:"open_loop_digest"},{n:"他 calendar/meeting/\ncross/traits等"}
+    ]},
+    {n:"manifest\n資産台帳=真実源"},{n:"原則 事実は機構\nLLMは修辞"}
+  ]},
+  {n:"アクション機構\npropose-execute-render", c:[
+    {n:"P2 action_router\nDM型付き抽出", c:[{n:"指示語の捏造防止"},{n:"一覧はverbatim"}]},
+    {n:"salvage\n漏れツール救済"},{n:"P1 完了詐称の打消"},{n:"clean_dm_body"},
+    {n:"outbox 状態機械\nproposed→sent"}
+  ]},
+  {n:"ツール\nqwen function-calling", c:[
+    {n:"search_vault\n右脳RAG"},{n:"calendar_lookup\n左脳"},{n:"MCP send_message\nDM代筆"},
+    {n:"MCP update_task"},{n:"MCP upload_asset等"}
+  ]},
+  {n:"知識層 右脳\nvault Obsidian", c:[
+    {n:"people/meetings\nactivity/rules"},{n:"postmortems\nasset_shadows"},{n:"health\nセルフヘルス"},
+    {n:"RAG casper_rag\nトライグラム"},{n:"embed bge-m3\n意味検索"},{n:"traits 人の癖"},{n:"openloop 未了"}
+  ]},
+  {n:"左脳\nCalendar / Score", c:[
+    {n:"casper_mcp\nMCPブリッジ"},{n:"casper_tools\nREST読取"},{n:"tasks 新19値\nAPI単一ソース"},
+    {n:"projects\nisOverdue派生"},{n:"users\nroster永続"}
+  ]},
+  {n:"外部連携", c:[
+    {n:"Aurora 図書館"},{n:"Dropbox 複数1リンク\nパスワード付"},{n:"Vimeo tus再開可"},
+    {n:"Discord nibu ch"},{n:"Score BFF / Calendar"}
+  ]},
+  {n:"自己改善ループ\n北極星 Fable5", c:[
+    {n:"柱1 flywheel", c:[
+      {n:"trace 稼働"},{n:"eval golden\ngen_pending 部品"},
+      {n:"learn_bank\nfew-shot bank", todo:true},{n:"fewshot_digest", todo:true}
+    ]},
+    {n:"柱2 self-repair", c:[
+      {n:"health 稼働\n15分cron"},{n:"circuit breaker\n依存縮退/復帰", todo:true},
+      {n:"設定のデータ化\ndigests.yaml", todo:true}
+    ]},
+    {n:"柱3 co-working", c:[
+      {n:"origin field\n先回りproposal", todo:true},{n:"attention\n今日の3件", todo:true}
+    ]},
+    {n:"教師信号\nbody_edit/corrections"}
+  ]},
+  {n:"モデル構成", c:[
+    {n:"qwen3.6:27b\n@z8a"},{n:"num_ctx 12288\nkeep_alive常駐"},{n:"format json\n制約デコード"},{n:"クラウドClaude 縮退時"}
+  ]},
+  {n:"主要機能", c:[
+    {n:"朝ブリーフィング\nDM代筆"},{n:"資料作り\n報告書ビルダー"},{n:"整理術\n逆インタビュー"},
+    {n:"PJ取込\nScore Uploader"},{n:"結晶化\nDropbox/Vimeo"}
+  ]}
+]};
+
+// ── 木 → nodes/edges ──
+let idc=0; const nodes=[], edges=[];
+function walk(node, parent, depth){
+  const id='n'+(idc++);
+  const lines=node.n.split('\n'); const w=Math.max(120, Math.max(...lines.map(l=>l.length))*13+24);
+  const hgt=26+lines.length*16;
+  const todo=!!node.todo, root=!!node.root, l1=depth===1;
+  let bg='#132033', bd='#2a3b57', col='#cfe0f5', fw='500';
+  if(root){ bg='#1e3a5f'; bd='#3b82f6'; col='#fff'; fw='700'; }
+  else if(l1){ bg='#182a44'; bd='#38598c'; col='#dbeafe'; fw='700'; }
+  if(todo){ bg='#3a1626'; bd='#f0679a'; col='#ffd7e6'; fw='800'; }
+  nodes.push({ id, data:{label: node.n + (todo?'  🔴':'')}, position:{x:0,y:0},
+    style:{ background:bg, color:col, border:'1.5px solid '+bd, borderRadius:'10px', fontSize:'12px',
+            fontWeight:fw, padding:'6px 10px', width:w, whiteSpace:'pre-line', textAlign:'center',
+            boxShadow: todo?'0 0 0 3px rgba(240,103,154,.18)':'none' },
+    _w:w, _h:hgt, sourcePosition:'right', targetPosition:'left' });
+  if(parent!==null) edges.push({ id:'e'+parent+'-'+id, source:parent, target:id, type:'smoothstep',
+    animated:todo, style:{stroke: todo?'#f0679a':'#33465f', strokeWidth: todo?2:1.2} });
+  (node.c||[]).forEach(c=>walk(c, id, depth+1));
+}
+walk(T, null, 0);
+
+// ── dagre レイアウト(左→右) ──
+const g=new dagre.graphlib.Graph(); g.setGraph({rankdir:'LR', nodesep:16, ranksep:70, marginx:20, marginy:20});
+g.setDefaultEdgeLabel(()=>({}));
+nodes.forEach(n=>g.setNode(n.id,{width:n._w,height:n._h}));
+edges.forEach(e=>g.setEdge(e.source,e.target));
+dagre.layout(g);
+nodes.forEach(n=>{ const p=g.node(n.id); n.position={x:p.x-n._w/2, y:p.y-n._h/2}; });
+
+function App(){
+  return h(ReactFlow,{
+    defaultNodes:nodes, defaultEdges:edges, fitView:true, minZoom:0.15, maxZoom:3,
+    proOptions:{hideAttribution:true}, nodesDraggable:true, elementsSelectable:true,
+    defaultEdgeOptions:{type:'smoothstep'}, style:{background:'#0b1220'}
+  },
+    h(Background,{color:'#1c2942', gap:22, size:1}),
+    h(Controls,{showInteractive:false}),
+    h(MiniMap,{pannable:true, zoomable:true, nodeColor:n=>(n.style&&n.style.border||'').includes('f0679a')?'#f0679a':'#38598c',
+      style:{background:'#0e1626', border:'1px solid #22304a'}})
+  );
+}
+document.getElementById('root').innerHTML='';
+createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body></html>
