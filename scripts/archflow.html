@@ -78,11 +78,12 @@
     function catOf(name){ var k=name.trim().slice(0,2); return CAT[name.trim()[0]+name.trim()[1]]||CAT[Object.keys(CAT).find(function(e){return name.indexOf(e)>=0;})]||'#64748b'; }
     function hexA(hex,a){ var n=parseInt(hex.slice(1),16); return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
 
-    var idc=0, nodes=[], edges=[];
+    var idc=0, nodes=[], edges=[], byId={};
     function walk(node,parent,depth,cc){
-      var id='n'+(idc++);
+      var id='n'+(idc++); node._id=id;
       var lines=node.n.split('\n'); var w=Math.max(130, Math.max.apply(null,lines.map(function(l){return l.length;}))*13+30);
-      var hh=26+lines.length*17; var todo=!!node.todo, root=!!node.root, l1=depth===1;
+      var hh=26+lines.length*17; node._w=w; node._h=hh;
+      var todo=!!node.todo, root=!!node.root, l1=depth===1;
       var mycc = l1 ? catOf(node.n) : cc;
       var bg,bd,col,fw='600';
       if(root){ bg='#0f172a'; bd='#334155'; col='#fff'; fw='800'; }
@@ -90,23 +91,35 @@
       else { bg='#ffffff'; bd=hexA(mycc||'#64748b',.55); col='#1e293b'; }
       if(todo){ bg='#fee2e2'; bd='#dc2626'; col='#991b1b'; fw='800'; }
       var label=node.n+(todo?'  🔴 未実装':'');
-      nodes.push({ id:id, data:{label:label}, position:{x:0,y:0},
+      var rf={ id:id, data:{label:label}, position:{x:0,y:0},
         style:{ background:bg, color:col, border:'2px solid '+bd, borderRadius:'11px', fontSize:'12px',
           fontWeight:fw, padding:'7px 11px', width:w, whiteSpace:'pre-line', textAlign:'center',
           boxShadow: todo?'0 0 0 4px rgba(220,38,38,.15)':(l1?'0 2px 8px rgba(0,0,0,.15)':'0 1px 3px rgba(0,0,0,.08)') },
-        _w:w, _h:hh, sourcePosition:'right', targetPosition:'left' });
-      if(parent!==null) edges.push({ id:'e'+parent+'-'+id, source:parent, target:id, type:'smoothstep',
-        animated:todo, style:{stroke: todo?'#dc2626':hexA(mycc||'#94a3b8',.7), strokeWidth: todo?2.5:1.5} });
+        _w:w, _h:hh };
+      nodes.push(rf); byId[id]=rf;
+      if(parent!==null) edges.push({ id:'e'+parent+'-'+id, source:parent, target:id, type:'straight',
+        animated:todo, style:{stroke: todo?'#dc2626':hexA(mycc||'#94a3b8',.65), strokeWidth: todo?2.5:1.4} });
       (node.c||[]).forEach(function(c){ walk(c,id,depth+1,mycc); });
     }
     walk(T,null,0,null);
 
-    var g=new dagre.graphlib.Graph(); g.setGraph({rankdir:'LR',nodesep:14,ranksep:75,marginx:24,marginy:24});
-    g.setDefaultEdgeLabel(function(){return {};});
-    nodes.forEach(function(n){ g.setNode(n.id,{width:n._w,height:n._h}); });
-    edges.forEach(function(e){ g.setEdge(e.source,e.target); });
-    dagre.layout(g);
-    nodes.forEach(function(n){ var p=g.node(n.id); n.position={x:p.x-n._w/2,y:p.y-n._h/2}; });
+    // ── サラウンド(放射状)レイアウト: 中心=root、カテゴリを円状、子は外側へ放射 ──
+    function leaves(n){ if(!n.c||!n.c.length){ n._lv=1; return 1; } n._lv=n.c.reduce(function(s,c){return s+leaves(c);},0); return n._lv; }
+    leaves(T);
+    var RINGS=[0, 430, 780, 1090, 1360];
+    function radial(n,a0,a1,depth){
+      var ang=(a0+a1)/2, r=RINGS[Math.min(depth,RINGS.length-1)], rf=byId[n._id];
+      rf.position={ x: r*Math.cos(ang)-n._w/2, y: r*Math.sin(ang)-n._h/2 };
+      var deg=((ang*180/Math.PI)%360+360)%360, sp,tp;
+      if(deg>=315||deg<45){ sp='right'; tp='left'; }
+      else if(deg<135){ sp='bottom'; tp='top'; }
+      else if(deg<225){ sp='left'; tp='right'; }
+      else{ sp='top'; tp='bottom'; }
+      rf.sourcePosition=sp; rf.targetPosition=tp;
+      if(n.c && n.c.length){ var a=a0, tot=n._lv;
+        n.c.forEach(function(c){ var span=(a1-a0)*((c._lv||1)/tot); radial(c, a, a+span, depth+1); a+=span; }); }
+    }
+    radial(T, -Math.PI/2, 1.5*Math.PI, 0);   // 上(-90°)から時計回りに全周
 
     function App(){
       return h(ReactFlowC,{ defaultNodes:nodes, defaultEdges:edges, fitView:true, minZoom:0.12, maxZoom:3,
