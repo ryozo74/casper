@@ -238,7 +238,98 @@ def gen_pending():
     return len(new)
 
 
+BASELINE = os.path.join(HERE, "eval_baseline.json")
+
+
+def _now():
+    import datetime
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def run_suite(filt=None):
+    """golden set を実走し構造化結果を返す(比較可能な物差し)。返り {passed,total,rate,fails,cases}。"""
+    cases = [c for c in load_cases() if not filt or filt in c["name"]]
+    total = passed = 0
+    fails = []
+    caseres = []
+    for c in cases:
+        asserts = _resolve(c.get("asserts"))
+        try:
+            text, cards = run_chat(c["messages"], thread="eval_" + c["name"])
+        except Exception:
+            fails.append(c["name"]); total += len(asserts); caseres.append((c["name"], False)); continue
+        ok_all = True
+        for _desc, fn in asserts:
+            total += 1
+            ok, _why = fn(text, cards)
+            if ok:
+                passed += 1
+            else:
+                ok_all = False
+        if not ok_all:
+            fails.append(c["name"])
+        caseres.append((c["name"], ok_all))
+    return {"passed": passed, "total": total, "rate": (passed / total if total else 0.0),
+            "fails": fails, "cases": caseres}
+
+
+def gate(tol=0.0):
+    """【回帰ゲート=物差し(Fable最優先)】golden suiteを走らせ前回good合格率と比較。低下=回帰(1)、
+    維持/改善=OK(0・baseline更新)。プロンプト変更/モデル換装/bank注入の前後で走らせ、学習が"改善"か"劣化"かを判別。"""
+    res = run_suite()
+    base = {}
+    if os.path.exists(BASELINE):
+        try:
+            base = json.load(open(BASELINE, encoding="utf-8"))
+        except Exception:
+            pass
+    prev = base.get("rate", 0.0)
+    print(f"合格率 {res['passed']}/{res['total']} = {res['rate']:.0%}  (前回good {prev:.0%})")
+    if res["fails"]:
+        print("  落ちたケース:", res["fails"])
+    if res["rate"] + 1e-9 < prev - tol:
+        print(f"🔴 回帰検知: {prev:.0%} → {res['rate']:.0%} 低下。直近の変更を見直せ(この状態を昇格させるな)。")
+        return 1
+    json.dump({"rate": res["rate"], "passed": res["passed"], "total": res["total"], "ts": _now()},
+              open(BASELINE, "w", encoding="utf-8"), ensure_ascii=False)
+    print("✅ 回帰なし。baseline を更新(new good)。")
+    return 0
+
+
+def ab_bank():
+    """【bank有無2周(Fable④)】fewshot ON/OFF で合格率を比較。ON<OFF=bankが悪化→probation規則を退避せよ。
+    ON>OFF=flywheelが効いている証。学習素材の良否を機械判定する自動退避の土台。"""
+    import time
+    import yaml
+    yp = os.path.join(HERE, "digests.yaml")
+    d = yaml.safe_load(open(yp, encoding="utf-8"))
+    orig = d.get("fewshot", {}).get("enabled", True)
+
+    def _set(v):
+        d.setdefault("fewshot", {})["enabled"] = v
+        yaml.safe_dump(d, open(yp, "w", encoding="utf-8"), allow_unicode=True)
+        time.sleep(1.5)                                   # mtimeホットリロードを待つ
+    try:
+        _set(True); on = run_suite()
+        _set(False); off = run_suite()
+    finally:
+        _set(orig)
+    print(f"bank ON:  {on['rate']:.0%} ({on['passed']}/{on['total']})")
+    print(f"bank OFF: {off['rate']:.0%} ({off['passed']}/{off['total']})")
+    if on["rate"] < off["rate"]:
+        print("🔴 bankが合格率を下げている→probation規則を退避(evict)せよ。")
+    elif on["rate"] > off["rate"]:
+        print("✅ bankが合格率を上げている(flywheelが効いている証)。")
+    else:
+        print("＝ 差なし(現ケースではbankの効果は中立)。")
+    return {"on": on["rate"], "off": off["rate"]}
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--gate":         # 回帰ゲート: baseline比較で劣化検知
+        return gate()
+    if len(sys.argv) > 1 and sys.argv[1] == "--ab":           # bank有無2周: fewshotの良否判定
+        ab_bank(); return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--gen-pending":   # 失敗トレース→候補ケース生成(人の審査待ちへ)
         n = gen_pending()
         print(f"失敗トレースから {n} 件の候補ケースを生成 → {PENDING_JSONL}（人が昇格審査せよ）")
