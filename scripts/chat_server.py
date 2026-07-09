@@ -4657,9 +4657,19 @@ def _events_puller():
     併せて OPEN LOOP(未了の約束)の完了プローブを走らせ、達成を自動検知して閉じる(hori事件の恒久解)。"""
     import time as _t
     _tick = 0
+    _last_nightly = ""
     while True:
         _t.sleep(300)
         _tick += 1
+        _today = datetime.date.today().isoformat()
+        if _today != _last_nightly and datetime.datetime.now().hour >= 3:   # 日次バッチ(1日1回・早朝以降): flywheel蒸留/失敗trace→候補/圧縮
+            _last_nightly = _today
+            try:
+                import nightly
+                r = nightly.run(with_gate=False)          # gateはサーバ自己叩き回避で外す(外部cron/手動)
+                print(f"[nightly] {r.get('learn_bank_added',0)}則学習 / pending{r.get('gen_pending',0)} / expired{r.get('expired',0)}", flush=True)
+            except Exception as _e:
+                print(f"[nightly] err {_e}", flush=True)
         try:
             n = _events_pull_once()
             if n:
