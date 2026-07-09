@@ -1674,6 +1674,30 @@ def fewshot_digest(query):
         return ""
 
 
+_ATTN_Q_RE = re.compile(r"(気にかけ|今日の3件|気になる.{0,4}(点|件|こと|とこ|ところ)|滞留|"
+                        r"承認待ち|下書き.{0,4}(何|どう|は|って)|上記.{0,8}(気に|件.{0,4}(どう|何|は)))", re.I)
+
+
+def attention_digest(who, query):
+    """【今日の3件(気にかけどころ)の実体注入】利用者が『気にかけどころ/今日の3件/上記の件』と言ったら、
+    attention が先回りで拾った項目(滞留下書き/納期超過/未了)を対処つきで注入。ブリーフィングで示した項目を
+    後から『どうしたらいい?』と問われても、vault検索等に迷子にならず正しく答えさせる(retrieve-then-render)。"""
+    try:
+        if not query or not _ATTN_Q_RE.search(query) or not who.get("uid"):
+            return ""
+        import attention as _att
+        three = _att.today_three(who.get("uid"))
+        if not three:
+            return ""
+        lines = [f"- [{c['kind']}] {c['title']} — {c['detail']}" for c in three]
+        return ("\n\n## 【今日の3件(気にかけどころ)=先回りで拾った要対応・これが『上記の件』】\n"
+                "利用者が『気にかけどころ/今日の3件/上記の2件』と言ったらこれを指す(vault議事録検索ではない)。"
+                "各々の対処を案内せよ: draft=承認待ちの下書き→『承認で送信・却下で破棄できます。まとめて確認しますか?』と促す / "
+                "overdue=納期超過PJ→状況確認や催促 / loop=未了の約束→催促の頃合いか。:\n" + "\n".join(lines))
+    except Exception:
+        return ""
+
+
 def open_loop_digest(who):
     """【OPEN LOOPレジストリの先読み注入】この人が依頼元/通知先の"未了の約束"を⚙レコードから注入。
     帯の散文でなくレコードゆえ、Casperは常に把握し漏らさない(Fable5 #2・hori事件の恒久解)。"""
@@ -4201,6 +4225,7 @@ class H(BaseHTTPRequestHandler):
             cal += _dg("fewshot", fewshot_digest(last_user))          # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
             cal += _dg("existence", existence_digest(who, last_user))   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += _dg("open_loop", open_loop_digest(who))              # 未了の約束(OPEN LOOP)を⚙レコードから注入
+            cal += attention_digest(who, last_user)   # 今日の3件(気にかけどころ)の実体=『上記の件どうしたら』に正答
             cal += _dg("traits", traits_digest(who, last_user))      # 人物の癖(構造化trait)を注入=裏取りの手がかり
             cal += _dg("calendar", calendar_digest(last_user))         # Calendar 左脳を必要時に先読み注入
             cal += _dg("meeting", meeting_digest(last_user))          # 会議/議事録クエリは最新会議も注入
@@ -4284,6 +4309,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += _dg("fewshot", fewshot_digest(ll_user))                # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
         sysadd += _dg("existence", existence_digest(who, ll_user))         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += _dg("open_loop", open_loop_digest(who))                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
+        sysadd += attention_digest(who, ll_user)         # 今日の3件(気にかけどころ)の実体=『上記の件どうしたら』に正答
         sysadd += _dg("traits", traits_digest(who, ll_user))            # 人物の癖(構造化trait)を注入=裏取りの手がかり
         sysadd += _dg("meeting", meeting_digest(ll_user))               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += _dg("shot_assignee", shot_assignee_digest(ll_user))         # カット×担当も注入
