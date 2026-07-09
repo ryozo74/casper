@@ -120,6 +120,40 @@ def a_present(substrings, need=1):
     return _f
 
 
+# ── 中身(内容の正しさ)アサーション: 型でなく"何を答えたか"を検証 ──
+def a_covers_projects(minpj=2):
+    """回答が online PJ を minpj 種以上"網羅"しているか(1つに偏らない・retrieve-then-renderの実効性)。"""
+    def _f(text, cards):
+        names = _online_pj_names()
+        hit = sorted({n for n in names if n and n in text})
+        if len(hit) < minpj:
+            return False, f"言及PJが{len(hit)}種({hit})・{minpj}種以上を期待(データ網羅の欠落)"
+        return True, ""
+    return _f
+
+
+def a_not_only(name):
+    """特定PJ(name)のみに偏っていないか。本日の『marukomeしか出ない』失敗を直接検知。"""
+    def _f(text, cards):
+        names = _online_pj_names()
+        hit = [n for n in names if n and n in text]
+        others = [n for n in hit if n != name]
+        if name in text and not others:
+            return False, f"「{name}」のみ言及・他PJに触れず(偏り=データ網羅の失敗)"
+        return True, ""
+    return _f
+
+
+def a_min_length(n=60):
+    """回答が途中で切れず十分な内容量か(『途中で止まる』/空応答/はぐらかしを検知)。"""
+    def _f(text, cards):
+        t = (text or "").strip()
+        if len(t) < n:
+            return False, f"回答が短すぎ({len(t)}字 < {n})・途中切れ/空応答の疑い"
+        return True, ""
+    return _f
+
+
 # ── ゴールデンセット(過去の失態を1件ずつテスト化) ──────────────────
 def _u(c):
     return [{"role": "user", "content": c}]
@@ -135,10 +169,14 @@ ASSERT_REGISTRY = {
     "mentions_online_pjs": lambda a: a_mentions_online_pjs(a[0] if a else 3),
     "absent":              lambda a: a_absent(a[0] if a else []),
     "present":             lambda a: a_present(a[0] if a else [], a[1] if len(a) > 1 else 1),
+    "covers_projects":     lambda a: a_covers_projects(a[0] if a else 2),
+    "not_only":            lambda a: a_not_only(a[0] if a else ""),
+    "min_length":          lambda a: a_min_length(a[0] if a else 60),
 }
 _ASSERT_DESC = {"no_tool_leak": "ツール漏れ無し", "no_work_narration": "実況無し",
                 "no_false_send_claim": "既成事実化しない", "has_confirm_card": "承認カードが出る",
-                "mentions_online_pjs": "online PJを列挙", "absent": "禁止文字列なし", "present": "期待文字列あり"}
+                "mentions_online_pjs": "online PJを列挙", "absent": "禁止文字列なし", "present": "期待文字列あり",
+                "covers_projects": "複数PJを網羅", "not_only": "単一PJに偏らない", "min_length": "途中で切れない"}
 
 
 def _resolve(spec):
