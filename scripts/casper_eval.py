@@ -21,6 +21,11 @@ import urllib.request
 ENDPOINT = os.environ.get("CASPER_EVAL_ENDPOINT", "http://localhost:8770/api/chat")
 ACTOR = os.environ.get("CASPER_EVAL_ACTOR", "28")
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+try:
+    import casper_outbox                                     # fixture(下書きseed)用・真実源への直接投入
+except Exception:
+    casper_outbox = None
 CASES_JSONL = os.path.join(HERE, "cases.jsonl")            # 昇格済ゴールデン(人が承認したもの)
 PENDING_JSONL = os.path.join(HERE, "cases_pending.jsonl")  # 失敗トレース由来の候補(人の審査待ち)
 TRACE_JSONL = os.path.join(HERE, "casper_trace.jsonl")
@@ -36,7 +41,8 @@ def _online_pj_names():
 
 
 def run_chat(messages, thread="eval"):
-    """/api/chat へPOSTし、(text, cards) を復元。text=連結本文、cards=confirm(承認)カードのlist。"""
+    """/api/chat へPOSTし、(text, cards) を復元。text=連結本文、cards=confirm(承認)カードのlist。
+    選択カード(choices・Q1)は各optionを cards に {tool:'choices',...} として畳み込む(has_choices検査用)。"""
     body = json.dumps({"messages": messages, "thread": thread}).encode()
     req = urllib.request.Request(ENDPOINT, data=body,
                                  headers={"Content-Type": "application/json", "X-Actor-User-Id": ACTOR})
@@ -52,8 +58,14 @@ def run_chat(messages, thread="eval"):
                 continue
             if "message" in o:
                 text += (o["message"] or {}).get("content", "")
+            elif "replace" in o:                               # 出口検問後の差し替え=最終本文で上書き
+                text = o.get("replace") or ""
             elif "confirm" in o:
                 cards.append(o["confirm"])
+            elif "choices" in o:
+                cards.append({"tool": "choices", "choices": o["choices"]})
+            elif "table" in o:
+                cards.append({"tool": "table", "table": o["table"]})
     return text, cards
 
 
@@ -82,6 +94,77 @@ def a_no_false_send_claim(text, cards):
     return True, ""
 
 
+_NAKED_CHOICE = re.compile(
+    r"(送信(する)?か.{0,8}(破棄|却下|中止|削除)(する)?か|"
+    r"(破棄|却下|削除)(する)?か.{0,8}(送信|承認)|"
+    r"(どちら|いずれ|どれ)(に|を|か).{0,12}(選択|選ん|お選び|決め|して)|"
+    r"(選択|お選び|選ん)(して)?(ください|下さい|くだされ)|"
+    r"(送信|承認|却下|破棄)(するか|を)(選択|お選び|決め))")
+
+
+def a_no_naked_choice(text, cards):
+    """【不変条件①】『選択してください』等の選択要求があるのに選択装置(承認カード)が無い=裸の選択要求。不可。"""
+    if cards:
+        return True, ""
+    if _NAKED_CHOICE.search(text):
+        return False, "選択装置(カード)無しで選択を要求している(裸の選択要求)"
+    return True, ""
+
+
+def _portfolio_ids():
+    """真実源: Vimeoポートフォリオmd＋curation.yaml(社内ショーリール等・md未収録の実在ID)の全ID集合。"""
+    ids = set()
+    p = os.path.join(HERE, "..", "vault", "30_culture_rules", "ops_vimeo_portfolio.md")
+    try:
+        for ln in open(p, encoding="utf-8"):
+            m = re.search(r"vimeo\.com/(\d+)", ln)
+            if m:
+                ids.add(m.group(1))
+    except Exception:
+        pass
+    cp = os.path.join(HERE, "..", "vault", "30_culture_rules", "portfolio_curation.yaml")
+    try:
+        import yaml
+        d = yaml.safe_load(open(cp, encoding="utf-8")) or {}
+        for e in (d.get("featured") or []):
+            if e.get("id"):
+                ids.add(str(e["id"]))
+    except Exception:
+        pass
+    return ids
+
+
+def _asset_real():
+    """真実源: 資産台帳の実ファイル名集合。"""
+    try:
+        import casper_manifest
+        return set(casper_manifest.real_names())
+    except Exception:
+        return set()
+
+
+def a_claims_grounded():
+    """【Q4 真実源照合=機構化】応答中の型付きクレーム(Vimeo ID / /asset ファイル名)が真実源の部分集合か照合。
+    注入は機構がやった=何が正かは機構が知っている。捏造(源に無いID/ファイル)を決定的に検知(=_validate_assetsのeval一般化)。"""
+    pids = _portfolio_ids()
+    assets = _asset_real()
+    import urllib.parse as _up
+
+    def _f(text, cards):
+        bad = []
+        for vid in set(re.findall(r"vimeo\.com/(\d+)", text)):
+            if pids and vid not in pids:
+                bad.append("vimeo:" + vid)
+        for a in set(re.findall(r"/asset/([^\s\)\"'\]]+)", text)):
+            fn = os.path.basename(_up.unquote(a.split("?")[0].split("#")[0]))
+            if assets and fn not in assets:
+                bad.append("asset:" + fn)
+        if bad:
+            return False, "真実源に無いクレーム(捏造疑い): " + ", ".join(bad[:6])
+        return True, ""
+    return _f
+
+
 def a_has_confirm_card(tool_name=None):
     def _f(text, cards):
         if not cards:
@@ -89,6 +172,71 @@ def a_has_confirm_card(tool_name=None):
         if tool_name and not any(c.get("tool") == tool_name for c in cards):
             return False, f"{tool_name} の承認カードが無い"
         return True, ""
+    return _f
+
+
+def a_vimeo_count(lo=0, hi=999):
+    """応答中の Vimeo リンク本数が [lo,hi] に収まる(厳選=少数・全件=多数 の検査)。"""
+    def _f(text, cards):
+        n = len(set(re.findall(r"vimeo\.com/(\d+)", text)))
+        if n < lo:
+            return False, f"Vimeoリンク {n}本 (<{lo}=厳選されず不足?)"
+        if n > hi:
+            return False, f"Vimeoリンク {n}本 (>{hi}=全件ダンプ?)"
+        return True, ""
+    return _f
+
+
+def a_has_table(minrows=1):
+    """【④ table card】機構描画の表カードが出て、行数が minrows 以上あること(截ち切れ無しの構造保証)。"""
+    def _f(text, cards):
+        tc = [c for c in cards if c.get("tool") == "table"]
+        if not tc:
+            return False, "表カードが描画されていない"
+        rows = (tc[0].get("table") or {}).get("rows") or []
+        if len(rows) < minrows:
+            return False, f"表の行数 {len(rows)} (<{minrows})"
+        return True, ""
+    return _f
+
+
+def a_no_full_table_dump(text, cards):
+    """表カードがある時、LLMが本文で『表を丸ごと再現』していない(=截ち切れの元を断つ)。
+    小さな注目表(数行の分析)は許容し、全再現(≥8行のmd表=装置の重複)のみ失格。"""
+    tc = [c for c in cards if c.get("tool") == "table"]
+    if not tc:
+        return True, ""
+    if len(re.findall(r"(?m)^\s*\|.*\|.*\|", text)) >= 8:   # md表が8行以上=ほぼ全再現→截ち切れリスク
+        return False, "表カードがあるのに本文で表を丸ごと再現している(截ち切れの元)"
+    return True, ""
+
+
+def a_has_choices(minopt=2):
+    """【Q1 選択カード】曖昧指示語の解決装置として choices カードが出て、選択肢が minopt 件以上あること。
+    preview(内容)が全optに付くことも検査(内容が見える=不変条件②)。"""
+    def _f(text, cards):
+        ch = [c for c in cards if c.get("tool") == "choices"]
+        if not ch:
+            return False, "選択カード(choices)が生成されていない"
+        opts = (ch[0].get("choices") or {}).get("options") or []
+        if len(opts) < minopt:
+            return False, f"選択肢が{len(opts)}件(<{minopt})"
+        if any(not (o.get("preview") or "").strip() for o in opts):
+            return False, "preview(内容)の無い選択肢がある(不変条件②違反)"
+        return True, ""
+    return _f
+
+
+def a_choices_option(substr):
+    """選択カードのいずれかの option(label/say)に substr を含む(例: snooze『流す』の存在=alert fatigue対策)。"""
+    def _f(text, cards):
+        for c in cards:
+            if c.get("tool") != "choices":
+                continue
+            for o in (c.get("choices") or {}).get("options", []):
+                if substr in (o.get("label", "") + o.get("say", "")):
+                    return True, ""
+        return False, f"選択肢に『{substr}』が無い"
     return _f
 
 
@@ -121,11 +269,23 @@ def a_present(substrings, need=1):
 
 
 # ── 中身(内容の正しさ)アサーション: 型でなく"何を答えたか"を検証 ──
+def _table_text(cards):
+    """表カードのセルを1つの文字列に(表カードに載ったPJ名も"網羅"として数える・table card設計整合)。"""
+    out = []
+    for c in cards or []:
+        if c.get("tool") == "table":
+            for row in (c.get("table") or {}).get("rows", []):
+                out += [str(x) for x in row]
+    return " ".join(out)
+
+
 def a_covers_projects(minpj=2):
-    """回答が online PJ を minpj 種以上"網羅"しているか(1つに偏らない・retrieve-then-renderの実効性)。"""
+    """回答が online PJ を minpj 種以上"網羅"しているか。本文＋表カードの両方を見る
+    (理解ゲート＋table cardで PJ一覧が散文でなくカード側に載る新設計に整合)。"""
     def _f(text, cards):
         names = _online_pj_names()
-        hit = sorted({n for n in names if n and n in text})
+        blob = (text or "") + " " + _table_text(cards)
+        hit = sorted({n for n in names if n and n in blob})
         if len(hit) < minpj:
             return False, f"言及PJが{len(hit)}種({hit})・{minpj}種以上を期待(データ網羅の欠落)"
         return True, ""
@@ -232,6 +392,13 @@ ASSERT_REGISTRY = {
     "no_tool_leak":        lambda a: a_no_tool_leak,
     "no_work_narration":   lambda a: a_no_work_narration,
     "no_false_send_claim": lambda a: a_no_false_send_claim,
+    "no_naked_choice":     lambda a: a_no_naked_choice,
+    "claims_grounded":     lambda a: a_claims_grounded(),
+    "vimeo_count":         lambda a: a_vimeo_count(a[0] if a else 0, a[1] if len(a) > 1 else 999),
+    "has_table":           lambda a: a_has_table(a[0] if a else 1),
+    "no_full_table_dump":  lambda a: a_no_full_table_dump,
+    "has_choices":         lambda a: a_has_choices(a[0] if a else 2),
+    "choices_option":      lambda a: a_choices_option(a[0] if a else ""),
     "has_confirm_card":    lambda a: a_has_confirm_card(a[0] if a else None),
     "mentions_online_pjs": lambda a: a_mentions_online_pjs(a[0] if a else 3),
     "absent":              lambda a: a_absent(a[0] if a else []),
@@ -245,7 +412,11 @@ ASSERT_REGISTRY = {
     "dm_readable":         lambda a: a_dm_readable(),
 }
 _ASSERT_DESC = {"no_tool_leak": "ツール漏れ無し", "no_work_narration": "実況無し",
-                "no_false_send_claim": "既成事実化しない", "has_confirm_card": "承認カードが出る",
+                "no_false_send_claim": "既成事実化しない", "no_naked_choice": "裸の選択要求なし",
+                "claims_grounded": "クレームが真実源に接地(捏造なし)",
+                "has_table": "表カードが描画される", "no_full_table_dump": "本文で表を丸ごと再現しない",
+                "has_choices": "選択カードが出る", "choices_option": "選択肢に指定語あり",
+                "has_confirm_card": "承認カードが出る",
                 "mentions_online_pjs": "online PJを列挙", "absent": "禁止文字列なし", "present": "期待文字列あり",
                 "covers_projects": "複数PJを網羅", "not_only": "単一PJに偏らない", "min_length": "途中で切れない",
                 "dm_body_present": "DM本文に用件/データあり", "dm_body_absent": "DM本文に禁止語なし",
@@ -357,6 +528,34 @@ def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _apply_fixtures(case):
+    """case.fixtures.seed_drafts を outbox(真実源)へ投入し、後片付け用idを返す。
+    下書き浮上/憶測封じの検査は『実在の下書き』が要る→状態依存を無くす自己完結fixture。"""
+    ids = []
+    if not casper_outbox:
+        return ids
+    for d in (case.get("fixtures") or {}).get("seed_drafts", []) or []:
+        try:
+            summ = "DM送信(fixture)" if d.get("tool", "send_message") == "send_message" else "fixture"
+            rec = casper_outbox.propose(d.get("tool", "send_message"), d.get("args") or {}, ACTOR, summ,
+                                        origin="eval_fixture", query="fixture", trace_id="fixture")
+            ids.append(rec["id"])
+        except Exception:
+            pass
+    return ids
+
+
+def _cleanup_fixtures(ids):
+    """fixtureで作った下書きを失効(expire)し台帳を汚さない。"""
+    if not casper_outbox:
+        return
+    for pid in ids or []:
+        try:
+            casper_outbox.expire(pid)
+        except Exception:
+            pass
+
+
 def run_suite(filt=None):
     """golden set を実走し構造化結果を返す(比較可能な物差し)。返り {passed,total,rate,fails,cases}。"""
     cases = [c for c in load_cases() if not filt or filt in c["name"]]
@@ -365,9 +564,11 @@ def run_suite(filt=None):
     caseres = []
     for c in cases:
         asserts = _resolve(c.get("asserts"))
+        _fx = _apply_fixtures(c)                            # 状態依存の検査(下書き浮上等)を自己完結化
         try:
             text, cards = run_chat(c["messages"], thread="eval_" + c["name"])
         except Exception:
+            _cleanup_fixtures(_fx)
             fails.append(c["name"]); total += len(asserts); caseres.append((c["name"], False)); continue
         ok_all = True
         for _desc, fn in asserts:
@@ -377,6 +578,9 @@ def run_suite(filt=None):
                 passed += 1
             else:
                 ok_all = False
+        _cleanup_fixtures(_fx)                               # 台帳を汚さぬよう検査後に必ず失効
+        # 検査中にケースが生成した承認カード(下書き)も失効させる: 放置すると本番の選択カードを汚す
+        _cleanup_fixtures([c.get("id") for c in cards if c.get("id") and c.get("tool") != "choices"])
         if not ok_all:
             fails.append(c["name"])
         caseres.append((c["name"], ok_all))

@@ -1,0 +1,18 @@
+# 理解ゲート — 殿 (ryoji / uid 28)
+# 人が編集できる真実源。Casper は発話をこの規則で解決してから答える。
+# 空にすれば現行動作(加算的オーバーレイ)。
+
+# 空ファセットの既定(read-only意図のみ・前提明示付きで即答):
+facet_defaults:
+  - intent: active_task_q      # 『タスクは?』は担当でなく期限をまず見たい(2026-07-10 実証済み訂正)
+    facet: deadline
+
+# その人固有の言い回し→正規参照(status:active のみ解釈に使う。candidate は昇格待ち):
+aliases: []
+
+# 聞き返しの度合い: eager(候補2で必ずカード) | balanced(既定) | lazy(既定top-1を前提明示で即答)
+ask_style: balanced
+
+# 好む提示形式:
+format_prefs:
+  list: table

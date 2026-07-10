@@ -15,7 +15,52 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTBOX = os.path.join(HERE, "casper_outbox.jsonl")
 CAL_PROJECTS = "/tmp/cal_projects.json"
+STATE = os.path.join(HERE, "attention_state.json")
 EXPIRE_DAYS = 7
+FOREVER = "9999-12-31"
+
+
+# ── snooze/dismiss(Fable Q4: alert fatigue=注意機構の死因第一位への対策) ──
+# 副作用ゼロの状態(DM/Calendar書込はしない)。muted={uid:ref -> {until}}。until日まで(含む)非表示。
+def _load_state():
+    try:
+        return json.load(open(STATE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_state(s):
+    try:
+        json.dump(s, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _mkey(uid, ref):
+    return f"{str(uid or '')}:{str(ref or '')}"
+
+
+def is_muted(uid, ref):
+    rec = _load_state().get(_mkey(uid, ref))
+    if not rec:
+        return False
+    until = rec.get("until") or ""
+    return datetime.date.today().isoformat() <= until   # until日まで(含む)非表示
+
+
+def snooze(uid, ref, days=0):
+    """『今日は流す』=本日(+days)まで非表示。副作用ゼロ。返り=until日。"""
+    until = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+    s = _load_state(); s[_mkey(uid, ref)] = {"until": until, "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    _save_state(s)
+    return until
+
+
+def dismiss(uid, ref):
+    """恒久的に流す(以後出さない)。副作用ゼロ。"""
+    s = _load_state(); s[_mkey(uid, ref)] = {"until": FOREVER, "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    _save_state(s)
+    return FOREVER
 
 
 def _load_jsonl(p):
@@ -82,6 +127,7 @@ def gather(uid):
                               "detail": f"納期超過(〆{due})", "score": 40, "ref": p.get("id")})
     except Exception:
         pass
+    cands = [c for c in cands if not is_muted(uid, c.get("ref"))]   # snooze/dismiss 済は除外(alert fatigue対策)
     return cands
 
 
@@ -117,9 +163,12 @@ def expire_stale():
     return n
 
 
-def briefing_lines(uid):
-    """open_briefing へ差し込む『今日の3件』テキスト(無ければ空)。"""
+def briefing_lines(uid, include_drafts=True):
+    """open_briefing へ差し込む『今日の3件』テキスト(無ければ空)。
+    include_drafts=False: 下書きは承認カードで直接出す為テキストから除く(一往復短縮・Fable Q4)。"""
     three = today_three(uid)
+    if not include_drafts:
+        three = [c for c in three if c.get("kind") != "draft"]
     if not three:
         return ""
     icon = {"draft": "📝", "loop": "🔗", "overdue": "🔴"}

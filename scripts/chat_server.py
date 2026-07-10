@@ -53,6 +53,10 @@ try:
 except Exception:
     casper_traits = None
 try:
+    import casper_person_gate                    # 人ごと理解ゲート(入力の接地・別名/既定ファセット・Fable諮問)
+except Exception:
+    casper_person_gate = None
+try:
     import casper_trace                          # トレーシング(1req=1trace・事後分析基盤・Fable #7-1)
 except Exception:
     casper_trace = None
@@ -234,8 +238,31 @@ def _task_is_moving(t):
     st = (t.get("status") if isinstance(t, dict) else t) or ""
     return str(st).lower() in {"wip", "modeling", "lookdev", "caching", "rig", "facial", "in-progress", "in_progress"}
 
+
+# ── status_category(API 5値=todo/in_progress/review/completed/held) を単一ソースに(Fableレビュー・掟: ハードコード禁止)。
+#    完了/残務/稼働は上の _task_is_done/_task_is_moving に寄せる。承認(dir_ap)とFB係争(qc_fb)は共に category=review ゆえ、
+#    『承認で通過(clean)』と『FB/確認が係争中(active)』の区別だけは status値を"1箇所で"読む(APIのstatusが真実源・捏造でない)。
+_REVIEW_APPROVED = {"dir_ap", "ap", "fix"}          # review内で『承認/通過』側(API status値・単一定義)
+
+
+def _task_open(t):
+    """残務(未完・作業対象)か。完了(category=completed)・除外(held=omit/wt)を除いた"これからやる/やっている"もの。"""
+    return not _task_is_done(t) and (t.get("status_category") or "") != "held"
+
+
+def _task_fb_active(t):
+    """FB/確認が係争中か(素通り承認でない)。in_progress、または review かつ未承認(qc/qc_fb/dir_wt)。
+    素通り=完了(deliver)/除外(omit)/承認(dir_ap/ap/fix)。todo(未着手)は"FB無し"側でactiveにしない。"""
+    cat = (t.get("status_category") or "") if isinstance(t, dict) else ""
+    if cat == "in_progress":
+        return True
+    if cat == "review":
+        return str(t.get("status") or "").lower() not in _REVIEW_APPROVED
+    return False
+
 # --- Stage2: 副作用ツールの「承認→実行」フロー(DM代筆・QC提出・参照登録) ---
 PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
+_LAST_CHOICES = {}     # thread -> {"opts":[{say,label,card_type}], "uid", "ts"}: 直前に出した選択カード(③選択ログ用)
 _AURORA_CUR = {}       # thread -> {doc_id, title}: 1スレッド=1資料の紐付け(更新はappend)
 
 # --- 恒久 roster: token失効でも壊れぬ永続キャッシュ＋多源リフレッシュ(get_users優先→RO REST→DM収穫) ---
@@ -349,6 +376,56 @@ def _action_summary(tool, args):
     except Exception:
         return tool
 
+def _draft_recipient_body(tool, args):
+    """下書きレコードから (宛先名, 宛先uid, 本文) を頑健に抽出(引数名の揺れに耐える)。
+    Q3C(Fable): 本文=真実源。これを機構で取り出し、憶測を封じる材料にする。"""
+    a = args or {}
+    if tool == "send_message":
+        to = (a.get("to_user_id") or a.get("recipient_id") or a.get("to")
+              or a.get("user_id") or a.get("recipient") or "")
+        nm = _uid_to_name(to) if str(to).isdigit() else (to or "?")
+        body = str(a.get("body") or a.get("content") or a.get("text") or a.get("message") or "")
+        return nm, to, body
+    if tool == "aurora_create":
+        return (a.get("title") or "?"), "", str(a.get("body") or "")
+    if tool == "aurora_append":
+        return (a.get("doc_id") or "?"), "", str(a.get("body") or "")
+    return "?", "", str(a.get("body") or a.get("content") or a.get("message") or "")
+
+
+def _draft_excerpt(tool, args, n=150):
+    """下書き1件を『宛先＋本文先頭n字』の1行に。retrieve-then-render: 憶測でなく実本文を見せる。"""
+    nm, _to, body = _draft_recipient_body(tool, args)
+    body = re.sub(r"\s+", " ", (body or "")).strip()
+    head = "DM→" if tool == "send_message" else ("Aurora作成→" if tool == "aurora_create" else ("Aurora修正→" if tool == "aurora_append" else "→"))
+    ex = body[:n] + ("…" if len(body) > n else "")
+    return f"{head}{nm}｜{ex or '(本文なし)'}"
+
+
+def _draft_bodies_context(who, limit=6):
+    """滞留proposed下書きの『実本文』をsystem contextへ注入する block を返す(Q3C・Fable)。
+    憶測の真因=本文がモデルの手元に無い(retrieveの穴)。これを埋め『内容は下記が全て・推測禁止』と縛る。"""
+    if not casper_outbox:
+        return ""
+    try:
+        props = [r for r in casper_outbox.pending(who.get("uid"))
+                 if r.get("tool") in ("send_message", "aurora_create", "aurora_append")]
+    except Exception:
+        return ""
+    if not props:
+        return ""
+    props.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    lines = []
+    for r in props[:limit]:
+        nm, _to, body = _draft_recipient_body(r.get("tool"), r.get("args") or {})
+        body = re.sub(r"\s+", " ", (body or "")).strip()
+        kind = {"send_message": "DM下書き", "aurora_create": "Aurora作成", "aurora_append": "Aurora修正"}.get(r.get("tool"), "下書き")
+        lines.append(f"- [{kind}] 宛先/対象: {nm}\n  本文: 「{body[:220]}{'…' if len(body) > 220 else ''}」")
+    return ("\n【承認待ち下書きの実本文(真実源・下記が全て)】\n" + "\n".join(lines) +
+            "\n※下書きの内容を語る際はこの実本文のみを用いよ。ここに無い件名/意図/背景を推測・創作するな"
+            "(「〜と思われる」等の憶測は禁止)。\n")
+
+
 def _register_pending(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None):
     # query(発端の発話)+trace_id: 承認時の編集差分から教師信号の三つ組を復元する為に必須(Fable5指摘・A実装)
     if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
@@ -367,8 +444,24 @@ def _register_pending(tool, args, uid, summary, thread=None, origin="user", quer
     return pid
 
 
-_DRAFT_SURFACE_RE = re.compile(r"((下書き|承認待ち|滞留|気にかけ|今日の3件).{0,14}(見せ|見た|確認|どう|選択|処理|対応|出し|表示|一覧|中身|内容)|"
+_DRAFT_SURFACE_RE = re.compile(r"((下書き|承認待ち|滞留|気にかけ|今日の3件).{0,14}(見せ|見た|確認|どう|選択|処理|対応|出し|表示|一覧|中身|内容|なに|何|どんな|どういう)|"
                                r"(見せ|表示|確認|処理).{0,6}(下書き|承認待ち)|溜まって.{0,6}(下書き|承認))", re.I)
+# 既存下書きの"中身を問う"パターン(新規DM作成でない)。actionゲートに引っかかっても決定的fast pathを通す(Q3C強処方)。
+_DRAFT_ASK_RE = re.compile(r"(下書き|承認待ち).{0,12}(中身|内容|なに|何|見せ|確認|どんな|どういう|全部|全文|read|見る)", re.I)
+# 追従漏れ対策: Casper自身が「下書きを表示しますか?」と申し出た直後、ユーザーの裸の肯定(おねがい/はい/見せて…)は
+# その申し出への同意=下書き浮上の合図。直前assistant発話に下書き申し出があり、今回が肯定なら surface を発火。
+_AFFIRM_RE = re.compile(r"^(おねがい(します|いたします)?|お願い(します|いたします)?|はい|うん|ええ|そう(です|ね)?|"
+                        r"頼(む|みます)|お頼み|見せて|表示して|見たい|お願いね|よろ(しく)?|了解|うむ|yes|ok|オーケー|ぜひ)"
+                        r"[。、\s!！?？]*$", re.I)
+_DRAFT_OFFER_RE = re.compile(r"(下書き|承認待ち).{0,40}(表示|見せ|確認しま|一覧|中身|内容|ご覧)|"
+                             r"(表示|見せ|ご覧に入れ|確認).{0,12}(下書き|承認待ち)", re.I)
+
+
+def _last_assistant(msgs):
+    for m in reversed(msgs or []):
+        if m.get("role") == "assistant":
+            return str(m.get("content") or "")
+    return ""
 
 
 def _surface_pending_drafts(who, pending_actions, limit=6):
@@ -383,18 +476,85 @@ def _surface_pending_drafts(who, pending_actions, limit=6):
     except Exception:
         return 0, ""
     props.sort(key=lambda r: r.get("ts", ""), reverse=True)
-    for r in props[:limit]:
+    _lines = []
+    for i, r in enumerate(props[:limit], 1):
         pid = r["id"]; args = r.get("args") or {}
         PENDING_ACTIONS[pid] = {"tool": r["tool"], "args": args, "uid": r.get("uid"),
                                 "summary": r.get("summary"), "thread": r.get("thread")}
         pending_actions.append({"id": pid, "tool": r["tool"], "args": args, "summary": r.get("summary")})
+        _lines.append(f"{i}. {_draft_excerpt(r['tool'], args)}")   # 実本文抜粋(憶測でなく真実源・Q3C)
     if not props:
         return 0, ""
-    note = (f"承認待ちの下書きが **{len(props)}件** ございます。下の各カードで**内容を確認**し、"
-            "**「送信」か「破棄」を選択**してくだされ（本文の編集も可）。")
+    note = (f"承認待ちの下書きが **{len(props)}件** ございます。中身は以下の通り——\n\n"
+            + "\n".join(_lines)
+            + "\n\n下の各カードで**内容を確認**し、**「送信」か「破棄」を選択**してくだされ（本文の編集も可）。")
     if len(props) > limit:
         note += f"（多いため直近{limit}件を表示。残りは順次）"
     return len(props), note
+
+
+def _briefing_draft_cards(who, limit=4):
+    """開門ブリーフィングで滞留下書きを『承認カード』として直接出す(一往復短縮・Fable Q4)。
+    テキストで『下書きがある』と述べて殿の「なに?」→「表示?」→「おねがい」の往復を待たず、
+    最初から中身＋送信/破棄ボタンを提示する。返り=card list(PENDING_ACTIONSへ登録済)。"""
+    cards = []
+    if not casper_outbox:
+        return cards
+    try:
+        props = [r for r in casper_outbox.pending(who.get("uid"))
+                 if r.get("tool") in ("send_message", "aurora_create", "aurora_append")]
+    except Exception:
+        return cards
+    props.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    for r in props[:limit]:
+        pid = r["id"]; args = r.get("args") or {}
+        PENDING_ACTIONS[pid] = {"tool": r["tool"], "args": args, "uid": r.get("uid"),
+                                "summary": r.get("summary"), "thread": r.get("thread")}
+        cards.append({"id": pid, "tool": r["tool"], "args": args, "summary": r.get("summary")})
+    return cards
+
+
+# ── Q1 選択カード機構(Fable): 曖昧な指示語で対象が複数の時、qwenに推測(捏造)させず人に選ばせる ──
+_DEICTIC_RE = re.compile(r"(それ|あれ|これ|その件|あの件|この件|例の(件|やつ|resep|資料|下書き)?|"
+                         r"さっきの(やつ|件|下書き|資料)?|くだんの|先ほどの(件|下書き|資料)?)")
+_DEICTIC_ACTION_RE = re.compile(r"(送|出し|進め|やっ|対応|承認|片付け|完了|返信|確認|処理|片づけ)")
+# 下書き候補の選択は『送る系』の意図に限定(下書き=送るもの)。確認/状態問い等での誤発火を避け精度を上げる。
+_DEICTIC_SEND_RE = re.compile(r"(送|出し|返信|連絡|報告し|通達|通知し|承認|片付け|片づけ|進め|対応)")
+
+
+def _deictic_word(q):
+    m = _DEICTIC_RE.search(q or "")
+    return m.group(0) if m else "その件"
+
+
+def _build_choices(who, query, convo=None):
+    """曖昧な指示語(それ/あの件/例の…)＋action意図で、対象候補が2件以上あり得る時、
+    qwenに1つを推測(=捏造リスク)させず『選択カード』で人に決めさせる(Fable Q1・say型・接地の機構化)。
+    候補は機構が真実源(承認待ち下書き)から決定的に列挙。返り choices dict(prompt/options) or None。
+    say型: 各optionのsayは、選ぶと『その対象への具体指示』として/api/chatへ再投入される自足文。"""
+    q = query or ""
+    if not _DEICTIC_RE.search(q) or not _DEICTIC_SEND_RE.search(q):   # 曖昧指示語＋『送る系』意図の時だけ(誤発火抑制)
+        return None
+    if not casper_outbox:
+        return None
+    try:
+        props = [r for r in casper_outbox.pending(who.get("uid"))
+                 if r.get("tool") in ("send_message", "aurora_create", "aurora_append")]
+    except Exception:
+        return None
+    if len(props) < 2:                                      # 候補1件以下=曖昧でない→通常フロー(surface/router)に委ねる
+        return None
+    props.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    opts = []
+    for r in props[:6]:
+        nm, _to, body = _draft_recipient_body(r.get("tool"), r.get("args") or {})
+        ex = re.sub(r"\s+", " ", (body or "")).strip()
+        opts.append({"id": r["id"],
+                     "label": (f"{nm} 宛の下書き" if r.get("tool") == "send_message" else f"{nm}"),
+                     "preview": (ex[:80] + ("…" if len(ex) > 80 else "")) or "(本文なし)",
+                     "say": f"{nm}宛の下書き「{ex[:60]}」を送信して"})
+    return {"prompt": f"『{_deictic_word(q)}』が指す下書きが**{len(props)}件**ございます。どれにいたしましょう？",
+            "options": opts}
 
 
 def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None):
@@ -642,11 +802,19 @@ def _clean_dm_body(body):
     return b.strip()
 
 
-def _action_router(user_msg, context, who, convo=None):
+def _action_router(user_msg, context, who, convo=None, gate=None):
     """P2(Fable処方 propose→execute→render): 依頼が send_message(DM)かを制約デコードで判定し、型付き引数
     (to_user_id, body)を抽出。自由文 tool-call を作らせず機構が承認カードを起こす。返り {tool,args,reply} or None。
-    ——qwenがテキストで関数を書く経路を通さないので、salvage のモグラ叩きが不要になる。convo=直前の会話(『上記』解決用)。"""
+    ——qwenがテキストで関数を書く経路を通さないので、salvage のモグラ叩きが不要になる。convo=直前の会話(『上記』解決用)。
+    gate=人ごと理解ゲートの解決結果(別名→人 の決定的宛先解決に使う・Fable①: roster前段に alias 辞書を挟む)。"""
     roster_lines = "、".join(f"{nm}=uid{uid}" for uid, nm in list(_ROSTER_MAP.items())[:40])
+    # 理解ゲート: この人固有の"別名→人"を名簿に前置(決定的ルックアップ)。宛先の向き誤読を機構で防ぐ。
+    _alias_person = {}   # say(小文字) -> uid
+    for a in (gate or {}).get("alias_refs", []):
+        r = a.get("ref") or {}
+        if r.get("type") in ("person", "user") and r.get("id"):
+            roster_lines = f"{a.get('say')}=uid{r['id']}、" + roster_lines
+            _alias_person[str(a.get("say") or "").lower()] = str(r["id"])
     sys_j = ("あなたはCasperのアクション抽出器 兼 DM代筆者。ユーザーの依頼が『特定の相手へのDM/メッセージ送信』なら、"
              "送るべき本文を作り JSON だけで返せ。単なる質問・一覧要求・雑談など送信でなければ is_dm=false。\n"
              f"社員名簿(名前=uid): {roster_lines}\n"
@@ -693,6 +861,11 @@ def _action_router(user_msg, context, who, convo=None):
     to = str(d.get("to_user_id") or "")
     m = re.search(r"(\d+)", to)
     to = m.group(1) if m else {v: k for k, v in _ROSTER_MAP.items()}.get(to)
+    # 理解ゲート決定的override: 発話にこの人固有の別名(→人)が含まれるなら、宛先はその uid を正とする(向き誤読の機構的根治)
+    for _say, _uid in _alias_person.items():
+        if _say and _say in (user_msg or "").lower():
+            to = _uid
+            break
     body = _clean_dm_body(str(d.get("body") or "").strip())   # プレーンテキスト整形(読みやすさ・&amp;除去)
     # 『上記のリスト/タスクをそのまま』のDMは、qwenに要約させず会話にある一覧を verbatim で付ける
     # (殿御下命『基本リストはそのまま・模造排除』・項目落ち/再計算をさせぬ)。上記〜件の間に文字を許容＋
@@ -759,6 +932,35 @@ def _validate_assets(text):
         return m.group(0) if _fn(m.group(2)) in real else f"[未確認: {m.group(1)}]"
     text = re.sub(r"(?<!!)\[([^\]]+)\]\((/asset/[^)\s]+)\)", _lnk, text)
     return re.sub(r"\n{3,}", "\n\n", text)
+
+
+_NAKED_CHOICE_RE = re.compile(
+    r"(送信(する)?か.{0,8}(破棄|却下|中止|削除)(する)?か|"
+    r"(破棄|却下|削除)(する)?か.{0,8}(送信|承認)|"
+    r"(どちら|いずれ|どれ)(に|を|か).{0,12}(選択|選ん|お選び|決め|して)|"
+    r"(選択|お選び|選ん)(して)?(ください|下さい|くだされ)|"
+    r"(送信|承認|却下|破棄)(するか|を)(選択|お選び|決め))",
+    re.I)
+
+
+def _validate_choices(text, pending_actions, choices=None):
+    """【選択の出口検問=Fable Q2・不変条件①】『選択してください』等の選択要求を書くなら、必ず選択装置
+    (承認カード or choices)が随伴していること。裸の選択要求(装置なし)は該当文を削除し中立な誘導へ差し替える。
+    弱モデルが『選べ』と言うだけで選択手段を出さぬ事故(殿指摘)を出口で機械的に封じる最終防壁。"""
+    if not text:
+        return text
+    if pending_actions or choices:                          # 選択装置が随伴→正当な選択要求。素通し
+        return text
+    if not _NAKED_CHOICE_RE.search(text):
+        return text
+    # 裸の選択要求: その文を落とし、選べぬ理由/次の一手へ中立に差し替える(delete+redirect)
+    parts = re.split(r"(?<=[。\n])", text)
+    kept = [p for p in parts if not _NAKED_CHOICE_RE.search(p)]
+    out = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
+    if not out or len(out) < 8:
+        out = ("お選びいただける項目が今はございませぬ。『下書きを見せて』等とお申し付けあらば、"
+               "中身つきの選択肢（承認/破棄ボタン）を機構でお出しいたす。")
+    return out
 
 
 def _validate_report_html(html):
@@ -1210,18 +1412,67 @@ def thread_delete(who, tid):
     return {"ok": True}
 
 
+_PORTF_ALL_RE = re.compile(r"(全部|全て|すべて|全件|一覧|全実績|網羅|残り|他の|もっと|フル|full|list)", re.I)
+
+
+def _portfolio_rows():
+    """portfolio.md を {id: (公開日,タイトル,尺,リンク行)} に解析(ヘッダ行はそのまま返す)。"""
+    p = os.path.join(VAULT, "30_culture_rules", "ops_vimeo_portfolio.md")
+    rows, header = [], ""
+    for ln in open(p, encoding="utf-8"):
+        if re.match(r"\|\s*公開日", ln):
+            header = ln.rstrip("\n")
+        m = re.match(r"\|.*?https://vimeo\.com/(\d+)", ln)
+        if m:
+            rows.append((m.group(1), ln.rstrip("\n")))
+    return header, rows
+
+
+def _featured_entries():
+    """portfolio_curation.yaml の featured エントリ列(順序保持)。各 entry は {id, [title,date,dur,link]}。
+    md に無いID(例: ライブVimeoの社内ショーリール)は entry のインラインメタで行を組める=curation.yamlが真実源。"""
+    cp = os.path.join(VAULT, "30_culture_rules", "portfolio_curation.yaml")
+    try:
+        import yaml
+        d = yaml.safe_load(open(cp, encoding="utf-8")) or {}
+        return [e for e in (d.get("featured") or []) if e.get("id")]
+    except Exception:
+        return []
+
+
 def portfolio_digest(query):
-    """制作実績クエリ時、自社Vimeoポートフォリオを先読み注入(個人経歴との混同防止)。"""
+    """制作実績クエリ時、自社Vimeoポートフォリオを注入(個人経歴との混同防止)。
+    Q1(Fable): 弱モデルに『厳選せよ』と頼まず、厳選済み(curation.yaml の★)だけを注入する=注入量が期待出力量。
+    『全部/一覧/全件』等 明示時のみ全件注入。曖昧なら curated を既定(progressive disclosure)。"""
     if not re.search(r"実績|ポートフォリオ|portfolio|作品|制作事例|過去案件|どんな.*作", query or "", re.I):
         return ""
     try:
-        p = os.path.join(VAULT, "30_culture_rules", "ops_vimeo_portfolio.md")
-        if os.path.exists(p):
-            t = open(p, encoding="utf-8").read()
-            tbl = t.split("|", 1)
-            body = ("|" + tbl[1]) if len(tbl) > 1 else t
-            return ("\n\n## 自社制作実績(Vimeo公開・これが一次の会社実績)\n" + body[:3500]
-                    + "\n※会社実績はこのVimeo公開分を主に挙げよ。FF/Samurai Jack等は個人メンバーの経歴ゆえ区別。")
+        header, rows = _portfolio_rows()
+        if not rows:
+            return ""
+        want_all = bool(_PORTF_ALL_RE.search(query or ""))
+        feats = _featured_entries()
+        if not want_all and feats:                          # 代表系 or 既定 → ★のみ注入
+            fmap = dict(rows)
+            sel = []
+            for e in feats:
+                fid = str(e.get("id"))
+                if fid in fmap:                             # md に在れば md 行(公開日/タイトル/尺/リンク)
+                    sel.append(fmap[fid])
+                elif e.get("link"):                         # md に無い(社内ショーリール等)→ curation.yaml のインラインメタで行を組む
+                    sel.append(f"| {e.get('date','—')} | {e.get('title', fid)} | {e.get('dur','—')} | {e.get('link')} |")
+            rest = max(0, len(rows) - sum(1 for e in feats if str(e.get('id')) in fmap))
+            table = "\n".join([header, "|---|---|---|---|"] + sel)
+            return ("\n\n## 自社制作実績(代表作・Vimeo公開・一次の会社実績)\n" + table
+                    + f"\n※これは**代表作 {len(sel)}本の厳選**。公開実績は全{len(rows)}本(他{rest}本)。"
+                    "回答ではこの表の『タイトル(公開日・尺) リンク』を使え(リンクだけの羅列は禁止)。"
+                    "この厳選をそのまま提示し、勝手に全件へ広げるな。末尾に『全実績もお見せできます』と一言添えよ。"
+                    "\nFF/Samurai Jack等は個人メンバー経歴ゆえ会社実績と区別。")
+        # 全件明示 → 全件注入(截ち切れは自動継続機構が拾う)
+        body = "\n".join([header, "|---|---|---|---|"] + [r[1] for r in rows])
+        return ("\n\n## 自社制作実績(全件・Vimeo公開・一次の会社実績)\n" + body[:6000]
+                + f"\n※全{len(rows)}本。回答では『タイトル(公開日・尺) リンク』を使え(リンクだけの羅列は禁止)。"
+                "FF/Samurai Jack等は個人メンバー経歴ゆえ会社実績と区別。")
     except Exception:
         pass
     return ""
@@ -1427,6 +1678,110 @@ _STATE_Q_RE = re.compile(
     r"どうなっ(て|た)|進捗|状況|現状|状態|もう.{0,6}(？|\?)|終わってる|できてる)", re.I)
 
 
+# 人物の別名(漢字/カナ)→uid 索引: 「寺島」が roster「terajima」と一致せず主語解決に失敗する綻びの汎用解。
+# PJ名解決器(_pj_index)の人物版。ハードコードでなく vault/20_people/*.md から機構抽出(読み仮名の一部を自前で賄う)。
+_PERSON_ALIAS = {"mtime": 0.0, "idx": {}}
+
+
+def _person_alias_index():
+    """人物別名(漢字/カナ)→uid を 20_people/*.md から機構抽出。源: frontmatter name / 見出しの漢字カナ、
+    本文『◯◯さん』(漢字2-4字・2回以上=強シグナル)。uid は calendar_user_id。mtimeキャッシュ・検査可能。"""
+    import glob
+    pdir = os.path.join(HERE, "..", "vault", "20_people")
+    try:
+        latest = max((os.path.getmtime(f) for f in glob.glob(os.path.join(pdir, "*.md"))), default=0.0)
+    except Exception:
+        latest = 0.0
+    if latest == _PERSON_ALIAS["mtime"] and _PERSON_ALIAS["idx"]:
+        return _PERSON_ALIAS["idx"]
+    # alias -> {uid: strength}(strong=frontmatter/見出し由来 / weak=本文さんパターン)。corpus全体で衝突を集計し3値化(Fable P2)。
+    cand = {}
+
+    def _add(a, uid, strong):
+        if not a:
+            return
+        cand.setdefault(a, {})
+        cand[a][uid] = max(cand[a].get(uid, 0), 2 if strong else 1)
+    for f in glob.glob(os.path.join(pdir, "*.md")):
+        try:
+            txt = open(f, encoding="utf-8").read()
+        except Exception:
+            continue
+        muid = re.search(r"calendar_user_id:\s*(\d+)", txt)
+        if not muid:
+            continue
+        uid = int(muid.group(1))
+        for m in re.finditer(r"(?m)^(?:name:\s*|#\s+)(.+)$", txt):     # frontmatter name / 見出し=強ソース
+            v = re.sub(r"[（(].*", "", m.group(1)).strip()
+            if re.search(r"[一-龯ぁ-んァ-ヿ]", v) and not re.search(r"[A-Za-z]{3,}", v):
+                if len(v) >= 2:
+                    _add(v, uid, True)
+                mk = re.match(r"^([一-龯]{1,3})([ぁ-んァ-ヿ]{2,})$", v)   # 「黒丸クロマル」→姓「黒丸」+読み「クロマル」(単漢字姓も強ソースなら可・Fable P2)
+                if mk:
+                    _add(mk.group(1), uid, True); _add(mk.group(2), uid, True)
+        total, withsan = {}, {}                                        # 本文『◯◯さん』(漢字1-3字・単漢字姓も『さん』付き強シグナルなら可)
+        for m in re.finditer(r"[一-龯]{1,3}", txt):
+            total[m.group(0)] = total.get(m.group(0), 0) + 1
+        for m in re.finditer(r"([一-龯]{1,3})さん", txt):
+            withsan[m.group(1)] = withsan.get(m.group(1), 0) + 1
+        for k in withsan:                                              # 本文『◯◯さん』=弱ソース
+            if total.get(k, 0) < 2:
+                continue
+            if len(k) >= 2 and withsan[k] >= 1:                        # 2-3字姓: さん1回で可(寺島等)
+                _add(k, uid, False)
+            elif len(k) == 1 and withsan[k] >= 2:                      # 単漢字姓: 誤爆多いのでさん2回必須(堀さん等)
+                _add(k, uid, False)
+    # 3値化: alias が単一uid→採用。複数uid→強ソースが唯一勝者ならそれ、さもなくば ambiguous として落とす(silent-pick禁止)。
+    idx = {}
+    for a, uids in cand.items():
+        if len(uids) == 1:
+            idx[a] = next(iter(uids))
+        else:
+            mx = max(uids.values())
+            winners = [u for u, s in uids.items() if s == mx]
+            if len(winners) == 1:
+                idx[a] = winners[0]                                    # 強ソースの唯一勝者
+            # else: 同強度で複数uid=ambiguous→索引に入れない(誤帰属より未解決を選ぶ)
+    _PERSON_ALIAS.update({"mtime": latest, "idx": idx})
+    return idx
+
+
+def _resolve_person(query, exclude=None):
+    """クエリ中の人物を uid で解決。roster(ローマ字/カナ)優先→人物別名索引(漢字/カナ・vault由来)。
+    exclude=質問者本人uid(主語扱いしない)。返り=(uid, name) or (None, None)。"""
+    if not query:
+        return None, None
+    try:
+        if not _ROSTER_MAP:
+            _roster_refresh()
+        for u, nm in _ROSTER_MAP.items():
+            if str(u) == str(exclude):                        # roster キーは str・exclude は int/str 両対応
+                continue
+            nm = str(nm or "")
+            if len(nm) < 2:
+                continue
+            if re.fullmatch(r"[A-Za-z0-9]+", nm):             # ASCII名(ou/yu/li/tim等)は単語境界必須。ou⊂soul/tim⊂estimate の誤爆を断つ(Fable P0-2)
+                hit = re.search(r"(?<![A-Za-z0-9])" + re.escape(nm) + r"(?![A-Za-z0-9])", query, re.I)
+            else:                                             # 和名/カナ/複合名は部分一致
+                hit = re.search(re.escape(nm), query, re.I)
+            if hit:
+                return _uid_int(u), nm                        # assigned_to は int ゆえ int に正規化(str "34"のまま返すと照合が全外れ)
+    except Exception:
+        pass
+    for alias, uid in sorted(_person_alias_index().items(), key=lambda x: -len(x[0])):
+        if str(uid) != str(exclude) and alias in query:
+            return _uid_int(uid), _ROSTER_MAP.get(str(uid), alias)
+    return None, None
+
+
+def _uid_int(u):
+    """uid を int に正規化(roster キーは str・Calendar の assigned_to は int)。失敗時は原値。"""
+    try:
+        return int(u)
+    except Exception:
+        return u
+
+
 def verify_digest(who, query):
     """【検証ゲート=pre_verify機構】状態を問う問いには、応答前に live照会を強制し、
     出所タグ(live/帯/推測)を義務づける。掟②が"促す"だけだったのを"通さねば"の機構へ格上げ。
@@ -1448,12 +1803,50 @@ def verify_digest(who, query):
                     live += "\n【live: 本日タスク】\n" + tt[:900]
             except Exception:
                 pass
+        # 主語解決(Fable処方4-C): 問いが指す"人物"の live をその人のuidで引く(質問者本人でなく主語)。
+        # 証拠(live)なき人物断定=『◯◯氏の癖で作業中報告→未完了』の無接地雛形貼付を根で断つ。
+        # 漢字表記(寺島)も人物別名索引で解決(roster「terajima」と一致せぬ綻びの汎用解)。
+        subj_uid, subj_name = _resolve_person(query, exclude=uid)
+        subj_note = ""
+        if subj_uid:
+            try:
+                mine = [t for t in _all_tasks() if t.get("assigned_to") == subj_uid and _task_is_moving(t)]
+            except Exception:
+                mine = []
+            if mine:
+                _ls = [f"- {t.get('name') or t.get('title')} [{t.get('status_label') or t.get('status')}]"
+                       f" 〆{str(t.get('due_date') or '')[:10]}" for t in mine[:15]]
+                live += f"\n【live: {subj_name} の進行中(wip)タスク {len(mine)}件(Calendar)】\n" + "\n".join(_ls)
+            else:
+                live += f"\n【live: {subj_name} に現在 進行中(wip)の割当タスクは無し(Calendar)】"
+            subj_note = (f"\n・この問いの主語は人物『{subj_name}』。上の {subj_name} の live のみを状態の根拠にせよ。"
+                         "**live に無い断定(完了/未完了/🔴/『◯◯氏の癖で〜』等の人格由来の結論化)は禁止**。"
+                         "traitは読み方の手がかりであって結論ではない。裏取り材料が無ければ『現時点では未確認』と述べよ。")
+            # 主語×PJ の交差(Q3): 「marukomeでの寺島の進捗」型は、主語のそのPJ内割当を機構で確定し、
+            # 0件なら『当該PJに未アサイン』と明言させる(『記録なし→①②③どれ?』のメニュー逃げを封じる)。
+            _pst, _pnames, _ = _pj_resolve(query)
+            if _pst == "unique":
+                try:
+                    _items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+                    _pid = next((p.get("id") for p in _items if str(p.get("name")) == _pnames[0]), None)
+                    _inpj = [t for t in _all_tasks() if t.get("assigned_to") == subj_uid and t.get("project_id") == _pid]
+                except Exception:
+                    _inpj = []
+                if _inpj:
+                    live += (f"\n【live: {subj_name} の {_pnames[0]} 内タスク {len(_inpj)}件】\n"
+                             + "\n".join(f"- {t.get('name') or t.get('title')} [{t.get('status_label') or t.get('status')}]"
+                                         f" 〆{str(t.get('due_date') or '')[:10]}" for t in _inpj[:15]))
+                    subj_note += f"\n・{subj_name} は {_pnames[0]} に上記の割当あり。これを根拠に進捗を述べよ。"
+                else:
+                    subj_note += (f"\n・**{subj_name} は {_pnames[0]} に現在アサインされたタスクが無い(割当0)。"
+                                  f"これを明言せよ。①②③のような選択肢メニューで逃げず『{subj_name} は {_pnames[0]} に"
+                                  "現在の割当なし』と機構の事実として答える(他PJに割当があるなら1文で触れてよい)。**")
         return ("\n\n## 【検証ゲート】状態確認の問い — 応答前の裏取り必須\n"
                 "この問いは『状態(〜された?/上がった?/どうなってる?/進捗)』を尋ねている。掟②に従い:\n"
                 "・動向層の帯は as-of 時点のスナップショットゆえ、その古い記述を『結末』と誤認して断定するな。\n"
                 "・下記の live 照会を最優先の根拠にせよ。live に無ければ『現時点では確認できておらぬ』と正直に述べよ。\n"
                 "・**回答の各事実に出所を明示せよ**: 【live】(今照会した実状態)／【帯】(動向層の過去記述)／【推測】。\n"
-                "・**出所タグの無い状態断定は禁止**。"
+                "・**出所タグの無い状態断定は禁止**。" + subj_note
                 + (live or "\n(live照会は取得できず＝『未確認』として答えよ)"))
     except Exception:
         return ""
@@ -1524,7 +1917,7 @@ def projects_digest(query):
         online = [p for p in items if str(p.get("display_status") or "online") == "online"]
         # 発火: 一般PJ語(_PROJ_Q_RE) or online PJ名を直接含む問い(『marukomeは今どうなってる?』等の個別PJ照会=
         # ツール呼びの漏れを防ぐ・データを注入して一覧から答えさせる)
-        _name_hit = any(len(str(p.get("name") or "")) >= 3 and str(p.get("name")) in query for p in online)
+        _name_hit = bool(_match_online_pj(query))        # 表記ゆれ耐性(カタカナ⇄ローマ字)でPJ名照合
         if not (_PROJ_Q_RE.search(query) or _name_hit):
             return ""
         if not online:
@@ -1547,6 +1940,303 @@ def projects_digest(query):
                 "ただし DM送信(send_message)等の別アクションは通常通りツールで実行せよ(送信前は承認待ち下書きになる。"
                 "まだ送っていないのに『報告しました/送信しました』と既成事実化するな)**:\n"
                 + "\n".join(lines) + latenote)
+    except Exception:
+        return ""
+
+
+def entity_digest(query):
+    """【実体アイデンティティ=unique解決の出口に中身を配線(Fable処方3-B)】名前解決器が unique に解けたPJの
+    Calendar実レコード(正規名/期間/状態/概要)を『このPJの正体』として注入。名前から社名/意味を推測する真空を埋め、
+    marukome→丸亀製麺 の幻覚展開を断つ。閉集合(解決済み実体のみ)ゆえ軽い。unique でなければ空。"""
+    try:
+        if not query:
+            return ""
+        st, names, _ = _pj_resolve(query)
+        if st != "unique":
+            return ""
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        p = next((x for x in items if str(x.get("name")) == names[0]), None)
+        if not p:
+            return ""
+        desc = (p.get("description") or "").replace("\n", " ").strip()[:220]
+        sd = str(p.get("start_date") or "")[:10]
+        ed = str(p.get("end_date") or "")[:10]
+        return ("\n\n## 【このPJの正体(これが全て・名前から社名/読みを推測するな)】\n"
+                f"- 正規名: {names[0]}\n"
+                f"- 状態: {p.get('status')}／期間: {sd or '—'}〜{ed or '—'}\n"
+                + (f"- 概要: {desc}\n" if desc else "")
+                + "**この実レコードだけがこのPJの正体。名前の字面から社名・商品名・意味を勝手に補完/展開するな"
+                "(例『◯◯（△△株式会社）』のような括弧書きの推測は禁止)。上の概要に無い属性を創作するな。**")
+    except Exception:
+        return ""
+
+
+# チーム構成/人員体制/外注 の問いを検知(自社の実職能で答えさせる為・Fable処方5-D)
+_TEAM_Q_RE = re.compile(
+    r"(チーム|体制|人員|要員|布陣|構成|何人|人数|外注).{0,12}(構成|体制|理想|組め|組む|提案|必要|どう|案|最適|振り分け)|"
+    r"(理想|最適|どんな|どういう|どう).{0,8}(チーム|体制|人員|布陣|構成)", re.I)
+
+
+def team_vocab_digest(query):
+    """【自社の職能語彙=機構抽出(Fable処方5-D)】チーム構成の問いに、汎用IT職(PM/QA/エンジニア)でなく
+    自社(CG/VFX)の実職能で答えさせる。職能語彙は Calendar 全タスクの type(工程)ラベルの distinct から機構抽出
+    (散文でハードコードせず真実源準拠・自動更新)。チーム構成の問いでなければ空。"""
+    try:
+        if not query or not _TEAM_Q_RE.search(query):
+            return ""
+        from collections import Counter
+        c = Counter()
+        for t in _all_tasks():
+            v = (t.get("type") or "").strip()
+            if v:
+                c[v] += 1
+        roles = [k for k, _ in c.most_common(14)]
+        if not roles:
+            return ""
+        return ("\n\n## 【自社の職能語彙(Calendar実タスクの工程から機構抽出)】\n"
+                f"当社(studio bokan=CG/VFX制作)の実際の工程/職能: {'、'.join(roles)}。\n"
+                "**チーム構成を答える時は、この自社の実職能(アニメーション/コンポジット/ライティング/FX/モデリング等)で"
+                "組め。汎用IT職(PM/QA/エンジニア/Webデザイナー)の一般論に流すな。**外注も同じ工程語彙で振り分けよ。")
+    except Exception:
+        return ""
+
+
+# 今後アサインされているPJ の問いを検知(殿指示2026-07-10: 「予定される→されている」=Calendarに既に入っている先の割当を見る)。
+_FUTURE_ASSIGN_RE = re.compile(
+    r"(今後|次(の|に)?|これから|将来|以降|後に|終わ(った|り).{0,4}後).{0,14}(アサイン|プロジェクト|PJ|案件|仕事|参加|入る|予定|やる)|"
+    r"(アサイン|参加).{0,8}(予定|されている|される)|次(の)?(プロジェクト|案件|PJ|現場|仕事)", re.I)
+
+
+def future_assign_digest(query, who):
+    """【今後アサインされているPJ=retrieve-then-derive(殿指示2026-07-10)】主語(人物・無ければログイン本人)の、
+    Calendarに既に入っている先の割当=①未来開始(start>=today)タスク ②未完(status未完)の残務 を工程/PJ別に機構導出。
+    『予定される』でなく『既に予定されている』ものを見る。無ければ正直に『今後の新規アサインは未登録』＋残務を示す。"""
+    try:
+        if not query or not _FUTURE_ASSIGN_RE.search(query):
+            return ""
+        uid, name = _resolve_person(query, exclude=None)      # クエリに人物名→その人／無ければログイン本人
+        if not uid:
+            # Fable P2: 人物らしきトークン(◯◯さん/漢字姓)があるのに未解決なら、黙って本人へ落とさない(第三者を本人の予定で語る事故)
+            if re.search(r"[一-龯ぁ-ヿ]{1,4}さん|[A-Za-z]{2,}\s*さん", query):
+                return ("\n\n## 【今後アサイン=人物未特定】\n"
+                        "クエリに人物名らしき語があるが roster/人物索引で特定できなかった。"
+                        "**誰の予定かを勝手にログイン本人と仮定して答えるな。**『どなたの今後アサインでしょう？(お名前を)』"
+                        "と聞き返すか、名前が曖昧なら候補を挙げて確認せよ。")
+            uid = _uid_int(who.get("uid")); name = _ROSTER_MAP.get(str(who.get("uid")), "あなた")
+        if not uid:
+            return ""
+        today = datetime.date.today().isoformat()
+        proj = {p.get("id"): p for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+        mine = [t for t in _all_tasks() if t.get("assigned_to") == uid]
+        import collections
+        fut = collections.defaultdict(int)                    # 未来開始
+        rem = collections.defaultdict(int)                    # 未完の残務
+        for t in mine:
+            if str(t.get("start_date") or "")[:10] >= today:
+                fut[t.get("project_id")] += 1
+            if _task_open(t):                                 # 残務判定はcategory単一ソースの _task_open に寄せる(Fable P1-2)
+                rem[t.get("project_id")] += 1
+
+        def _pjdetail(pid, n):
+            p = proj.get(pid, {})
+            ed = str(p.get("end_date") or "")[:10]
+            ds = (p.get("description") or "").replace("\n", " ").strip()[:80]
+            return f"- {p.get('name', pid)}（{n}件・〆{ed or '—'}" + (f"・{ds}" if ds else "") + "）"
+        out = f"\n\n## 【{name} の今後アサイン=Calendar確定・本日{today}】\n"
+        if fut:
+            out += "今後開始(未来start)の割当:\n" + "\n".join(_pjdetail(k, v) for k, v in fut.items()) + "\n"
+        else:
+            out += "**今後開始(未来start)の新規アサインは Calendar に未登録。**\n"
+        if rem:
+            out += "現在の残務(未完タスク):\n" + "\n".join(_pjdetail(k, v) for k, v in rem.items()) + "\n"
+        else:
+            out += "現在の未完タスクも無し(手が空いている)。\n"
+        out += ("**この確定結果で答えよ。『予定される(不確定)』でなく『既にCalendarに入っている先の割当』を見た結果。"
+                "今後の新規アサインが未登録なら、その事実＋現在の残務を正直に述べよ(将来PJを推測で創作するな)。**")
+        return out
+    except Exception:
+        return ""
+
+
+# FB/チェックログ/リテイク の問いを検知(殿指示2026-07-10: FBログはスレッドのテキスト＋対象カットのretake記録に在る)。
+_FBLOG_Q_RE = re.compile(
+    r"(fb|フィードバック|リテイク|retake|差し戻し|検収|レビュー内容|チェックログ|"
+    r"(チェック|指示|やり取り|コメント|レビュー).{0,4}(内容|ログ|履歴|記録)|"
+    r"(ログ|履歴).{0,6}(教え|見せ|見たい|ある|は|を|くれ))", re.I)
+
+
+def fb_log_digest(query):
+    """【FBログ=スレッドテキスト＋retake記録(殿指示2026-07-10)】FB/リテイク/チェックログの問いは、議事録・各人の
+    activity逐語・DMスレッド＋対象カットの status 遷移(dir_ap=監督承認/retake=差し戻し)がFBログの実体。retrieved の
+    スレッド記録を『記録されていない』と却下させず、それをFBログとして提示させる(却下してから中身を出す自己矛盾の封じ)。"""
+    try:
+        if not query or not _FBLOG_Q_RE.search(query):
+            return ""
+        # ① まず対象カットのstatusを確定(素通り承認 vs 係争中FB)。これが framing を支配する。
+        st, names, _ = _pj_resolve(query)
+        mcut = re.search(r"(?:cut|カット|c)\s*0*(\d{1,3})\b", query, re.I)   # 接頭辞必須(『10月分』の数字を拾わない・Fable P1-4)
+        cut_block, cut_clean = "", None
+        if st == "unique" and mcut:
+            cutn = int(mcut.group(1))                          # カット番号を int で持ち shotID側の数字と int 等値照合(c01⊄c001 の取りこぼし防止)
+            items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+            pid = next((p.get("id") for p in items if str(p.get("name")) == names[0]), None)
+
+            def _shot_num(t):
+                m = re.search(r"c(?:ut)?0*(\d{1,3})", str(t.get("shotID") or t.get("shot_id") or t.get("name") or ""), re.I)
+                return int(m.group(1)) if m else None
+            try:
+                ct = [t for t in _all_tasks() if t.get("project_id") == pid and _shot_num(t) == cutn]
+            except Exception:
+                ct = []
+            if ct:
+                cut = f"c{cutn:02d}"
+                lines = [f"- {t.get('type') or t.get('name')}: {t.get('status_label') or t.get('status')}"
+                         f"（{t.get('status_category')}）" for t in ct]
+                has_active = any(_task_fb_active(t) for t in ct)   # 係争中FB=category単一ソース(承認/FBの区別のみstatus値・Fable P1-2)
+                cut_clean = not has_active
+                cut_block = (f"\n\n【{names[0]} {cut} の工程別status(検収/retake履歴の一次・Calendar)】\n" + "\n".join(lines))
+        # ② framing: カットがclean(素通り承認)なら、そのカットに固有のFBスレッドは無い＝両事実併記が支配的。
+        #    そうでなければ、スレッドが実際に retrieve できたか(_has_thread)で命令強度を機構選択(Fable P1-3)。
+        if cut_clean is True:
+            note = ("\n\n## 【FB/チェックログ=このカットは素通り承認(殿指示)】\n"
+                    + cut_block +
+                    "\n→ このカットの工程は全て承認(Dir_AP)/省略(Omit)/納品(Deliver)＝**差し戻し(retake)も係争中FBも無い**。"
+                    "個別のFBやり取りスレッドは無い。**欠落調に『記録されていません』とだけ言うのでなく、"
+                    "『個別のFBやり取りの記録は無いが、retakeなく承認/省略で通った(素通りで承認済み)』と両事実を併せて**伝えよ。"
+                    "無い内容(スレッド本文)を在る風に創作するな。")
+            return note
+        _has_thread = False
+        try:
+            _has_thread = bool(casper_rag and casper_rag.search(query, k=4))
+        except Exception:
+            _has_thread = False
+        if _has_thread:
+            note = ("\n\n## 【FB/チェックログの読み方(殿指示・retrieve-then-render)】\n"
+                    "**FBログの実体は『スレッドのテキスト』＝議事録／各人のactivity逐語／DMのやり取り、および対象カットの "
+                    "status 遷移(retake記録)にある。** 下に注入された関連社内記録(RAG/activity/議事録)や、get_messages で読める"
+                    "スレッド本文が、まさにFBログそのもの。\n"
+                    "・**下に該当スレッドが注入されている時は『FB内容は記録されていない』と却下するな**。retrieved の議事録/"
+                    "activity逐語・主体交代・色味/リテイクのやり取りを『FBログ』として具体的に提示せよ(却下してから中身を書く自己矛盾は禁止)。\n"
+                    "・status 遷移(dir_ap=監督承認済 / wip=作業中 / retake・差し戻し)＝検収と差し戻しの履歴。これも記録として述べよ。")
+        else:
+            note = ("\n\n## 【FB/チェックログの読み方(殿指示)】\n"
+                    "この問いのFBログは『スレッド(議事録/activity/DM)＋対象カットのstatus遷移』にある。"
+                    "**ただし今回、関連スレッドは retrieve できていない。status遷移のみを記録として述べ、"
+                    "スレッド本文の中身は創作するな**(無い内容を在る風に書くのは禁止)。status で語れる範囲を述べ、"
+                    "詳細が要るなら get_messages/議事録の確認を案内せよ。")
+        if cut_block:                                          # 係争中FBのカット: statusを注入し、retrievedスレッドのやり取りを提示させる
+            note += cut_block + ("\n→ このカットは係争中のFB/確認(QC_FB/Dir_WT/WIP等)を含む。"
+                                 "retrieved スレッドのやり取りをFBとして具体的に提示せよ。")
+        return note
+    except Exception:
+        return ""
+
+
+# 現フェーズ締切・次回社内チェックの問いを検知(殿指示2026-07-10: Calendarのtask type/due/チェックタスクから導出可能)。
+_PHASE_Q_RE = re.compile(
+    r"(現(在の)?フェーズ|今のフェーズ|フェーズ.{0,4}(締切|締め切り|期限|末|終|いつ)|"
+    r"次回.{0,6}(チェック|社内|確認|レビュー|提出)|社内チェック|チェック日|チェック.{0,4}(いつ|日)|"
+    r"(現|今)(の|)?(工程|フェーズ).{0,6}(締|期限|末|いつ)|(工程|フェーズ).{0,4}(締切|締め切り|期限))", re.I)
+
+_CHECK_NAME_RE = re.compile(r"チェック|確認|提出|レビュー|review|check|社内", re.I)
+
+
+def phase_schedule_digest(query):
+    """【現フェーズ締切・次回社内チェック=retrieve-then-derive(殿指示2026-07-10)】milestone登録は不要——
+    タスクの type(工程)＋due_date で工程別期日を、チェック/提出タスク名で社内チェック日を機構が導出し注入。
+    プロジェクト end_date(最終納期)を『現フェーズ締切』と誤認するのを断つ。フェーズ/チェック問い＋unique PJでなければ空。"""
+    try:
+        if not query or not _PHASE_Q_RE.search(query):
+            return ""
+        st, names, _ = _pj_resolve(query)
+        if st != "unique":
+            return ""
+        nm = names[0]
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        pid = next((p.get("id") for p in items if str(p.get("name")) == nm), None)
+        tks = [t for t in _all_tasks() if t.get("project_id") == pid]
+        if not tks:
+            return ""
+        today = datetime.date.today().isoformat()
+        import collections
+        bp = collections.defaultdict(lambda: {"n": 0, "inc": 0, "moving": 0, "dues": []})
+        for t in tks:
+            ph = t.get("type") or "?"
+            d = bp[ph]
+            d["n"] += 1
+            if _task_open(t):                                  # 残務(category単一ソース・Fable P1-2)
+                d["inc"] += 1
+            if _task_is_moving(t):                             # 実際に動いている(category==in_progress)
+                d["moving"] += 1
+            if t.get("due_date"):
+                d["dues"].append(str(t["due_date"])[:10])
+        # 現フェーズ導出(Fable P1-1): ①wip(実際に動いている)工程が真の現フェーズ→複数なら締切最先。
+        # ②wipが無ければ未完工程のうち"最先"(min max-due)=次にやるべき工程。compが常に未完だから最後尾を取る誤りを断つ。
+        rows = []
+        moving_ph, open_ph = [], []
+        for ph, d in sorted(bp.items(), key=lambda x: (max(x[1]["dues"]) if x[1]["dues"] else "")):
+            if ph == "?" or not d["dues"]:
+                continue
+            mx = max(d["dues"])
+            rows.append(f"- {ph}: 期日 {min(d['dues'])}〜{mx}（全{d['n']}・未完{d['inc']}・進行中{d['moving']}）")
+            if d["moving"] > 0:
+                moving_ph.append((ph, mx))
+            if d["inc"] > 0:
+                open_ph.append((ph, mx))
+        cur = (moving_ph[0] if moving_ph else (open_ph[0] if open_ph else None))   # wip優先→無ければ未完の最先
+        # チェック/提出タスク(名前パターン)を期日順に、今日以降=次回
+        checks = sorted([(str(t.get("due_date") or "")[:10], t.get("name") or t.get("title") or "", t.get("status") or "")
+                         for t in tks if _CHECK_NAME_RE.search(t.get("name") or t.get("title") or "")],
+                        key=lambda x: x[0])
+        nextchk = next((c for c in checks if c[0] and c[0] >= today), None)
+        chk_lines = "\n".join(f"- {c[0]} {c[1]}（{c[2]}）" for c in checks) or "-（チェック/提出と判る名のタスクは無し）"
+        _basis = "（進行中の工程）" if moving_ph else "（着手前/停滞中の最先の未完工程）"
+        derived = (f"→ **現フェーズ = {cur[0]}{_basis}・そのフェーズ締切 = {cur[1]}**" if cur else "→ 未完の工程が無い（全工程 完了扱い）") + \
+                  (f"／**次回の社内チェック/提出 = {nextchk[0]} {nextchk[1]}**" if nextchk else
+                   f"／次回の社内チェック予定は無し（直近は {checks[-1][0]} {checks[-1][1]}）" if checks and checks[-1][0] else "")
+        return (f"\n\n## 【{nm} のフェーズ/チェック=Calendarのtask(type/due)から機構導出・本日{today}】\n"
+                "**プロジェクトの end_date(最終納期)を『現フェーズ締切』と混同するな。工程(type)別の期日で答えよ**:\n"
+                "工程別の期日:\n" + "\n".join(rows) +
+                "\nチェック/提出タスク(期日順):\n" + chk_lines +
+                "\n" + derived +
+                "\n**上の導出結果を根拠に、現フェーズの締切と次回社内チェック日を具体的な日付で答えよ(『登録されていない』で逃げるな)。**")
+    except Exception:
+        return ""
+
+
+# NINA/撮影の機材・ギアリストの問いを検知(殿指示2026-07-10)。機材語＋NINA/LED/撮影文脈のAND条件で発火。
+_GEAR_Q_RE = re.compile(
+    r"(ギアリスト|機材|機器|装置|セットアップ|(gear|equipment).?list|"
+    r"(撮影|現場|設営|施工|セット).{0,6}(必要|準備|道具|もの|物))", re.I)
+
+
+def gear_digest(query):
+    """【NINA機材=retrieve-then-render(殿指示2026-07-10)】機材/ギアリストの問いに、ops_spatial_tech.md の
+    機材節(デバイス/制御スペック＋技術スタック)を決定的に注入し、qwenが一般知識で製品名(Canon等)を上乗せするのを断つ。
+    撮影機材はiPhone/insta360/depthであってCanon等ではない=vault記載に無い機材を足させない。機材問い＋NINA文脈でなければ空。"""
+    try:
+        if not query or not _GEAR_Q_RE.search(query):
+            return ""
+        # Fable P2: 誤ドメイン注入回避——NINA/空間演出系の固有文脈に限定(汎用の『撮影機材』にNINA機材を真実源として被せない)
+        if not (re.search(r"(nina|ニーナ|art-?net|aurora|LED|空間演出|プロジェクションマッピング|プロマッピング|ドローンショー)", query, re.I)
+                or _pj_resolve(query)[0] == "unique"):
+            return ""
+        p = os.path.join(HERE, "..", "vault", "30_culture_rules", "ops_spatial_tech.md")
+        txt = open(p, encoding="utf-8").read()
+        want = ("デバイス/制御スペック", "技術スタックまとめ")
+        secs = re.split(r"(?m)^(?=#{2,3} )", txt)
+        picked = [s.strip() for s in secs if any(w in s.split("\n", 1)[0] for w in want)]
+        if not picked:
+            if casper_trace:                                   # 見出し改名で節が拾えぬ=黙って消えずfail-loud(Fable P2)
+                try: casper_trace.emit({"warn": "gear_digest: sections not found in ops_spatial_tech.md", "want": list(want)})
+                except Exception: pass
+            return ""
+        body = "\n\n".join(picked)[:2600]
+        # 製品名はコードに書かない(vaultが真実源・掟)。指示は「上記vault記載外の製品名を足すな」の汎用形のみ(Fable P2)。
+        return ("\n\n## 【NINA/空間演出 機材の真実源(vault: ops_spatial_tech.md・確定)】\n"
+                + body +
+                "\n──\n**機材リストは上記vault記載の機材だけで答えよ。ここに載っていない製品名(カメラ/PC/スイッチ等)を"
+                "一般知識で補完・上乗せするな(=捏造)。** 正典の詳細ファイル(SMB/X:等)がある旨は添えてよいが、機材の実体は上記が真実源。")
     except Exception:
         return ""
 
@@ -1594,7 +2284,338 @@ def active_tasks_digest(query):
         act = [t for t in tasks if _task_is_moving(t)]   # API category=='in_progress' 優先(内蔵setはfallback)
         if not act:
             return "\n\n## 【現在進行中(wip)のタスク】\n現在 wip 状態のタスクはありません(この事実を答えよ)。"
-        pm = {p.get("id"): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+        _pjs = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        pm = {p.get("id"): p.get("name") for p in _pjs}
+        due_m = {p.get("id"): str(p.get("end_date") or "")[:10] for p in _pjs}   # ③ 期限ファセット
+        try:
+            um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                  for u in casper_tools._get("/users?limit=200").get("items", [])}
+        except Exception:
+            um = {}
+        import collections
+        _today = datetime.date.today()
+        byp = collections.defaultdict(list)
+        for t in act:
+            byp[t.get("project_id")].append(t)
+        lines = []
+        for pid, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
+            nm = pm.get(pid, pid or "?")
+            who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
+            due = due_m.get(pid, "")
+            od = ""
+            try:
+                d = datetime.date.fromisoformat(due)
+                if d < _today:
+                    od = f"（🔴{(_today - d).days}日超過）"
+                elif d == _today:
+                    od = "（本日締切）"
+            except Exception:
+                pass
+            lines.append(f"- **{nm}**: {len(ts)}件 | 担当 {', '.join(who_names[:6])} | 締切 {due or '—'}{od}")
+        return (f"\n\n## 【現在進行中(wip/工程)のタスク一覧(Calendar・確定)】\n"
+                f"全プロジェクトで進行中のタスクは計 {len(act)}件。**この一覧を根拠に答えよ。"
+                "get_today_tasks(本日締切のみ)や特定PJ(marukome等)に狭めず、全PJの進行中を示せ。"
+                "『動いているタスク』の問いには本一覧が答え(本日締切とは別物)。"
+                "**③提示: 曖昧な問い(『タスクは?』等)には件数・担当・締切を1つの表で併記し、"
+                "推測で1属性に絞るな。表の後に『期限順で見ますか/担当別に束ねますか』と切り口を一言添えよ**:\n"
+                + "\n".join(lines))
+    except Exception:
+        return ""
+
+
+# ── 派生事実: 「空いている人は誰か」= 実務担当者 ∖ wip割当者。集合差は弱モデルに解かせず機構が確定(Fable処方1) ──
+_AVAIL_Q_RE = re.compile(
+    r"((空|あ)い(て|た).{0,6}(人|メンバー|アーティスト|スタッフ|アニメーター|作業者|誰|だれ)|"
+    r"(人|メンバー|アーティスト|スタッフ|アニメーター|作業者).{0,8}(空|あ)い(て|た)|"
+    r"手(が|の)?空(い|き)|手空き|"
+    r"アサイン(が|は)?(され|されて)?(いない|ない|無い|てない)|"
+    r"(稼働|予定|タスク).{0,6}(が|は)?(空|無|なし|入って(い)?ない|余裕)|"
+    r"(誰|だれ|どの.{0,4}(人|メンバー|アーティスト)).{0,10}(使え|手伝|回せ|余裕|暇|空)|"
+    r"(フォロー|ヘルプ|サポート|手伝|助け|替わ|代わ|巻き取|カバー|応援)(に|を|で|の)?.{0,12}(入れ|できる|可能|人|誰|メンバー|アーティスト|いる|回せ|頼め|ある)|"
+    r"(人|誰|だれ|メンバー|アーティスト|手).{0,10}(フォロー|ヘルプ|手伝|助け|カバー|応援|余っ))", re.I)
+
+
+def availability_digest(query):
+    """【派生事実=空き人材】実務担当者(過去に1度でもタスク割当のある者)のうち、現在 wip 割当0 の者を『空き』として
+    機構が集合差で確定し注入(集合演算は弱モデルに委ねず機構が算出=Fable処方1)。『空き』の定義(=wip0)を明示し、
+    休暇/外部予定は未接続である境界も可視化(真空を推測で埋めさせない)。空き人材の問いでなければ空。"""
+    try:
+        if not query or not _AVAIL_Q_RE.search(query) or _looks_like_action(query):
+            return ""                                    # action意図(『連絡を入れて』等)には空き集計を被せない(Fable P2)
+        tasks = _all_tasks()
+        if not tasks:
+            return ""
+        try:
+            um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                  for u in casper_tools._get("/users?limit=200").get("items", [])
+                  if u.get("is_active", True)}          # Fable P2: 在籍中(is_active)のみ=退職者を『空き』に出さない
+        except Exception:
+            um = {}
+        try:                                             # Fable P2: 母集団を online PJ の担当に限定(過去PJだけの外部/退職者を除く)
+            online_pids = {p.get("id") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])
+                           if str(p.get("display_status") or "online") == "online"}
+        except Exception:
+            online_pids = None
+        import collections
+        wip_by = collections.defaultdict(list)
+        workers = set()
+        for t in tasks:
+            a = t.get("assigned_to")
+            if not a or (um and a not in um):            # 現行の在籍ユーザーに限る
+                continue
+            if online_pids is not None and t.get("project_id") not in online_pids:
+                continue                                 # online PJ の担当のみを実務担当母集団に
+            workers.add(a)
+            if _task_is_moving(t):
+                wip_by[a].append(t)
+        if not workers:
+            return ""
+        free = sorted(um.get(w, w) for w in workers if not wip_by.get(w))
+        loaded = sorted(((um.get(w, w), len(wip_by[w])) for w in workers if wip_by.get(w)), key=lambda x: -x[1])
+        free_txt = ("、".join(free) if free else "（現在 wip 割当0 の担当者はいません）")
+        load_txt = "、".join(f"{nm}({n}件)" for nm, n in loaded[:12])
+        return ("\n\n## 【空き人材=機構が集合差で確定(Calendar・確定)】\n"
+                f"実務担当者(過去にタスク割当のある者) 計{len(workers)}名のうち、"
+                f"**現在 進行中(wip)タスクを1件も持たぬ=『空き』は {len(free)}名: {free_txt}**。\n"
+                f"（参考・稼働中の負荷: {load_txt}）\n"
+                "**この確定結果を根拠に、空きの人名を具体的に答えよ。『どの切り口で見ますか』のメニューや"
+                "『監視機能はない』で逃げて答えを出さぬのは禁止。答えは上に在る。**\n"
+                "・『空き』の定義は『wip 割当0』の意。有給/休暇/外部予定/稼働率は真実源に未接続ゆえ含まぬ"
+                "(この境界は、答えを出した上でなら添えてよい)。")
+    except Exception:
+        return ""
+
+
+# ── PJ名の表記ゆれ耐性(カタカナ⇄ローマ字): 「マルコメ」が正規名「marukome」と一致せず迷子になる綻びの汎用解 ──
+_KANA2ROMA = {
+    'ア': 'a', 'イ': 'i', 'ウ': 'u', 'エ': 'e', 'オ': 'o', 'カ': 'ka', 'キ': 'ki', 'ク': 'ku', 'ケ': 'ke', 'コ': 'ko',
+    'サ': 'sa', 'シ': 'shi', 'ス': 'su', 'セ': 'se', 'ソ': 'so', 'タ': 'ta', 'チ': 'chi', 'ツ': 'tsu', 'テ': 'te', 'ト': 'to',
+    'ナ': 'na', 'ニ': 'ni', 'ヌ': 'nu', 'ネ': 'ne', 'ノ': 'no', 'ハ': 'ha', 'ヒ': 'hi', 'フ': 'fu', 'ヘ': 'he', 'ホ': 'ho',
+    'マ': 'ma', 'ミ': 'mi', 'ム': 'mu', 'メ': 'me', 'モ': 'mo', 'ヤ': 'ya', 'ユ': 'yu', 'ヨ': 'yo',
+    'ラ': 'ra', 'リ': 'ri', 'ル': 'ru', 'レ': 're', 'ロ': 'ro', 'ワ': 'wa', 'ヲ': 'wo', 'ン': 'n',
+    'ガ': 'ga', 'ギ': 'gi', 'グ': 'gu', 'ゲ': 'ge', 'ゴ': 'go', 'ザ': 'za', 'ジ': 'ji', 'ズ': 'zu', 'ゼ': 'ze', 'ゾ': 'zo',
+    'ダ': 'da', 'ヂ': 'ji', 'ヅ': 'zu', 'デ': 'de', 'ド': 'do', 'バ': 'ba', 'ビ': 'bi', 'ブ': 'bu', 'ベ': 'be', 'ボ': 'bo',
+    'パ': 'pa', 'ピ': 'pi', 'プ': 'pu', 'ペ': 'pe', 'ポ': 'po', 'ヴ': 'vu', 'ー': '',
+}
+_KANA_SMALL = {'ャ': 'ya', 'ュ': 'yu', 'ョ': 'yo'}
+
+
+def _kana_to_romaji(s):
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        nxt = s[i + 1] if i + 1 < len(s) else ''
+        if c == 'ッ':                                    # 促音→次子音を重ねる(簡易にスキップ)
+            i += 1; continue
+        if nxt in _KANA_SMALL and c in _KANA2ROMA:       # 拗音(キャ等)
+            base = _KANA2ROMA[c]
+            out.append((base[:-1] if base.endswith('i') else base) + _KANA_SMALL[nxt]); i += 2; continue
+        out.append(_KANA2ROMA.get(c, c)); i += 1
+    return ''.join(out)
+
+
+def _translit_kana_runs(q):
+    return re.sub(r'[゠-ヿ]+', lambda m: _kana_to_romaji(m.group(0)), q or "")
+
+
+def _canonical(s):
+    """正準スケルトン(Fable): 両側を同じ空間へ射影し、カタカナ⇄ローマ字・ヘボン/訓令・長音/促音/記号の揺れを吸収。"""
+    import unicodedata
+    s = unicodedata.normalize("NFKC", s or "").lower()
+    s = _translit_kana_runs(s)                            # カタカナ→ローマ字(ー は除去済)
+    for a, b in [("shi", "si"), ("chi", "ti"), ("tsu", "tu"), ("sha", "sya"), ("shu", "syu"),
+                 ("sho", "syo"), ("cha", "tya"), ("chu", "tyu"), ("cho", "tyo"), ("ji", "zi"), ("fu", "hu")]:
+        s = s.replace(a, b)                               # ヘボン→訓令に寄せる
+    s = re.sub(r"[\s_\-・,、。]", "", s)                    # 記号/空白除去
+    s = re.sub(r"(.)\1+", r"\1", s)                       # 連続同字つぶし(促音kk→k・長音aa→a)
+    return s
+
+
+_PJ_ALIAS = {"mtime": 0.0, "idx": {}}                     # canonical -> [正規名] (同一スケルトンに複数=衝突→ambiguous)
+
+
+def _pj_index():
+    """online PJ名 → canonical 別名索引を cal_projects から導出(オフライン・mtimeキャッシュ・検査可能)。"""
+    try:
+        m = os.path.getmtime("/tmp/cal_projects.json")
+    except Exception:
+        return _PJ_ALIAS
+    if m == _PJ_ALIAS["mtime"] and _PJ_ALIAS["idx"]:
+        return _PJ_ALIAS
+    idx = {}
+    try:
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+    except Exception:
+        items = []
+    for p in items:
+        if str(p.get("display_status") or "online") != "online":
+            continue
+        nm = str(p.get("name") or "")
+        if len(nm) < 3:
+            continue
+        can = _canonical(nm)
+        if len(can) < 3:
+            continue
+        idx.setdefault(can, [])
+        if nm not in idx[can]:
+            idx[can].append(nm)
+    _PJ_ALIAS.update({"mtime": m, "idx": idx})
+    return _PJ_ALIAS
+
+
+def _pj_resolve(query):
+    """クエリから online PJ を解決(Fable 3値)。返り (status, names, path)。
+    status='unique'|'ambiguous'|'none'。閉集合(online PJ)照合ゆえ names は真実源の部分集合(構成上保証)。"""
+    q = query or ""
+    idx = _pj_index()["idx"]
+    qcan = _canonical(q)
+    hits = []
+    for can, names in idx.items():
+        if any(nm in q for nm in names) or (len(can) >= 3 and can in qcan):   # 生一致 or 正準スケルトン一致
+            hits += names
+    hits = list(dict.fromkeys(hits))
+    if not hits:
+        return ("none", [], None)
+    exact = [nm for nm in hits if nm in q]               # 決定則: 完全(生)一致 > 部分/スケルトン一致
+    if len(exact) == 1:
+        return ("unique", exact, "raw")
+    if len(hits) == 1:
+        return ("unique", hits, "skeleton")
+    return ("ambiguous", hits, "multi")
+
+
+def _match_online_pj(query):
+    """後方互換: 解決した online PJ 名(unique 時のみ1件)。曖昧/不在は空(=呼び側で3値処理)。"""
+    st, names, _ = _pj_resolve(query)
+    return names if st == "unique" else []
+
+
+_PJ_TASK_RE = re.compile(r"タスク.{0,8}(見せ|教え|一覧|リスト|出し|表示|見たい|ある|状況|ください|くれ|どうなって|進捗)|"
+                         r"(見せ|教え|一覧|表示|出し).{0,6}タスク|どんな.{0,4}タスク", re.I)
+
+
+def _pj_near_candidates(query, k=4):
+    """名前解決0件だが名前らしきトークンがある時の近傍候補。候補生成のみ・自動解決に使わない(Fable)。
+    (a)クエリの名前トークンが PJ正準名の前置(部分名『コンバトラーV』等) (b)bigram重なり(打ち間違い『ゼニス』等)。"""
+    def _bg(s):
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+    qcan = _canonical(query)
+    qb = _bg(qcan)
+    toks = [_canonical(t) for t in re.findall(r'[゠-ヿA-Za-z0-9]{2,}', query or "")]
+    toks = [t for t in toks if len(t) >= 4]
+    scored = {}
+    for can, names in _pj_index()["idx"].items():
+        nm = names[0]
+        sc = 0.0
+        if any(can.startswith(t) or t.startswith(can) for t in toks):   # (a)前置一致=部分名
+            sc = 1.0
+        elif qb and _bg(can):
+            ov = len(qb & _bg(can)) / len(_bg(can))                      # (b)bigram重なり
+            if ov >= 0.3:
+                sc = ov
+        if sc:
+            scored[nm] = max(scored.get(nm, 0), sc)
+    return [nm for nm, _ in sorted(scored.items(), key=lambda x: -x[1])[:k]]
+
+
+def _pj_task_choices(query):
+    """特定PJのタスク要求だが名前解決が unique でない時、候補PJを選択カードで提示(無言None落ちさせない・3値のnone/ambiguous出口)。"""
+    if not _PJ_TASK_RE.search(query or ""):
+        return None
+    st, names, _ = _pj_resolve(query)
+    if st == "unique":
+        return None                                       # unique は table_card が拾う
+    if st == "ambiguous":
+        cands, prompt = names, "どのプロジェクトのタスクでしょう？下から選んでくだされ。"
+    else:                                                 # none: 名前らしきトークンがある時のみ近傍候補
+        if not re.search(r"[゠-ヿA-Za-z]{2,}", query or ""):
+            return None                                   # 名前らしきものが無い=一般タスク問い→通常経路へ
+        cands = _pj_near_candidates(query)
+        if not cands:
+            return None
+        prompt = "そのプロジェクト名に一致がございませぬ。もしやこちらでは？（違えば具体名で仰せを）"
+    opts = [{"id": f"pjtask_{nm}", "label": f"{nm} のタスク", "preview": f"{nm} の未完了タスク一覧を表示",
+             "say": f"{nm}のタスクを見せて"} for nm in cands[:6]]
+    return {"prompt": prompt, "options": opts}
+
+
+# ④ table card(Fable設計): 表は機構が真実源からテンプレ描画=LLMは表を書かず継ぎ目の修辞だけ。
+# 截ち切れ・転写捏造・全件ダンプが構造的に消える。切り口(並べ替え)はクライアントのチップで(LLM再呼出不要)。
+_PROJ_LIST_RE = re.compile(r"(動いて(る|いる)|進行中|稼働中|全.{0,2}(プロジェクト|PJ|案件)|"
+                           r"(プロジェクト|PJ|案件).{0,8}(一覧|教え|どれ|ある|全部)|"
+                           r"(納期|締切|遅れ|遅延|超過).{0,10}(プロジェクト|PJ|案件|一覧|もの|の))", re.I)
+
+
+def _table_card(query, who):
+    """一覧意図(進行中タスク/PJ)を機構で表カード化。返り=table dict or None。個別PJ照会(marukomeは?)は散文ゆえ対象外。"""
+    q = query or ""
+    try:
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+    except Exception:
+        items = []
+    online = [p for p in items if str(p.get("display_status") or "online") == "online"]
+    _name_hit = bool(_match_online_pj(q))                # 表記ゆれ耐性の名前解決器へ統一(生substring照合を残さない)
+    today = datetime.date.today()
+
+    def _due_note(due):
+        try:
+            d = datetime.date.fromisoformat(str(due)[:10])
+            if d < today:
+                return f"🔴{(today - d).days}日超過"
+            if d == today:
+                return "⚠️本日締切"
+        except Exception:
+            pass
+        return ""
+
+    # ⓪ 特定PJのタスク一覧(『マルコメのタスク見せて』等) — 名前解決器で unique に解けた時のみ表を描く
+    #    (曖昧/不在は None を返し、呼び側が選択カード/近傍候補で拾う=無言None落ちさせない・Fable)
+    if _PJ_TASK_RE.search(q):
+        st, _pjs, _path = _pj_resolve(q)
+        if st == "unique":
+            nm = _pjs[0]
+            pid = next((p.get("id") for p in online if p.get("name") == nm), None)
+            try:
+                tks = [t for t in _all_tasks() if t.get("project_id") == pid]
+            except Exception:
+                tks = []
+            if tks:
+                try:
+                    um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                          for u in casper_tools._get("/users?limit=200").get("items", [])}
+                except Exception:
+                    um = {}
+                act = [t for t in tks if _task_is_moving(t)]   # 完了判定はハードコードせず _task_is_moving に寄せる(API単一ソース)
+                shown = act or tks                        # 未完了優先・無ければ全件
+                shown = sorted(shown, key=lambda t: str(t.get("due_date") or "9999"))
+                rows = []
+                for t in shown[:60]:
+                    due = str(t.get("due_date") or "")[:10]
+                    rows.append([t.get("name") or t.get("title") or "?", t.get("type") or "",
+                                 um.get(t.get("assigned_to"), "未割当"),
+                                 t.get("status_label") or t.get("status") or "", due, _due_note(due)])
+                _hidden = (len(tks) - len(act)) if act else 0    # footerの嘘を断つ: 全件表示時は非表示0
+                _foot = "Calendar 確定データ。列見出しクリックで並べ替え。"
+                if _hidden:
+                    _foot += f" 完了 {_hidden}件は非表示。"
+                if len(shown) > 60:
+                    _foot += "（多いため上位60件）"
+                _n = len(act) if act else len(tks)
+                _tl = (f"{nm} のタスク（未完了 {len(act)}件 / 全{len(tks)}件）" if act
+                       else f"{nm} のタスク（全{len(tks)}件）")
+                return {"title": _tl, "columns": ["タスク", "工程", "担当", "状態", "締切", ""],
+                        "rows": rows, "sortable": True, "numeric_cols": [], "footer": _foot}
+
+    # ① 進行中タスク一覧(件数/担当/締切) — retrieve-then-render を表カードに
+    if _ACTIVE_TASK_Q_RE.search(q):
+        try:
+            tasks = [t for t in _all_tasks() if _task_is_moving(t)]
+        except Exception:
+            tasks = []
+        if not tasks:
+            return None
+        pm = {p.get("id"): p.get("name") for p in items}
+        due_m = {p.get("id"): str(p.get("end_date") or "")[:10] for p in items}
         try:
             um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
                   for u in casper_tools._get("/users?limit=200").get("items", [])}
@@ -1602,29 +2623,136 @@ def active_tasks_digest(query):
             um = {}
         import collections
         byp = collections.defaultdict(list)
-        for t in act:
-            byp[pm.get(t.get("project_id"), t.get("project_id") or "?")].append(t)
-        lines = []
-        for pj, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
+        for t in tasks:
+            byp[t.get("project_id")].append(t)
+        rows = []
+        for pid, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
             who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
-            lines.append(f"- **{pj}**: 進行中 {len(ts)}件 (担当: {', '.join(who_names[:6])})")
-        return (f"\n\n## 【現在進行中(wip/工程)のタスク一覧(Calendar・確定)】\n"
-                f"全プロジェクトで進行中のタスクは計 {len(act)}件。**この一覧を根拠に答えよ。"
-                "get_today_tasks(本日締切のみ)や特定PJ(marukome等)に狭めず、全PJの進行中を示せ。"
-                "『動いているタスク』の問いには本一覧が答え(本日締切とは別物)**:\n" + "\n".join(lines))
+            due = due_m.get(pid, "")
+            rows.append([pm.get(pid, pid or "?"), len(ts), ", ".join(who_names[:6]), due, _due_note(due)])
+        return {"title": f"進行中タスク（全社 計{len(tasks)}件）", "columns": ["プロジェクト", "件数", "担当", "締切", "状況"],
+                "rows": rows, "sortable": True, "numeric_cols": [1],
+                "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
+
+    # ② 進行中PJ一覧(状態/締切) — リスト意図の時のみ(個別PJ名照会は除外)
+    if _PROJ_LIST_RE.search(q) and not _name_hit and online:
+        rows = []
+        for p in online:
+            due = str(p.get("end_date") or "")[:10]
+            rows.append([p.get("name"), p.get("status") or "", due, _due_note(due)])
+        return {"title": f"進行中プロジェクト（{len(online)}件）", "columns": ["プロジェクト", "状態", "締切", "状況"],
+                "rows": rows, "sortable": True, "numeric_cols": [],
+                "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
+
+    # ③ 空き人材(人軸の負荷表) — 「空いている人は?」等。集合差は availability_digest と同源(機構確定・Fable処方1)
+    #    action意図(『◯◯に連絡を入れて』等)の時は抑止=アクション要求に表カードを被せない(Fable P2)
+    if _AVAIL_Q_RE.search(q) and not _looks_like_action(q):
+        try:
+            tasks = _all_tasks()
+        except Exception:
+            tasks = []
+        if tasks:
+            try:
+                um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                      for u in casper_tools._get("/users?limit=200").get("items", [])
+                      if u.get("is_active", True)}       # 在籍中のみ(Fable P2)
+            except Exception:
+                um = {}
+            try:
+                online_pids = {p.get("id") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])
+                               if str(p.get("display_status") or "online") == "online"}
+            except Exception:
+                online_pids = None
+            import collections
+            wip_by = collections.defaultdict(list)
+            workers = set()
+            for t in tasks:
+                a = t.get("assigned_to")
+                if not a or (um and a not in um):
+                    continue
+                if online_pids is not None and t.get("project_id") not in online_pids:
+                    continue
+                workers.add(a)
+                if _task_is_moving(t):
+                    wip_by[a].append(t)
+            if workers:
+                rows = []
+                for w in workers:
+                    ts = wip_by.get(w, [])
+                    nd = min((str(t.get("due_date") or "9999")[:10] for t in ts), default="")
+                    rows.append([um.get(w, w), len(ts), (nd if nd and nd != "9999" else "—"),
+                                 "🟢空き" if not ts else "稼働中"])
+                rows.sort(key=lambda r: (r[1], str(r[0])))   # 空き(0件)を上へ
+                nfree = sum(1 for r in rows if r[1] == 0)
+                return {"title": f"メンバー稼働状況（空き {nfree}名 / 実務担当 {len(rows)}名）",
+                        "columns": ["メンバー", "進行中件数", "直近締切", "状況"],
+                        "rows": rows, "sortable": True, "numeric_cols": [1],
+                        "footer": "『空き』=進行中(wip)タスク0件の意。有給/休暇/外部予定は未接続。Calendar確定データ。"}
+    return None
+
+
+_TOOL_NARRATION_RE = re.compile(
+    r"^\s*[`*_>-]*\s*(?:\d+[\.\)]\s*)?(calendar_lookup|search_vault|get_[a-z_]+|send_message|create_[a-z_]+|"
+    r"update_task|bulk_[a-z_]+|import_[a-z_]+|vimeo_[a-z_]+|aurora_[a-z_]+|ai_import_parse)\s*\(.*$",
+    re.I)
+
+
+def _strip_tool_narration(text):
+    """【出口・道具実況ガード(Fable処方2の副作用ゼロ版)】qwenがツールを"呼ばず"生の関数呼び構文だけを本文に
+    書いて止まった時(例『calendar_lookup(...)』『search_vault(...)』のみで停止=答えゼロ)、その実況行を剥ぐ。
+    実行はしない(副作用ゼロ)。剥いで空になれば呼び側が _pj_status_fallback へ落として救済する。"""
+    try:
+        if not text:
+            return text
+        # ```tool ... ``` フェンス除去
+        t = re.sub(r"```(?:tool|json)?\s*(?:calendar_lookup|search_vault|get_[a-z_]+|send_message)[^`]*```", "", text, flags=re.I | re.S)
+        kept = [ln for ln in t.splitlines() if not _TOOL_NARRATION_RE.match(ln)]
+        out = "\n".join(kept)
+        return re.sub(r"\n{3,}", "\n\n", out).strip()
     except Exception:
-        return ""
+        return text
+
+
+def _strip_name_gloss(text, sysadd, query):
+    """【出口・gloss検問(Fable処方3)】応答中の"既知の実在PJ名"の直後の括弧展開『marukome（丸亀製麺）』は、
+    括弧内が注入コンテキスト(sysadd)に無ければ推測=剥がす。閉集合(Calendarのonline PJ名のみ)照合ゆえ軽い。
+    クエリのタイポ(maukome等)で名前解決がnoneでも、応答に現れた実在名を直接掴むので発火する。"""
+    try:
+        if not text:
+            return text
+        try:
+            items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        except Exception:
+            items = []
+        names = sorted({str(p.get("name")) for p in items
+                        if str(p.get("display_status") or "online") == "online" and len(str(p.get("name") or "")) >= 3},
+                       key=len, reverse=True)                        # 長い名から(部分包含の取りこぼし防止)
+        if not names:
+            return text
+        ctx = sysadd or ""
+        out = text
+        for nm in names:
+            def _repl(m, _nm=nm):
+                gloss = (m.group(1) or "").strip()
+                return m.group(0) if (gloss and gloss in ctx) else _nm   # 文脈に実在=正当・無ければ推測展開を剥ぐ
+            out = re.sub(re.escape(nm) + r"\s*[（(]([^）)]{1,40})[)）]", _repl, out)
+        return out
+    except Exception:
+        return text
 
 
 def _pj_status_fallback(query):
     """出口検問で全消し(qwenがナレーションだけ吐いた等)の救済: 問いが指す online PJ の状態を
     Calendarデータから決定的に答える(retrieve-then-render・LLM非依存)。無ければ空。"""
     try:
+        st, names, _ = _pj_resolve(query)                # 名前解決器へ統一(生substring照合を残さない・Fable)
+        if st != "unique":
+            return ""
         items = json.load(open("/tmp/cal_projects.json")).get("items", [])
         today = datetime.date.today().isoformat()
         for p in items:
             nm = str(p.get("name") or "")
-            if len(nm) >= 3 and nm in (query or "") and str(p.get("display_status") or "online") == "online":
+            if nm == names[0] and str(p.get("display_status") or "online") == "online":
                 due = str(p.get("end_date") or "")[:10]
                 late = bool(due) and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled")
                 line = f"**{nm}** の現状:\n・ステータス: {p.get('status')}"
@@ -1728,6 +2856,34 @@ def attention_digest(who, query):
         return ""
 
 
+def _attention_action_cards(who, query):
+    """【Q4 attention→その場で片付く】今日の3件のうち overdue/loop を『選択カード』で提示(draftは①で承認カード浮上)。
+    各項目に具体行動＋『今日は流す(snooze)』を付す(alert fatigue対策)。snoozeは__attn_snooze__ sentinel=say型で
+    再投入→決定的handlerが attention.snooze を呼ぶ(副作用ゼロ)。DM/Calendar書込は必ずoutbox経由(原理②)。"""
+    try:
+        if not query or not _ATTN_Q_RE.search(query) or not who.get("uid"):
+            return []
+        import attention as _att
+        cards = []
+        for c in _att.today_three(who.get("uid")):
+            ref = c.get("ref"); nm = c.get("title") or ""
+            if c["kind"] == "overdue":
+                cards.append({"prompt": f"🔴 **{nm}** — {c.get('detail','')}。どういたす？", "options": [
+                    {"id": f"att_{ref}_remind", "label": "催促DMを起案", "preview": f"{nm} の担当へ進捗確認DMを下書き（送信は承認制）",
+                     "say": f"{nm}の担当に進捗を確認するDMを作って"},
+                    {"id": f"att_{ref}_snooze", "label": "今日は流す", "preview": "本日は非表示（明日また出ます）",
+                     "say": f"__attn_snooze__ {ref} {nm}"}]})
+            elif c["kind"] == "loop":
+                cards.append({"prompt": f"🔗 **{nm}** — {c.get('detail','')}。どういたす？", "options": [
+                    {"id": f"att_{ref}_remind", "label": "催促・確認DMを起案", "preview": f"{nm} の相手へ確認DMを下書き（送信は承認制）",
+                     "say": f"{nm}の件で相手に確認するDMを作って"},
+                    {"id": f"att_{ref}_snooze", "label": "今日は流す", "preview": "本日は非表示（明日また出ます）",
+                     "say": f"__attn_snooze__ {ref} {nm}"}]})
+        return cards
+    except Exception:
+        return []
+
+
 def open_loop_digest(who):
     """【OPEN LOOPレジストリの先読み注入】この人が依頼元/通知先の"未了の約束"を⚙レコードから注入。
     帯の散文でなくレコードゆえ、Casperは常に把握し漏らさない(Fable5 #2・hori事件の恒久解)。"""
@@ -1770,12 +2926,27 @@ def traits_digest(who, query):
         hits = casper_traits.for_text(query, name_to_uid)
         if not hits:
             return ""
+        # Fable処方4b: trait は"主語の live 証拠と同梱でのみ"効かせる。各人物の現wip件数を機構で引き、
+        # 0件なら『疑いの手がかり』でなく『現在の割当は無い』という確定事実として提示させる(無接地の疑い雛形化を断つ)。
+        try:
+            _tasks = _all_tasks()
+        except Exception:
+            _tasks = []
         lines = []
         for nm, traits in hits:
-            for t in traits[:3]:
-                lines.append(f"- {nm}: {t.get('note')}")
-        return ("\n\n## 【人物の癖(構造化trait・裏取りの手がかり)】\n"
-                "この問いに関わる人物の既知の癖。**これを踏まえて読み、状態は必ず裏取りで確認せよ**:\n"
+            uid = _uid_int(name_to_uid.get(nm))          # roster由来はstr→int正規化(assigned_toはint・Fable P0-1)
+            wip = sum(1 for t in _tasks if t.get("assigned_to") == uid and _task_is_moving(t)) if uid is not None else None
+            note = " / ".join((t.get("note") or "") for t in traits[:3])
+            if wip == 0:
+                lines.append(f"- {nm}: 【live: 現在 進行中(wip)の割当タスクは0件】癖『{note}』は参考だが、"
+                             "今は動いている割当が無い＝この事実で答えよ(『未完了』『癖で作業中報告』等の独自ストーリーを創作するな)。")
+            elif wip:
+                lines.append(f"- {nm}: 【live: 進行中(wip)割当 {wip}件】癖『{note}』を踏まえ、状態は live/裏取りで確認せよ。")
+            else:
+                lines.append(f"- {nm}: 癖『{note}』(liveは未取得ゆえ状態断定はせず『未確認』と述べよ)。")
+        return ("\n\n## 【人物の癖＋live証拠(Fable: traitは証拠と同梱でのみ効かせる)】\n"
+                "この問いに関わる人物の既知の癖と、現時点のlive割当。**癖は読み方の手がかりであって結論ではない。"
+                "上のlive事実を答えの根拠にせよ。liveに無い状態(未完了/完了/🔴)を癖から推し量って断定するな**:\n"
                 + "\n".join(lines))
     except Exception:
         return ""
@@ -1927,21 +3098,108 @@ def _calendar_lookup_mcp(args, uid):
         return f"(calendar_lookup MCP失敗: {e})"
 
 
+# Q3B(Fable): 常時注入すると弱モデルが無関係な問いに滲出させる「操作ガイド」節を、見出し名で条件注入化。
+# (md linter が HTML コメントを剥がす為、インラインmarkerでなく既存の `## 見出し` を境界に使う=linter耐性)
+_CTX_CONDITIONAL = [
+    {"h": "Casper にできること",
+     "kws": ["できること", "何ができ", "どうやっ", "どうすれ", "使い方", "手順", "やり方", "アップ", "アップロード",
+             "動画", "ビデオ", "vimeo", "ヴィメオ", "探し", "探す", "見せ", "機能", "検索", "報告書", "議事録",
+             "カット", "画像", "資料", "読み取", "読取", "添付", "dm", "ディーエム"]},
+    {"h": "画像・動画の貼付ルール",
+     "kws": ["画像", "動画", "貼付", "貼り", "貼る", "埋め込み", "埋込", "iframe", "vimeo", "ノート", "aurora",
+             "base64", "img", "サムネ"]},
+]
+_ctx_cache = {"mtime": 0.0, "core": "", "sections": []}
+
+
+def _load_context():
+    """casper_context.md を core(常時注入)＋sections(キーワード条件注入)に分解(Q3B・Fable)。
+    `## 見出し` で分割し、_CTX_CONDITIONAL に該当する節だけ『条件注入』へ回す。残りは core。mtimeホットリロード。"""
+    ctx_path = os.path.join(HERE, "casper_context.md")
+    try:
+        m = os.path.getmtime(ctx_path)
+    except Exception:
+        return _ctx_cache
+    if m == _ctx_cache["mtime"]:
+        return _ctx_cache
+    try:
+        raw = open(ctx_path, encoding="utf-8").read()
+    except Exception:
+        raw = ""
+    # `## ` (level-2見出し)で塊に分割。先頭の見出し前テキストは core。
+    parts = re.split(r"(?m)^(?=## )", raw)
+    core_chunks, sections = [], []
+    for chunk in parts:
+        head = chunk.split("\n", 1)[0].lstrip("# ").strip()
+        cond = next((c for c in _CTX_CONDITIONAL if c["h"] in head), None)
+        if cond:
+            sections.append({"kws": [k.lower() for k in cond["kws"]], "body": chunk.strip()})
+        else:
+            core_chunks.append(chunk.strip())
+    core = re.sub(r"\n{3,}", "\n\n", "\n\n".join(x for x in core_chunks if x)).strip()
+    _ctx_cache.update({"mtime": m, "core": core, "sections": sections})
+    return _ctx_cache
+
+
+def context_sections_digest(query):
+    """クエリのキーワードに合致する CTXSEC セクションだけを注入(動的注入・Vimeo混入の恒久解の入口壁)。"""
+    q = (query or "").lower()
+    if not q:
+        return ""
+    hits = [s["body"] for s in _load_context()["sections"] if any(k in q for k in s["kws"])]
+    return ("\n\n" + "\n\n".join(hits)) if hits else ""
+
+
+def _strip_context_echo(text, query):
+    """【出口壁・echo検問(Q3B)】トリガーされていない条件注入セクション(Vimeo手順等)の特徴的な文言が応答に
+    滲出したら、その行だけ落とす(常時注入をやめても弱モデルが記憶から漏らす保険)。クエリにkwが有る=正当ゆえ残す。"""
+    if not text:
+        return text
+    q = (query or "").lower()
+    _bare = lambda z: re.sub(r"[*_`]", "", z)              # md装飾を外して照合
+    changed = False
+    kept = text
+    for s in _load_context()["sections"]:
+        if any(k in q for k in s["kws"]):                  # このセクションはクエリに関係あり→正当・素通し
+            continue
+        keys = []
+        for ln in s["body"].splitlines():
+            frag = _bare(re.sub(r"^[-・\s>#]+", "", ln)).strip()
+            key = re.split(r"[:：（(]", frag)[0].strip()
+            if len(key) >= 8:                              # 8字以上の固有句=そのセクション固有の滲出シグネチャ
+                keys.append(key)
+        if not keys:
+            continue
+        out = []
+        for line in kept.splitlines():
+            if any(k in _bare(line) for k in keys):        # この行はセクション固有句を含む=滲出→落とす
+                changed = True
+                continue
+            out.append(line)
+        kept = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", kept).strip() if changed else text
+
+
 def build_sys():
     """毎リクエストで社内ナレッジ digest (左脳+右脳) を読み込み system prompt に注入。"""
-    ctx_path = os.path.join(HERE, "casper_context.md")
-    ctx = ""
-    if os.path.exists(ctx_path):
-        try:
-            ctx = open(ctx_path, encoding="utf-8").read()
-        except Exception:
-            ctx = ""
+    ctx = _load_context()["core"]                          # 操作ガイド等の混入源は core から除外済(条件注入へ)
     today = datetime.date.today()
     wd = "月火水木金土日"[today.weekday()]
     datehdr = (f"【今日の日付】{today.isoformat()}（{wd}曜）。日数・遅延・締切は必ずこの日付を基準に計算せよ"
                "(自分の記憶の日付を使うな)。")
     tail = ("\n【回答の作法】記号や番号(A/B/C等)1文字だけで答えるな。必ず日本語の文で具体的に答えよ。"
-            "数値(遅延日数等)はデータから計算して明示せよ。")
+            "数値(遅延日数等)はデータから計算して明示せよ。"
+            "\n【提示の作法=分かりやすく・見やすく・使いやすく(全回答共通)】"
+            "①ラベル併記: 一覧を出す時は人間可読な名前/タイトルを必ず添えよ。生ID・生URL・番号だけの羅列は禁止"
+            "(元データにタイトルが在るなら必ず使う)。"
+            "②厳選: 『代表的な/主な/おすすめ』等を問われたら全件を並べず要点を厳選し、残りは『全件も出せます』と誘導せよ。"
+            "③冗長を括る: 表で全行が同じ値を繰り返すなら、その共通項は表の外に1度だけ書き、表の列からは外して行を軽くせよ"
+            "(長い重複でスペースを浪費して途中で切れるのを防ぐ)。"
+            "④曖昧なら併記: 問いがどの属性を指すか曖昧な時(例『タスクは?』=件数/担当/期限)は推測で1つに絞らず主要属性を併記せよ。"
+            "『どの切り口で見ますか』等の切り口質問は、まず具体的な答え(人名/件数/事実)を出した"
+            "『上で』のみ添えてよい。**答えの代わりにメニューや選択肢を出して止まるな**"
+            "(データが注入されているのに『監視機能はない』『どれで見ますか』で逃げるのは禁止)。"
+            "⑤締め: 一覧・表は最後まで出し切れ。多すぎる時は代表を見せ『続き/全件』への導線を必ず残せ(黙って途中で止めるな)。")
     # KVキャッシュのプレフィックス安定化(Fable 6-3): 静的要素(ctx/BASE/PERSONA/roster)を先頭に固め、
     # 日替わりの日付は末尾へ。→ 日を跨いでも静的プレフィックスが再利用され TTFT が下がる(1文字でも
     # 動的要素を先頭に混ぜると全損する為)。
@@ -1965,19 +3223,20 @@ def ollama_chat(messages, tools=None, num_predict=1536):
         return json.load(r)
 
 
-def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None):
+def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, temperature=0.15):
     """本物のストリーミング版(B・Fable指摘の最大の一手): Ollama stream:True(NDJSON)を読み、content片を
-    emit_fn(chunk)で即クライアントへ→TTFT短縮。返り=組み立てたレスポンス({message:{content,tool_calls}})。
+    emit_fn(chunk)で即クライアントへ→TTFT短縮。返り=組み立てたレスポンス({message:{content,tool_calls}, done_reason})。
     tool_call応答はcontentが空ゆえ何も流れない(=text応答だけがストリームされる)。"""
     body = {"model": A.model, "messages": messages, "stream": True, "think": False,
             "keep_alive": -1,
-            "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": 0.15, "top_p": 0.9}}
+            "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": temperature, "top_p": 0.9}}
     if tools:
         body["tools"] = tools
     req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     content = ""
     tcs = None
+    done_reason = None
     with urllib.request.urlopen(req, timeout=300) as r:
         for line in r:
             if not line.strip():
@@ -1998,11 +3257,12 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None):
             if mm.get("tool_calls"):
                 tcs = mm["tool_calls"]
             if o.get("done"):
+                done_reason = o.get("done_reason")   # "stop"=自然終了 / "length"=上限で截ち切れ(継続要)
                 break
     msg = {"role": "assistant", "content": content}
     if tcs:
         msg["tool_calls"] = tcs
-    return {"message": msg}
+    return {"message": msg, "done_reason": done_reason}
 
 
 def strip_think(s):
@@ -2710,10 +3970,10 @@ def open_briefing(who):
         lines += dm_lines
     if uid is None and not who.get("authed"):
         lines.append("ログイン頂ければ、本日のタスク・新着DMもお知らせいたす。")
-    if uid:                                               # 今日の3件(attention・柱3の燃料ポンプ): 滞留下書き/未了/納期超過を先回り提示
+    if uid:                                               # 今日の3件(attention・柱3の燃料ポンプ): 未了/納期超過を先回り提示
         try:
             import attention as _att
-            _al = _att.briefing_lines(uid)
+            _al = _att.briefing_lines(uid, include_drafts=False)   # 下書きは承認カードで直接出す(一往復短縮)
             if _al:
                 lines.append(_al)
         except Exception:
@@ -3048,6 +4308,61 @@ def proposal_to_calendar_csv(prop):
     return "﻿" + buf.getvalue()                          # BOM付(Excel/日本語対応)
 
 
+# 工程表CSV(既存タスク→Calendar公式CSV)の要求を検知(①・殿指示2026-07-10)。PJ名解決とAND条件で発火。
+_SCHED_CSV_RE = re.compile(
+    r"(スケジュール|工程表|進行表|タスク表|schedule).{0,12}(csv|ダウンロード|書き出|吐き出|出力|エクスポート|作成|作って|出して|ください|欲し|まとめ)|"
+    r"(csv|CSV).{0,10}(スケジュール|工程表|タスク|出力|吐き出|書き出|ください|欲し|出して)", re.I)
+
+
+def schedule_csv_export(query, who):
+    """【工程表CSV=既存タスク→Calendar公式CSV(①・殿指示2026-07-10)】スケジュールCSV要求＋unique解決PJに対し、
+    そのPJの実タスクを起票案化し proposal_to_calendar_csv でCSVを機構生成→ASSET_FILESに保存し、ダウンロード
+    リンク(md)を決定的に返す(qwenに書かせず真実源から吐く=捏造/截ち切れ防止)。返り=(md_link, meta) or None。"""
+    try:
+        if not query or not _SCHED_CSV_RE.search(query):
+            return None
+        st, names, _ = _pj_resolve(query)
+        if st != "unique":
+            return None                                   # 曖昧/不在は選択カード側(名前解決器)へ委ねる
+        nm = names[0]
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+        proj = next((p for p in items if str(p.get("name")) == nm), None)
+        if not proj:
+            return None
+        pid = proj.get("id")
+        try:
+            tks = [t for t in _all_tasks() if t.get("project_id") == pid]
+        except Exception:
+            tks = []
+        if not tks:
+            return None
+        try:
+            um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                  for u in casper_tools._get("/users?limit=200").get("items", [])}
+        except Exception:
+            um = {}
+        tks = sorted(tks, key=lambda t: str(t.get("due_date") or "9999"))
+        prop = {"project": {"name": nm, "start_date": str(proj.get("start_date") or "")[:10],
+                            "end_date": str(proj.get("end_date") or "")[:10],
+                            "description": proj.get("description") or ""},
+                "tasks": [{"name": t.get("name") or t.get("title") or "",
+                           "due": str(t.get("due_date") or "")[:10],
+                           "note": "", "assignee": um.get(t.get("assigned_to"), ""),
+                           "estimate": t.get("cost") or t.get("estimate") or "",
+                           "type": t.get("type") or "",
+                           "seqID": t.get("seq_code") or t.get("seqID") or "",
+                           "shot": t.get("shot") or t.get("shotID") or ""} for t in tks]}
+        csv_text = proposal_to_calendar_csv(prop)
+        os.makedirs(ASSET_FILES, exist_ok=True)
+        safe = re.sub(r"[^\w\-]", "_", nm)[:40] or "project"
+        fname = f"schedule_{safe}_{datetime.date.today().isoformat()}.csv"
+        with open(os.path.join(ASSET_FILES, fname), "w", encoding="utf-8") as f:
+            f.write(csv_text)
+        return (f"[⬇ {fname}](/asset/{fname})", {"pj": nm, "rows": len(tks), "fname": fname})
+    except Exception:
+        return None
+
+
 def feed_save(saved_as, description, summary, qa, filename):
     """理解した資料を vault(asset_shadow) へ知識化。"""
     os.makedirs(ASSET_DIR, exist_ok=True)
@@ -3377,9 +4692,14 @@ class H(BaseHTTPRequestHandler):
             tid = dict(_up.parse_qsl(_up.urlparse(self.path).query)).get("id", "")
             self._json(dm_messages(identify(self), tid))
             return
-        elif self.path == "/api/briefing":         # 開門ブリーフィング(挨拶＋本日タスク＋新着DM＋逆IV1問)
+        elif self.path == "/api/briefing":         # 開門ブリーフィング(挨拶＋本日タスク＋新着DM＋逆IV1問＋滞留下書きカード)
             try:
-                self._json({"text": open_briefing(identify(self))})
+                _who = identify(self)
+                _cards = _briefing_draft_cards(_who)   # 一往復短縮: 滞留下書きを承認カードで直接提示(Fable Q4)
+                _btxt = open_briefing(_who)
+                if _cards:                             # カードを出す旨を一言添える(唐突なカード出現を避ける)
+                    _btxt += f"\n\n📝 **承認待ちの下書きが {len(_cards)}件** ございます。下のカードで中身を確認し「送信」か「破棄」をお選びくだされ。"
+                self._json({"text": _btxt, "cards": _cards})
             except Exception as e:
                 self._json({"text": "", "error": str(e)})
             return
@@ -3464,6 +4784,7 @@ class H(BaseHTTPRequestHandler):
                 ext = os.path.splitext(fn)[1].lower()
                 ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                          ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf",
+                         ".csv": "text/csv; charset=utf-8",
                          ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                          ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                          ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}.get(ext, "application/octet-stream")
@@ -3473,7 +4794,7 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(b)))
                 if ext == ".pdf":                          # ブラウザ内 inline 表示(iframe)を許す
                     self.send_header("Content-Disposition", "inline")
-                elif ext in (".pptx", ".docx", ".xlsx"):   # Office はそのままダウンロード
+                elif ext in (".pptx", ".docx", ".xlsx", ".csv"):   # Office/CSV はそのままダウンロード
                     import urllib.parse as _up2
                     self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + _up2.quote(fn))
                 self.send_header("Cache-Control", "max-age=86400")
@@ -4256,6 +5577,9 @@ class H(BaseHTTPRequestHandler):
             cal += _dg("existence", existence_digest(who, last_user))   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
             cal += _dg("open_loop", open_loop_digest(who))              # 未了の約束(OPEN LOOP)を⚙レコードから注入
             cal += attention_digest(who, last_user)   # 今日の3件(気にかけどころ)の実体=『上記の件どうしたら』に正答
+            cal += _dg("context_sections", context_sections_digest(last_user))   # Q3B: 操作ガイドはクエリ該当時のみ注入(混入防止)
+            if _DRAFT_SURFACE_RE.search(last_user or ""):
+                cal += _draft_bodies_context(who)     # Q3C: 下書きの実本文を注入→内容の憶測(「〜と思われる」)を封じる
             cal += _dg("traits", traits_digest(who, last_user))      # 人物の癖(構造化trait)を注入=裏取りの手がかり
             cal += _dg("calendar", calendar_digest(last_user))         # Calendar 左脳を必要時に先読み注入
             cal += _dg("meeting", meeting_digest(last_user))          # 会議/議事録クエリは最新会議も注入
@@ -4321,6 +5645,18 @@ class H(BaseHTTPRequestHandler):
         # --- Ollama(local) backend (qwen3.6:27b 等・自律 tool-calling) ---
         ll_user = next((m.get("content", "") for m in reversed(msgs)
                         if m.get("role") == "user"), "")
+        # ③ 選択カードの選択を検知(say型再投入=直前カードのoptionと一致)→教師信号として記録(カードが自らを減らす学習)
+        if casper_person_gate:
+            _lc = _LAST_CHOICES.pop(thr, None)
+            if _lc:
+                for _o in _lc.get("opts", []):
+                    if _o.get("say") and str(ll_user).strip() == str(_o["say"]).strip():
+                        try:
+                            casper_person_gate.record_selection(_lc.get("uid"), _o.get("card_type", "choice"),
+                                                                _lc.get("prompt", ""), _o.get("label"), _o.get("ref"))
+                        except Exception:
+                            pass
+                        break
         _tid = uuid.uuid4().hex[:12]                 # このリクエストのtrace_id(outbox↔trace 結線・教師信号の文脈復元用・A実装)
         if not _qwen_is_warm():                     # 縮退(Fable): 冷間なら"少々お待ちを"を即返す(本回答は同一ストリームで続く)
             try:
@@ -4335,16 +5671,43 @@ class H(BaseHTTPRequestHandler):
         sysadd += _dg("activity", activity_digest(who))                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
         sysadd += _dg("verify", verify_digest(who, ll_user))            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
         sysadd += _dg("projects", projects_digest(ll_user))               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
+        sysadd += _dg("entity", entity_digest(ll_user))                   # 実体アイデンティティ: unique解決PJの正体を注入(名前からの幻覚展開を断つ・Fable処方3)
         sysadd += _dg("active_tasks", active_tasks_digest(ll_user))           # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
+        sysadd += _dg("availability", availability_digest(ll_user))           # 空き人材: 実務担当∖wip割当 の集合差を機構確定(答えず止まる病の根治・Fable処方1)
+        sysadd += _dg("team_vocab", team_vocab_digest(ll_user))             # 自社の職能語彙: チーム構成問いを汎用IT職でなくCG工程で答えさせる(Fable処方5)
         sysadd += _dg("fewshot", fewshot_digest(ll_user))                # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
         sysadd += _dg("existence", existence_digest(who, ll_user))         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
         sysadd += _dg("open_loop", open_loop_digest(who))                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
         sysadd += attention_digest(who, ll_user)         # 今日の3件(気にかけどころ)の実体=『上記の件どうしたら』に正答
+        sysadd += _dg("context_sections", context_sections_digest(ll_user))   # Q3B: 操作ガイドはクエリ該当時のみ注入(混入防止)
+        if _DRAFT_SURFACE_RE.search(ll_user or ""):
+            sysadd += _draft_bodies_context(who)         # Q3C: 下書きの実本文を注入→内容の憶測を封じる
+        _gate = casper_person_gate.resolve(who.get("uid"), ll_user, convo=msgs) if casper_person_gate else {}
+        if _gate.get("digest"):                          # 理解ゲート: その人の既定ファセット/別名を前提として注入(入力の接地)
+            sysadd += _gate["digest"]
+        table_card = _table_card(ll_user, who)           # ④ 一覧意図→機構が表カードを描画(LLMは表を書かない)
+        if table_card:
+            sysadd += ("\n\n## 【表示装置の注記】要求された一覧は『表カード』として機構が真実源から描画済み"
+                       f"(タイトル『{table_card['title']}』・{len(table_card['rows'])}行)。"
+                       "**あなたは表やmarkdown表、各行の箇条書きで一覧を再現するな**(装置と重複する)。"
+                       "全体の要点(件数・納期超過の有無・注視点)と次の一手だけを2〜4文の簡潔な散文で述べよ。")
+        _sched = schedule_csv_export(ll_user, who)       # ① 工程表CSV: 既存タスク→Calendar公式CSVを機構生成(殿指示2026-07-10)
+        if _sched:
+            _slink, _smeta = _sched
+            sysadd += ("\n\n## 【工程表CSVを生成済み(機構・Calendar確定)】"
+                       f"{_smeta['pj']} の現在のタスク {_smeta['rows']}件を Calendar公式CSV に書き出した。"
+                       f"**回答には必ず次のダウンロードリンクをそのまま改変せず含めよ: {_slink}**。"
+                       "『Excelで開け、編集して取り込み直せる』旨を1文添えよ。ガントや全タスクの再掲はするな(冗長)。"
+                       "Calendarへ直接反映したい場合は、その旨言えば承認カードで書込む と案内してよい。")
         sysadd += _dg("traits", traits_digest(who, ll_user))            # 人物の癖(構造化trait)を注入=裏取りの手がかり
         sysadd += _dg("meeting", meeting_digest(ll_user))               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
         sysadd += _dg("shot_assignee", shot_assignee_digest(ll_user))         # カット×担当も注入
         sysadd += _dg("image_asset", image_asset_digest(ll_user))           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
         sysadd += _dg("portfolio", portfolio_digest(ll_user))             # 実績クエリは自社Vimeo実績を注入
+        sysadd += _dg("gear", gear_digest(ll_user))                   # NINA機材/ギアリストはvault機材節を注入(Canon等の上乗せ捏造を断つ・殿指示)
+        sysadd += _dg("phase_sched", phase_schedule_digest(ll_user))       # 現フェーズ締切/次回社内チェックはtask type/due/チェックタスクから機構導出(殿指示)
+        sysadd += _dg("fb_log", fb_log_digest(ll_user))                   # FBログ=スレッド(議事録/activity/DM)+status遷移(retake)。『記録なし』の却下を封じる(殿指示)
+        sysadd += _dg("future_assign", future_assign_digest(ll_user, who))   # 今後アサインされているPJ=主語の未来start/未完タスクをCalendarから導出(殿指示)
         sysadd += _dg("cross", cross_digest(ll_user))                 # 横断クエリは全PJ遅延サマリを注入
         try:
             hits = (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user)
@@ -4423,16 +5786,45 @@ class H(BaseHTTPRequestHandler):
         pending_actions = []                        # Stage2: 副作用操作の承認待ちキュー
         MAXIT = 6
         _t0 = time.time()                           # トレース: 生成時間計測の起点
+        # Q4 snooze: 『今日は流す』の say型sentinel(__attn_snooze__ <ref> <name>)を決定的に処理(副作用ゼロ・qwen非経由)。
+        _snz = re.match(r"^__attn_(snooze|dismiss)__\s+(\S+)(?:\s+(.*))?$", (ll_user or "").strip())
+        attn_cards = []
+        if _snz:
+            try:
+                import attention as _att
+                _ref = _snz.group(2); _nm = (_snz.group(3) or "この件").strip()
+                if _snz.group(1) == "dismiss":
+                    _att.dismiss(who.get("uid"), _ref); _msg = f"「{_nm}」は以後お出ししませぬ。"
+                else:
+                    _u = _att.snooze(who.get("uid"), _ref); _msg = f"「{_nm}」は本日は流しました（{_u}以降にまた）。"
+            except Exception:
+                _msg = "承知。今日は流しまする。"
+            routed = {"_choices": True, "reply": _msg}; choices_obj = None
+            # 以降の生成/カードは不要 → routed で生成ループskip
+        else:
+            routed = None
+        # Q1(Fable 選択カード): 曖昧な指示語(それ/あの件…)＋action意図で対象候補が複数→qwenに推測(捏造)
+        # させず選択カードで人に決めさせる。routerより優先(推測の芽を潰す)。say型ゆえ副作用起票はしない。
+        choices_obj = None if _snz else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定(狭い_ACTION_Q_REに依存しない)
+        if not choices_obj and not _snz:                 # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
+            choices_obj = _pj_task_choices(ll_user)
+        if not _snz:
+            attn_cards = _attention_action_cards(who, ll_user)       # Q4: 今日の3件の overdue/loop を選択カードで(draftは①で承認カード)
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
         # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
-        routed = _action_router(ll_user, sysadd, who, convo=msgs) if _looks_like_action(ll_user) else None
+        if not _snz:                                # snooze確定時は routed を維持(上書き禁止)
+            routed = None if choices_obj else (_action_router(ll_user, sysadd, who, convo=msgs, gate=_gate) if _looks_like_action(ll_user) else None)
+            if choices_obj:                         # 曖昧→選択カード提示。生成ループはスキップ(routed扱い)
+                routed = {"_choices": True, "reply": choices_obj["prompt"]}
+        # 追従: Casperが「下書きを表示しますか?」と申し出た直後の裸の肯定(おねがい/はい)=その申し出への同意→浮上
+        _affirm_draft = bool(_AFFIRM_RE.match((ll_user or "").strip())) and bool(_DRAFT_OFFER_RE.search(_last_assistant(msgs)))
         # 滞留下書きの浮上: 『下書き見せて/承認待ち確認/気にかけどころ処理』等→実カード(内容+承認/却下)を出す
         # (決定は散文でなくカードで=殿指摘。新規DM作成意図でない時のみ)
-        if not routed and _DRAFT_SURFACE_RE.search(ll_user) and not _looks_like_action(ll_user):
-            _n, _note = _surface_pending_drafts(who, pending_actions)
+        if not routed and (_DRAFT_SURFACE_RE.search(ll_user) or _affirm_draft) and (not _looks_like_action(ll_user) or _DRAFT_ASK_RE.search(ll_user) or _affirm_draft):
+            _n, _note = _surface_pending_drafts(who, pending_actions)   # Q3C強処方: 下書きの中身を問う=決定的fast path(qwen非経由・憶測ゼロ)
             if pending_actions:
                 routed = {"_surfaced": True, "reply": _note}
-        if routed and routed.get("_surfaced"):      # 浮上=カードは積み済・reply表示のみ(起票しない)
+        if routed and (routed.get("_surfaced") or routed.get("_choices")):   # 浮上/選択=reply表示のみ(起票しない)
             final = routed["reply"]
         elif routed:
             try:
@@ -4450,12 +5842,27 @@ class H(BaseHTTPRequestHandler):
         # B) 本物のストリーミング(Fable最大の一手・TTFT短縮): text応答をトークン単位でクライアントへ即送出。
         # tool_call応答はcontentが空ゆえ流れない。routed(P2アクション)時はカード返信ゆえストリームせず。
         _sbuf = [""]; _did_stream = [False]
+        _cont = 0                                   # 截ち切れ自動継続の回数(トレース用・routed時も定義)
+        _pend = [""]                                # 穴1(Fable): 行バッファ。末尾の不完全行は保留し、截ち切れ時に破棄できる
         def _semit(c):
-            _sbuf[0] += c; _did_stream[0] = True
-            try:
-                self._emit(c)
-            except Exception:
-                pass
+            _sbuf[0] += c; _did_stream[0] = True     # _sbuf=全生チャンク(replace比較用)
+            _pend[0] += c
+            if "\n" in _pend[0]:                     # 完成した行(改行まで)だけクライアントへ→壊れた行を画面に出さない
+                cut = _pend[0].rfind("\n") + 1
+                emit_now = _pend[0][:cut]; _pend[0] = _pend[0][cut:]
+                try:
+                    self._emit(emit_now)
+                except Exception:
+                    pass
+        def _flush_pend():                           # 自然終了時: 保留中の完成分をクライアントへ
+            if _pend[0]:
+                try:
+                    self._emit(_pend[0])
+                except Exception:
+                    pass
+                _pend[0] = ""
+        def _drop_pend():                            # 截ち切れ時: 未送出の不完全行を破棄(継続が書き直す)
+            _pend[0] = ""
         try:
             for it in range(MAXIT):
                 if routed:                          # P2でアクション確定済 → 生成ループをスキップ
@@ -4533,6 +5940,34 @@ class H(BaseHTTPRequestHandler):
                             "サムネイル等 vault 由来の画像は『関連社内記録』に在ればそれを使い、無ければ無い旨を述べよ）"})
                     continue
                 final = strip_think(m.get("content", ""))
+                # ②截ち切れの機構的解(汎用・Fable Q2): done_reason=length で切れた時だけ自動継続。
+                # キーワード非依存。穴1=不完全行はクライアント表示から破棄(_drop_pend)。穴2=既出行は機構でdedupe。
+                _sys_msgs2 = [mm for mm in working if mm.get("role") == "system"]   # 穴3: 継続時 ctx を刈る土台
+                _cont = 0
+                while resp.get("done_reason") == "length" and _cont < 3 and final.strip():
+                    _cont += 1
+                    _drop_pend()                          # 穴1: 截ち切れた不完全行を画面から破棄
+                    if not final.endswith("\n"):          # 保存側も不完全最終行を落とす(継続が書き直す)
+                        _nl = final.rfind("\n")
+                        if _nl > 0:
+                            final = final[:_nl + 1]
+                    # 穴3: 継続の working は肥大させず system＋『これまでの出力』＋続行指示 に刈り込む(ctx頭切れ防止)
+                    working = _sys_msgs2 + [
+                        {"role": "assistant", "content": final[-6000:]},
+                        {"role": "user", "content":
+                         "直前の出力が途中で切れた。既に完成している行は一切繰り返さず、"
+                         "最後の行の続きから残りだけを最後まで出力せよ(表なら残りの行のみ)。"}]
+                    resp = ollama_chat_stream(working, tools=None, num_predict=2048,
+                                              temperature=0.0, emit_fn=_semit)   # 継ぎ目安定
+                    more = strip_think((resp.get("message") or {}).get("content", ""))
+                    if not more.strip():
+                        break
+                    _existing = {l.strip() for l in final.splitlines() if l.strip()}   # 穴2: 既出行を機械的に除去
+                    _newl = [l for l in more.splitlines() if l.strip() not in _existing]
+                    if not _newl:                         # 全て既出=前進なし→無限ループ回避
+                        break
+                    final = final.rstrip("\n") + "\n" + "\n".join(_newl).lstrip("\n")
+                _flush_pend()                             # 保留中の完成行をクライアントへ出す
                 break
         except Exception as e:
             final = f"[error] {e}"
@@ -4545,10 +5980,20 @@ class H(BaseHTTPRequestHandler):
         _salv = final != _pre; _pre = final
         final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
         _val = final != _pre; _pre = final
+        final = _strip_name_gloss(final, sysadd, ll_user)            # 出口検問: 解決済みPJ名の推測括弧展開(丸亀製麺等)を剥ぐ(Fable処方3)
+        _gloss = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
-        _grd = final != _pre
+        _grd = final != _pre; _pre = final
+        final = _validate_choices(final, pending_actions, choices=(choices_obj or attn_cards))   # Q2: 裸の選択要求(装置なし)を削除+中立誘導(不変条件①)
+        _vch = final != _pre; _pre = final
+        final = _strip_tool_narration(final)                         # Q7: 道具実況(生の関数呼び構文だけで停止)を剥ぐ→空なら下でfallback救済
+        final = _strip_context_echo(final, ll_user)                  # Q3B: 非該当セクション(Vimeo手順等)の滲出を出口で除去
+        _ech = final != _pre
         if not final.strip() and not pending_actions:                # 出口検問で全消し(ツール漏れ等)かつカード無し→PJ状態を救済 or graceful
             final = _pj_status_fallback(ll_user) or "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。"
+        if _sched and _sched[0] not in final:                        # ① 決定的保証: 工程表CSVリンクがqwen応答から漏れたら機構が付す
+            final = (final.rstrip() + f"\n\n{_sched[0]}\n"
+                     f"（Excelで開けます。編集して取り込み直すことも可能です／Calendarへ直接反映も承認カードで行えます）")
         if casper_breaker:                          # z8a(qwen)の健全性を記録: 成功可否+レイテンシ→連続失敗でred=クラウド縮退の判断材料
             try:
                 casper_breaker.record("z8a", ok=not final.startswith("[error]"),
@@ -4559,15 +6004,36 @@ class H(BaseHTTPRequestHandler):
             try:
                 _abstain = bool(re.search(r"(見当たら|確認できた範囲|わかりませ|分かりませ|存じませ|"
                                           r"該当(する|情報|資料).{0,8}(見つか|ありませ|無い|なし))", final))
+                _fastpath = ("surface" if (routed or {}).get("_surfaced") else
+                             "choices" if choices_obj else "attention" if attn_cards else
+                             "snooze" if _snz else None)   # Q3C/Q1/Q4: qwen非経由の決定的経路(観測=どれだけ推測を回避したか)
+                # Q4(Fable): 注入した型付き事実を記録=事後の真実源照合を機構化する土台(何を注入したか機構は知っている)
+                _inj = {"vimeo": sorted(set(re.findall(r"vimeo\.com/(\d+)", sysadd)))[:40],
+                        "asset": sorted(set(re.findall(r"/asset/([^\s\)\"'\]]+)", sysadd)))[:40]}
+                _resp_ids = {"vimeo": sorted(set(re.findall(r"vimeo\.com/(\d+)", final)))[:40],
+                             "asset": sorted(set(re.findall(r"/asset/([^\s\)\"'\]]+)", final)))[:40]}
                 casper_trace.emit({"trace_id": _tid, "query": str(ll_user)[:200], "actor": who.get("uid"), "thread": thr,
                                    "routed": bool(routed), "action": (routed or {}).get("tool"),
+                                   "fastpath": _fastpath, "echoed": _ech, "vch": _vch,   # 決定的fast path/echo検問/裸選択検問の発火
+                                   "injected_facts": _inj, "resp_ids": _resp_ids, "cont": _cont,   # 注入事実/応答ID/継続回数
+                                   "gate": {"intent": _gate.get("intent"), "facet": _gate.get("facet"),
+                                            "aliases": len(_gate.get("alias_refs") or [])} if _gate else None,
+                                   "pj": (lambda r: {"status": r[0], "n": len(r[1]), "path": r[2]})(_pj_resolve(ll_user)),   # 名前解決の3値/経路(観測)
                                    "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
-                                   "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val,
+                                   "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val, "gloss": _gloss,
                                    "guarded_claim": _grd, "abstained": _abstain,   # 棄権(Fable #3-5/7-5: 棄権率の定点観測)
                                    "final_len": len(final), "cards": len(pending_actions), "fewshot_used": list(_FEWSHOT_USED)})
             except Exception:
                 pass
         final, diagram = render_diagram(final)
+        if not final.strip() and (diagram or table_card):     # チャート/表だけ出力し本文が空→表の実データから要約を機構生成(空応答=途中切れ誤検知/無言の回避)
+            if table_card:
+                _rw = table_card.get("rows") or []
+                _summ = "、".join(f"{r[0]}（{r[1]}）" for r in _rw[:6] if r and len(r) > 1)
+                final = (f"{table_card['title']}にござる。主だったところは {_summ} 等。"
+                         f"全{len(_rw)}件の件数・担当・締切は下表の通り。並べ替えは列見出しから。")
+            else:
+                final = "下記の図に整理しました。ご確認くだされ。"
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
         dev_log(who, ll_user, final, {"model": A.model, "backend": "ollama"})
@@ -4586,6 +6052,23 @@ class H(BaseHTTPRequestHandler):
         try:
             if diagram:
                 self.wfile.write((json.dumps({"diagram": diagram}) + "\n").encode())
+            if table_card:                          # ④ 表カード(機構描画・截ち切れ/転写捏造/全件ダンプの構造解)
+                self.wfile.write((json.dumps({"table": table_card}, ensure_ascii=False) + "\n").encode())
+            _emitted_opts = []                      # ③ 次ターンの選択検知用に、出したカードの option を控える
+            if choices_obj:                         # Q1: 選択カード(say型・曖昧指示語の解決装置)をUIへ
+                self.wfile.write((json.dumps({"choices": choices_obj}, ensure_ascii=False) + "\n").encode())
+                for _o in choices_obj.get("options", []):
+                    _emitted_opts.append({"say": _o.get("say"), "label": _o.get("label"), "card_type": "deictic", "ref": _o.get("id")})
+            for _ac in attn_cards:                  # Q4: 今日の3件の overdue/loop を選択カード(催促起案/今日は流す)としてUIへ
+                self.wfile.write((json.dumps({"choices": _ac}, ensure_ascii=False) + "\n").encode())
+                for _o in _ac.get("options", []):
+                    _emitted_opts.append({"say": _o.get("say"), "label": _o.get("label"), "card_type": "attention", "ref": _o.get("id")})
+            if _emitted_opts:                       # スレッドに控える(次ターンの say型再投入と突合)
+                _LAST_CHOICES[thr] = {"opts": _emitted_opts, "uid": who.get("uid"),
+                                      "prompt": (choices_obj or (attn_cards[0] if attn_cards else {})).get("prompt", "")}
+                if len(_LAST_CHOICES) > 200:
+                    for _k in list(_LAST_CHOICES)[:-200]:
+                        _LAST_CHOICES.pop(_k, None)
             for pa in pending_actions:              # Stage2: 承認待ち操作をUIへ
                 self.wfile.write((json.dumps({"confirm": pa}, ensure_ascii=False) + "\n").encode())
             self.wfile.write(b'{"done":true}\n')

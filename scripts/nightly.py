@@ -41,6 +41,11 @@ def run(with_gate=False):
         res["expired"] = attention.expire_stale()
     except Exception as e:
         res["expired_err"] = str(e)[:120]
+    try:
+        import casper_person_gate                      # ③ 選択カードの選択ログ→per-user既定のcandidate提案(人が昇格)
+        res["gate_candidates"] = casper_person_gate.promote_candidates()
+    except Exception as e:
+        res["gate_candidates_err"] = str(e)[:120]
     if with_gate:
         try:
             import casper_eval
