@@ -3306,6 +3306,64 @@ def build_digests(who, q, trace=None):
     return "".join(p for _, p in pieces if p)
 
 
+def trace_stats(limit=5000):
+    """【観測(Fable M2)】casper_trace.jsonl(1req=1行)を集計→digest発火率/共発火/出口検問発動計数/
+    fastpath分布/レイテンシ を1画面に出す土台。読取専用・直近limit件。『検問が何回捏造を止めたか』が価値の計器。"""
+    import collections
+    recs = []
+    try:
+        _tr = casper_trace.TRACE if casper_trace else os.path.join(HERE, "casper_trace.jsonl")
+        lines = open(_tr, encoding="utf-8").read().splitlines()[-limit:]
+    except Exception:
+        lines = []
+    for ln in lines:
+        try:
+            recs.append(json.loads(ln))
+        except Exception:
+            pass
+    n = len(recs) or 1
+    dig = collections.Counter(); cofire = collections.Counter(); fastpath = collections.Counter()
+    checks = {"validated": 0, "guarded_claim": 0, "gloss": 0, "vch": 0, "salvaged": 0, "echoed": 0, "abstained": 0}
+    dropped = collections.Counter()
+    lat = []; cards_n = routed_n = 0
+    for r in recs:
+        fired = r.get("digests_fired") or []
+        for d in fired:
+            dig[d] += 1
+        for i in range(len(fired)):
+            for j in range(i + 1, len(fired)):
+                cofire[" + ".join(sorted((fired[i], fired[j])))] += 1
+        for d in (r.get("digests_dropped") or []):
+            dropped[d] += 1
+        for k in checks:
+            if r.get(k):
+                checks[k] += 1
+        fastpath[r.get("fastpath") or "—(qwen)"] += 1
+        if isinstance(r.get("gen_sec"), (int, float)):
+            lat.append(r["gen_sec"])
+        if r.get("cards"):
+            cards_n += 1
+        if r.get("routed"):
+            routed_n += 1
+    lat.sort()
+
+    def pct(p):
+        return round(lat[min(len(lat) - 1, int(len(lat) * p))], 1) if lat else 0
+    _labels = {"validated": "捏造asset除去", "guarded_claim": "既成事実化打消", "gloss": "幻覚展開剥ぎ",
+               "vch": "裸選択削除", "salvaged": "ツール救済", "echoed": "混入除去", "abstained": "正直に棄権"}
+    return {
+        "n": len(recs),
+        "digests": [{"name": k, "count": v, "rate": round(v / n * 100)} for k, v in dig.most_common()],
+        "cofire": [{"pair": k, "count": v} for k, v in cofire.most_common(12)],
+        "checks": [{"name": k, "label": _labels[k], "count": checks[k], "rate": round(checks[k] / n * 100, 1)} for k in checks],
+        "checks_total": sum(checks.values()),
+        "dropped": [{"name": k, "count": v} for k, v in dropped.most_common()],
+        "fastpath": [{"name": k, "count": v, "rate": round(v / n * 100)} for k, v in fastpath.most_common()],
+        "latency": {"p50": pct(0.5), "p90": pct(0.9), "max": (round(lat[-1], 1) if lat else 0)},
+        "cards_rate": round(cards_n / n * 100), "routed_rate": round(routed_n / n * 100),
+    }
+
+
 def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, temperature=0.15):
     """本物のストリーミング版(B・Fable指摘の最大の一手): Ollama stream:True(NDJSON)を読み、content片を
     emit_fn(chunk)で即クライアントへ→TTFT短縮。返り=組み立てたレスポンス({message:{content,tool_calls}, done_reason})。
@@ -4720,6 +4778,14 @@ class H(BaseHTTPRequestHandler):
             page = "arch.html"
         elif self.path in ("/archflow", "/archflow.html"):   # React Flow版(触れるノードグラフ・CDN)
             page = "archflow.html"
+        elif self.path in ("/obs", "/obs.html"):        # 観測ダッシュボード(Fable M2・digest発火/検問発動計数/レイテンシ)
+            page = "obs.html"
+        elif self.path == "/api/obs":                   # 観測データ(trace集計・読取専用)
+            try:
+                self._json(trace_stats())
+            except Exception as e:
+                self._json({"error": str(e), "n": 0})
+            return
         elif self.path == "/api/seiri/projects":       # ① online PJ 一覧(整理対象の候補)
             try:
                 self._json({"projects": seiri_projects(identify(self))})
