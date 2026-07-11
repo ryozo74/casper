@@ -2788,7 +2788,14 @@ def _dg(name, text):
         return ""
     b = cfg.get("budget")
     t = text or ""
-    return t[:b] if (b and len(t) > b) else t
+    if not (b and len(t) > b):
+        return t
+    # Fable M1: 予算切詰めは"レコード境界"で(文字尻切り=半端な事実を確定注入する罠の回避)。
+    cut = t[:b]
+    nl = cut.rfind("\n")                                  # 予算内の最後の改行=行(レコード)境界
+    if nl > b * 0.5:                                      # 半分以上残るなら行境界で切る
+        cut = cut[:nl]
+    return cut.rstrip() + "\n…(予算により以下省略)"
 
 
 def fewshot_digest(query):
@@ -3221,6 +3228,82 @@ def ollama_chat(messages, tools=None, num_predict=1536):
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
         return json.load(r)
+
+
+# ── DigestRegistry(Fable M1): 全digestを"1枚の宣言表"にし両バックエンド共通の単一ループで組む。
+#    以前は claude_cli 経路と Ollama 経路に注入スタックが複製・ドリフトしていた(claude_cli側に entity/
+#    availability/team_vocab/gear/phase_sched/fb_log/future_assign が欠落)。表を単一ソースにして根絶する。
+#    各entry=(name, fn(who, query)->text)。attention も例外なく _dg(kill-switch/予算)下に置く。
+_DIGEST_REGISTRY = [
+    ("activity",         lambda who, q: activity_digest(who)),
+    ("verify",           lambda who, q: verify_digest(who, q)),
+    ("projects",         lambda who, q: projects_digest(q)),
+    ("entity",           lambda who, q: entity_digest(q)),
+    ("active_tasks",     lambda who, q: active_tasks_digest(q)),
+    ("availability",     lambda who, q: availability_digest(q)),
+    ("team_vocab",       lambda who, q: team_vocab_digest(q)),
+    ("fewshot",          lambda who, q: fewshot_digest(q)),
+    ("existence",        lambda who, q: existence_digest(who, q)),
+    ("open_loop",        lambda who, q: open_loop_digest(who)),
+    ("attention",        lambda who, q: attention_digest(who, q)),
+    ("context_sections", lambda who, q: context_sections_digest(q)),
+    ("calendar",         lambda who, q: calendar_digest(q)),
+    ("traits",           lambda who, q: traits_digest(who, q)),
+    ("meeting",          lambda who, q: meeting_digest(q)),
+    ("shot_assignee",    lambda who, q: shot_assignee_digest(q)),
+    ("image_asset",      lambda who, q: image_asset_digest(q)),
+    ("portfolio",        lambda who, q: portfolio_digest(q)),
+    ("gear",             lambda who, q: gear_digest(q)),
+    ("phase_sched",      lambda who, q: phase_schedule_digest(q)),
+    ("fb_log",           lambda who, q: fb_log_digest(q)),
+    ("future_assign",    lambda who, q: future_assign_digest(q, who)),
+    ("cross",            lambda who, q: cross_digest(q)),
+]
+
+
+# 全体トークン予算(Fable M1): 全digestが同時発火するとcontext飽和(lost in the middle)ゆえ、注入総量に上限を置く。
+# 超過時は"接地/安全でない味付けdigest"から順に落とす(接地・検問系は絶対に落とさない)。落としたものはtraceに記録=silent cap禁止。
+_DIGEST_CEILING = int(os.environ.get("CASPER_DIGEST_CEILING", "18000"))   # 注入ブロックの文字上限(≈ num_ctx 12288 の内数)
+_TRIM_FIRST = ["activity", "context_sections", "calendar", "meeting", "cross",   # 低優先(先に落とす)…
+               "open_loop", "team_vocab", "portfolio", "user_profile", "fewshot"]
+#  ↑に無い digest(verify/projects/entity/active_tasks/availability/existence/gear/phase_sched/fb_log/
+#    future_assign/traits/shot_assignee/image_asset/attention)は接地・安全の一次ゆえ予算超過でも落とさない。
+
+
+def build_digests(who, q, trace=None):
+    """全digestを単一の宣言表(_DIGEST_REGISTRY)から順に組む(両バックエンド共通・Fable M1)。
+    各digestは _dg(kill-switch/予算)を通す。draftは条件付き。全体上限を超えたら低優先から落とす。
+    trace(dict)を渡すと発火/切詰めを記録(観測=M2の土台)。"""
+    pieces = [("user_profile", _dg("user_profile", user_profile_digest(who)))]
+    for name, fn in _DIGEST_REGISTRY:
+        try:
+            txt = fn(who, q)
+        except Exception:
+            txt = ""
+        if txt:
+            piece = _dg(name, txt)
+            if piece:
+                pieces.append((name, piece))
+    if _DRAFT_SURFACE_RE.search(q or ""):                  # 条件: 下書き浮上時は実本文を注入(内容の憶測を封じる)
+        pieces.append(("draft_bodies", _draft_bodies_context(who)))
+    # 全体予算: 超過なら _TRIM_FIRST の順(低優先)に落とす。接地・安全系は残す。
+    dropped = []
+    total = sum(len(p) for _, p in pieces if p)
+    if total > _DIGEST_CEILING:
+        keep = dict((n, True) for n, _ in pieces)
+        for name in _TRIM_FIRST:
+            if total <= _DIGEST_CEILING:
+                break
+            for i, (n, p) in enumerate(pieces):
+                if n == name and keep.get(n) and p:
+                    total -= len(p); keep[n] = False; dropped.append(n)
+        pieces = [(n, p) for (n, p) in pieces if keep.get(n)]
+    fired = [n for n, p in pieces if p]
+    if trace is not None:
+        trace["digests_fired"] = fired
+        if dropped:
+            trace["digests_dropped"] = dropped
+    return "".join(p for _, p in pieces if p)
 
 
 def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, temperature=0.15):
@@ -5568,24 +5651,7 @@ class H(BaseHTTPRequestHandler):
             hits = casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
-            cal = user_profile_digest(who)            # ログイン中ユーザーの蓄積理解を注入
-            cal += _dg("activity", activity_digest(who))               # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
-            cal += _dg("verify", verify_digest(who, last_user))      # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
-            cal += _dg("projects", projects_digest(last_user))         # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
-            cal += _dg("active_tasks", active_tasks_digest(last_user))     # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
-            cal += _dg("fewshot", fewshot_digest(last_user))          # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
-            cal += _dg("existence", existence_digest(who, last_user))   # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
-            cal += _dg("open_loop", open_loop_digest(who))              # 未了の約束(OPEN LOOP)を⚙レコードから注入
-            cal += attention_digest(who, last_user)   # 今日の3件(気にかけどころ)の実体=『上記の件どうしたら』に正答
-            cal += _dg("context_sections", context_sections_digest(last_user))   # Q3B: 操作ガイドはクエリ該当時のみ注入(混入防止)
-            if _DRAFT_SURFACE_RE.search(last_user or ""):
-                cal += _draft_bodies_context(who)     # Q3C: 下書きの実本文を注入→内容の憶測(「〜と思われる」)を封じる
-            cal += _dg("traits", traits_digest(who, last_user))      # 人物の癖(構造化trait)を注入=裏取りの手がかり
-            cal += _dg("calendar", calendar_digest(last_user))         # Calendar 左脳を必要時に先読み注入
-            cal += _dg("meeting", meeting_digest(last_user))          # 会議/議事録クエリは最新会議も注入
-            cal += _dg("portfolio", portfolio_digest(last_user))        # 実績クエリは自社Vimeo実績を注入
-            cal += _dg("cross", cross_digest(last_user))            # 横断クエリは全PJ遅延サマリを注入
-            cal += _dg("shot_assignee", shot_assignee_digest(last_user))    # カット×担当(shot×task結合)も注入
+            cal = build_digests(who, last_user)       # Fable M1: Ollama経路と同一の単一表から(entity/availability/gear/phase/fb_log/future_assign 欠落の解消)
             diag_hint = DIAG_HINT
             prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
                       + fullnote
@@ -5667,21 +5733,8 @@ class H(BaseHTTPRequestHandler):
                 pass
         # 出力指針(表/mermaid/Canvas/動画)を system に追記。
         # 右脳(vault)はtoolで探させると空振りしやすい→ショットリスト/資料系は top_source を先読み注入。
-        sysadd = DIAG_HINT + user_profile_digest(who)   # ログイン中ユーザーの蓄積理解を注入
-        sysadd += _dg("activity", activity_digest(who))                   # 動向層＝経験層: 直近の筋/未決/先読みを掟つき注入
-        sysadd += _dg("verify", verify_digest(who, ll_user))            # 検証ゲート: 状態質問は応答前にlive裏取り強制＋出所タグ義務
-        sysadd += _dg("projects", projects_digest(ll_user))               # 進行中PJ一覧: Calendarから注入(ツール呼び失敗を回避)
-        sysadd += _dg("entity", entity_digest(ll_user))                   # 実体アイデンティティ: unique解決PJの正体を注入(名前からの幻覚展開を断つ・Fable処方3)
-        sysadd += _dg("active_tasks", active_tasks_digest(ll_user))           # 進行中タスク一覧: 全PJのwipを注入(本日締切に狭めぬ)
-        sysadd += _dg("availability", availability_digest(ll_user))           # 空き人材: 実務担当∖wip割当 の集合差を機構確定(答えず止まる病の根治・Fable処方1)
-        sysadd += _dg("team_vocab", team_vocab_digest(ll_user))             # 自社の職能語彙: チーム構成問いを汎用IT職でなくCG工程で答えさせる(Fable処方5)
-        sysadd += _dg("fewshot", fewshot_digest(ll_user))                # 過去の教訓(learn_bank)を注入=型の矯正(flywheel柱1出口)
-        sysadd += _dg("existence", existence_digest(who, ll_user))         # 存在ゲート: 資料有無の問いはRAG検索強制＋"無い"の断定禁止
-        sysadd += _dg("open_loop", open_loop_digest(who))                  # 未了の約束(OPEN LOOP)を⚙レコードから注入
-        sysadd += attention_digest(who, ll_user)         # 今日の3件(気にかけどころ)の実体=『上記の件どうしたら』に正答
-        sysadd += _dg("context_sections", context_sections_digest(ll_user))   # Q3B: 操作ガイドはクエリ該当時のみ注入(混入防止)
-        if _DRAFT_SURFACE_RE.search(ll_user or ""):
-            sysadd += _draft_bodies_context(who)         # Q3C: 下書きの実本文を注入→内容の憶測を封じる
+        _dig_trace = {}
+        sysadd = DIAG_HINT + build_digests(who, ll_user, trace=_dig_trace)   # Fable M1: 全digestを単一表から(claude_cli経路と共通)
         _gate = casper_person_gate.resolve(who.get("uid"), ll_user, convo=msgs) if casper_person_gate else {}
         if _gate.get("digest"):                          # 理解ゲート: その人の既定ファセット/別名を前提として注入(入力の接地)
             sysadd += _gate["digest"]
@@ -5699,16 +5752,6 @@ class H(BaseHTTPRequestHandler):
                        f"**回答には必ず次のダウンロードリンクをそのまま改変せず含めよ: {_slink}**。"
                        "『Excelで開け、編集して取り込み直せる』旨を1文添えよ。ガントや全タスクの再掲はするな(冗長)。"
                        "Calendarへ直接反映したい場合は、その旨言えば承認カードで書込む と案内してよい。")
-        sysadd += _dg("traits", traits_digest(who, ll_user))            # 人物の癖(構造化trait)を注入=裏取りの手がかり
-        sysadd += _dg("meeting", meeting_digest(ll_user))               # 会議/議事録クエリは最新会議を注入(tool空振り対策)
-        sysadd += _dg("shot_assignee", shot_assignee_digest(ll_user))         # カット×担当も注入
-        sysadd += _dg("image_asset", image_asset_digest(ll_user))           # 画像/カット系は実在ファイルのURLを機械注入(捏造防止)
-        sysadd += _dg("portfolio", portfolio_digest(ll_user))             # 実績クエリは自社Vimeo実績を注入
-        sysadd += _dg("gear", gear_digest(ll_user))                   # NINA機材/ギアリストはvault機材節を注入(Canon等の上乗せ捏造を断つ・殿指示)
-        sysadd += _dg("phase_sched", phase_schedule_digest(ll_user))       # 現フェーズ締切/次回社内チェックはtask type/due/チェックタスクから機構導出(殿指示)
-        sysadd += _dg("fb_log", fb_log_digest(ll_user))                   # FBログ=スレッド(議事録/activity/DM)+status遷移(retake)。『記録なし』の却下を封じる(殿指示)
-        sysadd += _dg("future_assign", future_assign_digest(ll_user, who))   # 今後アサインされているPJ=主語の未来start/未完タスクをCalendarから導出(殿指示)
-        sysadd += _dg("cross", cross_digest(ll_user))                 # 横断クエリは全PJ遅延サマリを注入
         try:
             hits = (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user)
                     else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
@@ -6022,6 +6065,7 @@ class H(BaseHTTPRequestHandler):
                                    "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
                                    "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val, "gloss": _gloss,
                                    "guarded_claim": _grd, "abstained": _abstain,   # 棄権(Fable #3-5/7-5: 棄権率の定点観測)
+                                   "digests_fired": _dig_trace.get("digests_fired"),   # M1: 発火digest(M2観測の種)
                                    "final_len": len(final), "cards": len(pending_actions), "fewshot_used": list(_FEWSHOT_USED)})
             except Exception:
                 pass

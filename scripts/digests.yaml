@@ -58,3 +58,39 @@ verify:
   budget: 3000
   enabled: true
   note: 状態はlive裏取り
+entity:
+  budget: 1500
+  enabled: true
+  note: unique解決PJの正体(幻覚展開防止・Fable処方3)
+availability:
+  budget: 2500
+  enabled: true
+  note: 空き人材=集合差(Fable処方1)
+team_vocab:
+  budget: 1200
+  enabled: true
+  note: 自社CG職能語彙(Fable処方5)
+attention:
+  budget: 2500
+  enabled: true
+  note: 今日の気にかけどころ3件(Fable M1でyaml統制下へ)
+context_sections:
+  budget: 3000
+  enabled: true
+  note: 操作ガイドはクエリ該当時のみ
+gear:
+  budget: 2800
+  enabled: true
+  note: NINA機材はvault実データ(Canon等の上乗せ防止)
+phase_sched:
+  budget: 2500
+  enabled: true
+  note: 現フェーズ締切/次回チェックをtask type/dueから導出
+fb_log:
+  budget: 2000
+  enabled: true
+  note: FBログ=スレッド+status遷移(却下の自己矛盾封じ)
+future_assign:
+  budget: 2000
+  enabled: true
+  note: 今後アサイン=Calendar先割当の導出
