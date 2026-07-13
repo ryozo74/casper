@@ -4647,28 +4647,42 @@ def seiri_interview(who, project_name, knowledge, answers):
             "questions": questions, "core_ok": core, "reason": reason}
 
 
-def seiri_closed_book(who, project_name, knowledge):
-    """⑥前の最終硬化ゲート(Fable5・closed-book試験): 引き継ぎ担当が必ず知るべき質問を"知識を見せず"生成し
-    (循環回避)、結晶化知識だけで closed-book 回答→実質的に答えられた数で採点。正答して初めて offline(不可逆)
-    の引き金を許す=自己申告rubricより一段強い決定的ゲート。返り: {pass, score, graded[{q,a,covered}]}。"""
+def seiri_closed_book(who, project_name, knowledge, materials=""):
+    """⑥前の最終硬化ゲート(Fable5・closed-book試験): 引き継ぎ担当が必ず知るべき質問を生成し、結晶化知識だけで
+    closed-book 回答→答えられた数で採点。自己申告rubricより一段強い決定的ゲート。
+    【Fable処方C-1: 試験官と被採点者の材料を非対称に】試験問題は"原資料(materials・vision図キャプション込み)"
+    から作る(結晶化知識からでない)。画像側にしか答えの無い問い(点群RMS等)が混じり、痩せた知識は落ちる=偽合格が
+    構造的に不可能。原資料が薄い/無い時のみ従来どおりPJ名から出題。返り: {pass, score, graded[{q,a,covered}]}。"""
     try:
-        qs = strip_think(llm_text(
-            "あなたはCasper。完了プロジェクトの引き継ぎ試験官。『次に似た案件を担当する人』が必ず知るべき実務的で"
-            "具体的な質問を4問だけ挙げよ(段取りの要所/最大の落とし穴/重要な判断の理由/外部との重要なやりとり を各1問)。"
-            "各質問1行・番号のみ・前置き不要。",
-            f"プロジェクト名: {project_name}", num_predict=250)).strip()
-        questions = [re.sub(r"^[0-9.\-・\)\s]+", "", q).strip() for q in qs.split("\n") if q.strip()][:4]
+        src = re.sub(r"\s", "", materials or "")
+        if len(src) >= 120:                                   # 原資料が実質ある→そこから出題(採点者=濃い材料)
+            qgen_sys = ("あなたはCasper。完了プロジェクトの引き継ぎ試験官。**下記『原資料』に答えが明記されている事項だけ**を"
+                        "問う質問を5問挙げよ。次に似た案件を担当する人が必ず知るべき、原資料に在る具体(記載された数値/固有名/手順/"
+                        "図から読み取れた事実)に踏み込んだ問いを。**原資料に無い情報(記載されていない数値・指標・RMSE等)は問うな**"
+                        "——答えが原資料に無い問いは失格。各質問1行・番号のみ・前置き不要。")
+            qgen_ctx = f"プロジェクト名: {project_name}\n\n原資料(図表から読み取れた事実を含む):\n{(materials or '')[:7000]}"
+            nq = 5; from_source = True
+        else:
+            qgen_sys = ("あなたはCasper。完了プロジェクトの引き継ぎ試験官。『次に似た案件を担当する人』が必ず知るべき"
+                        "実務的で具体的な質問を4問だけ挙げよ(段取りの要所/最大の落とし穴/重要な判断の理由/外部との重要な"
+                        "やりとり を各1問)。各質問1行・番号のみ・前置き不要。")
+            qgen_ctx = f"プロジェクト名: {project_name}"; nq = 4; from_source = False
+        qs = strip_think(llm_text(qgen_sys, qgen_ctx, num_predict=320)).strip()
+        questions = [re.sub(r"^[0-9.\-・\)\s]+", "", q).strip() for q in qs.split("\n") if q.strip()][:nq]
         graded = []
         for q in questions:
             ans = strip_think(llm_text(
                 "下記『結晶化知識』**だけ**を根拠に質問へ答えよ。知識に該当が無ければ必ず『(知識に記載なし)』とだけ答えよ。"
                 "推測・一般論で補うな。",
                 f"結晶化知識:\n{knowledge[:6000]}\n\n質問: {q}", num_predict=280)).strip()
-            covered = ("記載なし" not in ans) and (len(re.sub(r"\s", "", ans)) >= 15)
+            covered = ("記載なし" not in ans) and (len(re.sub(r"\s", "", ans)) >= 8)   # 簡潔な事実回答(型番/固有名)も可とする
             graded.append({"q": q, "a": ans[:400], "covered": covered})
         ncov = sum(1 for g in graded if g["covered"])
-        passed = len(graded) > 0 and ncov >= max(3, len(graded) - 1)   # 4問中3以上(1問までは許容)
-        return {"pass": passed, "score": f"{ncov}/{len(graded)}", "graded": graded}
+        n = len(graded)
+        # 【C-2】原資料出題(濃い試験)は合格線を被覆率8割で(痩せた知識が少問正答で通るのを防ぐ)。
+        #        従来のPJ名出題は4問中3以上(1問までは許容)。
+        passed = n > 0 and ((ncov / n >= 0.8) if from_source else (ncov >= max(3, n - 1)))
+        return {"pass": passed, "score": f"{ncov}/{n}", "graded": graded, "from_source": from_source}
     except Exception as e:
         return {"pass": False, "score": "0/0", "graded": [], "error": str(e)}
 
@@ -5422,7 +5436,8 @@ class H(BaseHTTPRequestHandler):
                     self._json(seiri_interview(who, req.get("project", ""),
                                 req.get("knowledge", ""), req.get("answers", "")))
                 elif self.path == "/api/seiri/closedbook":   # ⑤→⑥ 最終硬化ゲート(closed-book試験)
-                    self._json(seiri_closed_book(who, req.get("project", ""), req.get("knowledge", "")))
+                    self._json(seiri_closed_book(who, req.get("project", ""), req.get("knowledge", ""),
+                                                 req.get("materials", "")))
                 elif self.path == "/api/seiri/offline":      # ⑥ Calendar offline(人承認後)
                     self._json(seiri_offline(who, req.get("project_id")))
                 elif self.path == "/api/seiri/aurora":       # ② Aurora資料URL→本文を取り込んで追加素材に

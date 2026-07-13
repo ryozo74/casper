@@ -255,7 +255,7 @@ function renderIV(d){
 // ⑤→⑥ 最終硬化: closed-book試験(結晶化知識だけで引き継ぎ質問に答えられるか)。合格で初めて⑥解放。
 function runClosedBook(){
   fetch('/api/seiri/closedbook',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({project:SEL.name,knowledge:KNOW})}).then(r=>r.json()).then(d=>{
+    body:JSON.stringify({project:SEL.name,knowledge:KNOW,materials:$('materials').value})}).then(r=>r.json()).then(d=>{
     let h='<div class="rubric"><span class="ri '+(d.pass?'ok':'ng')+'">closed-book '+esc(d.score||'')+'</span></div>';
     (d.graded||[]).forEach(g=>{h+='<div class="q">'+(g.covered?'✅':'❌')+' '+esc(g.q)+'<div class="mut" style="margin-top:3px">'+esc(g.a)+'</div></div>';});
     if(d.pass){
