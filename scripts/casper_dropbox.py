@@ -109,6 +109,14 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
             es = (r or {}).get("error_summary", str(r))[:200]
             return {"ok": False, "error": f"リンク作成失敗: {es}", "uploaded_path": path}
         r = links[0]
+        # 【重要】既存リンクに"実際にパスワードを設定し直す"。怠ると生成pwが実リンクと食い違い
+        # 「表示/DMのパスワードが違う(開けない)」バグになる(同一ファイル再アップ時に発生・殿指摘2026-07-13)。
+        stm, rm = _api(API + "/sharing/modify_shared_link_settings",
+                       body={"url": r.get("url", ""),
+                             "settings": {"require_password": True, "link_password": pw,
+                                          "audience": "public", "access": "viewer", "allow_download": True}})
+        if stm == 200 and (rm or {}).get("url"):
+            r = rm                                   # PW設定済みの最新リンク情報で上書き(pw と実リンクが一致)
     url = r.get("url", "")
     if direct_download and url:
         url = url.replace("&dl=0", "&dl=1").replace("?dl=0", "?dl=1")
