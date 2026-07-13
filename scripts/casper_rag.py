@@ -65,6 +65,16 @@ def _seg_boost(segs, text):
     return sum(min(len(s), 6) * 0.18 for s in segs if s.lower() in t)
 
 
+# 進捗の真実源は Calendar。過去のレガシー記録(2022 DBM2)は"進捗/現況"に混ぜない(殿指摘2026-07-13)。
+# vault側にも進捗は入らない設計ゆえ、legacy_score を RAG から常時除外し current な回答の汚染を断つ。
+_EXCLUDE_SRC = ("80_legacy_score",)
+
+
+def _excluded(src):
+    s = str(src or "").lstrip("./")
+    return any(s == p or s.startswith(p + "/") or s.startswith(p) for p in _EXCLUDE_SRC)
+
+
 def candidates(query, n=60):
     """字面recallの上位n候補チャンク(dict: src/title/t)を返す。意味再ランク(casper_embed)の入力用。
     search()と同一スコアリングだが整形せず生chunkを返す=意味検索復活の土台(Fable M2)。"""
@@ -76,6 +86,8 @@ def candidates(query, n=60):
     segs = _segs(query)
     scored = []
     for e in _CACHE:
+        if _excluded(e.get("src")):                # legacy_score(過去DBM2)は進捗汚染源ゆえ除外
+            continue
         cg = _tri(e["t"])
         if not cg:
             continue
@@ -96,6 +108,8 @@ def search(query, k=8, budget=3800):
     segs = _segs(query)
     scored = []
     for e in _CACHE:
+        if _excluded(e.get("src")):                # legacy_score(過去DBM2)は進捗汚染源ゆえ除外
+            continue
         cg = _tri(e["t"])
         if not cg:
             continue

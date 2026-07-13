@@ -88,7 +88,12 @@ def _stalled_fb(tasks, today, days=3):
             if up and (datetime.date.fromisoformat(today) - datetime.date.fromisoformat(up)).days >= days:
                 out.append({"name": t.get("name") or t.get("title"),
                             "shot": t.get("shotID") or t.get("shot_id") or "",
-                            "status": t.get("status"), "since": up,
+                            "type": t.get("type") or "",
+                            "status": t.get("status"),
+                            "status_label": t.get("status_label") or t.get("status"),
+                            "since": up,
+                            "days": (datetime.date.fromisoformat(today) - datetime.date.fromisoformat(up)).days,
+                            "project_id": t.get("project_id"),
                             "assigned_to": t.get("assigned_to")})
         except Exception:
             pass

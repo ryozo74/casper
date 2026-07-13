@@ -2241,6 +2241,9 @@ def fb_log_digest(query):
     try:
         if not query or not _FBLOG_Q_RE.search(query):
             return ""
+        # 停滞FBの"一覧"意図(通知のN件)はCalendar機構の表が答える→ここでRAG(legacy混入源)を出さず譲る(殿指摘2026-07-13)。
+        if _STALL_LIST_RE.search(query) and not re.search(r"(?:cut|カット|c)\s*0*\d{1,3}\b", query, re.I):
+            return ""
         # ① まず対象カットのstatusを確定(素通り承認 vs 係争中FB)。これが framing を支配する。
         st, names, _ = _pj_resolve(query)
         mcut = re.search(r"(?:cut|カット|c)\s*0*(\d{1,3})\b", query, re.I)   # 接頭辞必須(『10月分』の数字を拾わない・Fable P1-4)
@@ -2708,6 +2711,12 @@ _PROJ_LIST_RE = re.compile(r"(動いて(る|いる)|進行中|稼働中|全.{0,2
                            r"(プロジェクト|PJ|案件).{0,8}(一覧|教え|どれ|ある|全部)|"
                            r"(納期|締切|遅れ|遅延|超過).{0,10}(プロジェクト|PJ|案件|一覧|もの|の))", re.I)
 
+# 停滞FB/確認の"一覧"意図(通知の『停滞FB N件』の実体を見せる)。進捗の真実源はCalendar(vault/legacyでなく)。
+_STALL_LIST_RE = re.compile(
+    r"(停滞|滞留|止ま(って|った)|溜ま(って|った)|たまって).{0,8}(FB|ＦＢ|確認|チェック|検収|レビュー)|"
+    r"(FB|ＦＢ|確認|チェック|検収|レビュー).{0,8}(停滞|滞留|止ま|溜ま|たまって)|"
+    r"停滞.{0,6}\d+\s*件", re.I)
+
 
 def _table_card(query, who):
     """一覧意図(進行中タスク/PJ)を機構で表カード化。返り=table dict or None。個別PJ照会(marukomeは?)は散文ゆえ対象外。"""
@@ -2723,6 +2732,35 @@ def _table_card(query, who):
     def _due_note(due, status=""):
         # 納期状況は status を見て機構が確定(完了PJの過去納期を超過表示しない・単一ソース _due_note_c)。
         return _due_note_c(due, status, today)
+
+    # ⓪-a 停滞FB/確認の一覧(通知の『停滞FB N件』の実体) — 進捗の真実源=Calendar からのみ描く。
+    #    vault/legacy_score(過去DBM2 2022)を拾わせない(殿指摘2026-07-13: 進捗はCalendarが全て/vaultに進捗は無い設計)。
+    if _STALL_LIST_RE.search(q):
+        try:
+            import casper_notify
+            stalled = casper_notify._stalled_fb(casper_notify._all_tasks(), today.isoformat())
+        except Exception:
+            stalled = []
+        pmn = {p.get("id"): p.get("name") for p in items}
+        try:
+            um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+                  for u in casper_tools._get("/users?limit=200").get("items", [])}
+        except Exception:
+            um = {}
+        stalled = sorted(stalled, key=lambda s: s.get("since") or "9999")   # 古い(=長期停滞)順
+        rows = [[s.get("shot") or "—", pmn.get(s.get("project_id"), "—"),
+                 s.get("type") or "—", um.get(s.get("assigned_to"), "未割当"),
+                 s.get("status_label") or s.get("status") or "", f"{s.get('days','')}日"]
+                for s in stalled]
+        if not rows:
+            return {"title": "停滞中のFB/確認", "columns": ["カット", "プロジェクト", "工程", "担当", "状態", "停滞"],
+                    "rows": [], "sortable": True, "numeric_cols": [],
+                    "footer": f"本日{today}時点、3日以上動いていない確認待ちはありません（Calendar確定）。"}
+        return {"title": f"停滞中のFB/確認（{len(rows)}件・3日以上停滞）",
+                "columns": ["カット", "プロジェクト", "工程", "担当", "状態", "停滞"],
+                "rows": rows, "sortable": True, "numeric_cols": [],
+                "footer": "Calendar 確定データ（qc_fb/dir_wt/qc等の確認待ちで3日以上更新なし）。"
+                          "過去のレガシー記録(2022 DBM2/legacy_score)は進捗に含めません。"}
 
     # ⓪ 特定PJのタスク一覧(『マルコメのタスク見せて』等) — 名前解決器で unique に解けた時のみ表を描く
     #    (曖昧/不在は None を返し、呼び側が選択カード/近傍候補で拾う=無言None落ちさせない・Fable)
@@ -6347,6 +6385,25 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
         final, diagram = render_diagram(final)
+        if table_card:                                    # 表カードがある時、本文が重複md表を再現しても機構で剥がす
+            # (qwenが「表を再現するな」指示を無視して全再現する→截ち切れ源。Fable: 服従に頼らず機構で強制)
+            _rows = table_card.get("rows") or []
+            _names = []                                   # 代表名(列0)を重複/空を除いて収集
+            for _r in _rows:
+                _nm = str(_r[0]) if _r and _r[0] else ""
+                if _nm and _nm != "—" and _nm not in _names:
+                    _names.append(_nm)
+            _nod = [ln for ln in final.split("\n") if not re.match(r"\s*\|.*\|", ln)]   # md表行(|…|)を除去
+            _nod_txt = re.sub(r"\n{3,}", "\n\n", "\n".join(_nod)).strip()
+            _mentioned = sum(1 for _nm in _names if _nm in _nod_txt)
+            if _nod_txt and _mentioned >= 3:              # 表を剥がしても本文が代表名に十分触れている→そのまま
+                final = _nod_txt
+            elif _names:                                  # 名前が表行に偏り本文が薄い→機構で代表名を1文添える(全再現でなく網羅を保証)
+                _summ = "、".join(_names[:6])
+                _lead = _nod_txt or f"{table_card['title']}にござる。"
+                final = f"{_lead}\n\n主なものは {_summ} 等。全{len(_rows)}件は下表の通り、並べ替えは列見出しから。".strip()
+            elif _nod_txt:
+                final = _nod_txt
         if not final.strip() and (diagram or table_card or _sched):   # チャート/表/CSVだけで本文が空(qwenのAURORA前置等)→機構で復元
             if _sched:                                        # 工程表CSV: リンク＋案内を機構で(render_diagramに消されても復元)
                 final = (f"{_sched[1]['pj']} の工程表をCSVにしました。\n\n{_sched[0]}\n"
