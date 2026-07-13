@@ -5521,6 +5521,34 @@ class H(BaseHTTPRequestHandler):
                                           token=WRITE_TOKEN, actor=actor)
                 results.append(pr)
                 new_pid = _extract_id(pr)
+                # 【verify-after-write】Calendar書込は応答が~30s超でtimeoutするが実体は作成される事象がある
+                # (殿指摘2026-07-13・tetsuo「起票したのに反映されない」の真因)。応答からidを取れない時は、
+                # 読みは速い get_projects で新規PJ名を照合し"実際に出来たか"を確認して実idを回収する。
+                # これを怠ると executed:true / project_id:null の"偽の成功"になる(Fable掟: 機構の嘘は最悪)。
+                if not new_pid:
+                    import time as _t
+                    for _ in range(6):
+                        _t.sleep(3)
+                        try:
+                            ck = json.loads(casper_mcp.call_tool("get_projects", {"actor_id": aid},
+                                                                 token=WRITE_TOKEN, actor=actor))
+                            hit = [p for p in (ck.get("projects") or ck.get("items") or [])
+                                   if str(p.get("name", "")).strip() == str(pname).strip()
+                                   and str(p.get("display_status", "online")) != "archived"]
+                            if hit:
+                                new_pid = hit[0].get("id"); break
+                        except Exception:
+                            pass
+                if not new_pid:
+                    # 確認が取れない → 正直に"未確認"を報告(偽の成功を出さない)。承認は pending に残し再試行可能に。
+                    pid = _register_pending("project_import", prop, who.get("uid"), summary)
+                    self._json({"ok": False, "executed": False, "unverified": True,
+                                "pending_id": pid, "summary": summary,
+                                "message": "Calendarの応答が遅く、起票の完了確認が取れませんでした。"
+                                           "（Calendar側で数十秒後に反映される場合がございます。）"
+                                           "少し置いてから反映をご確認くだされ。未反映なら本ボタンで再試行を。"})
+                    return
+                # PJ確認済 → shots / tasks(これらも遅延しうるが致命化させず結果に残す)
                 if prop.get("shots") and new_pid and "import_shots" in avail:
                     results.append(casper_mcp.call_tool("import_shots",
                         {"actor_id": aid, "project_id": new_pid,
@@ -5530,7 +5558,7 @@ class H(BaseHTTPRequestHandler):
                     results.append(casper_mcp.call_tool("bulk_create_tasks",
                         {"actor_id": aid, "tasks": [_clean(t) for t in prop["tasks"]]},
                         token=WRITE_TOKEN, actor=actor))
-                self._json({"ok": True, "executed": True, "summary": summary,
+                self._json({"ok": True, "executed": True, "verified": True, "summary": summary,
                             "project_id": new_pid, "results": [str(r)[:500] for r in results]})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
