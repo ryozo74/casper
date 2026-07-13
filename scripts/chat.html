@@ -115,6 +115,18 @@
   .thr.dm .scorelink:hover{color:var(--accent)}
   .think{color:var(--mut);font-size:12.5px;font-style:italic;border-left:2px solid var(--line);
          padding-left:10px;margin:2px 0 6px;white-space:pre-wrap}
+  /* LINE風 DM会話(吹き出し) */
+  .dmhead{font-size:15px;font-weight:700;margin:2px 0 12px;color:#e5e7eb}
+  .dmwrap{display:flex;flex-direction:column;gap:8px;padding:2px 2px 4px}
+  .dmrow{display:flex;justify-content:flex-start}
+  .dmrow.mine{justify-content:flex-end}
+  .dmbub{max-width:78%;padding:8px 12px;border-radius:14px;font-size:14px;line-height:1.55;
+         background:#232a35;color:#e6e9ef;border-bottom-left-radius:4px;word-break:break-word}
+  .dmbub.mine{background:#2b6cb0;color:#fff;border-bottom-left-radius:14px;border-bottom-right-radius:4px}
+  .dmmeta{font-size:11px;color:var(--mut);margin-bottom:3px}
+  .dmbub.mine .dmmeta{color:#cfe3ff}
+  .dmtext a{color:#8fd0ff}
+  .dmbub.mine .dmtext a{color:#e8f2ff}
   footer{border-top:1px solid var(--line);padding:14px 20px;background:rgba(14,20,32,.7);backdrop-filter:blur(8px)}
   .ic{max-width:1600px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
   textarea{flex:1;resize:none;background:var(--panel2);color:var(--txt);border:1px solid var(--line);
@@ -712,21 +724,28 @@ async function openDM(t){
   const b=el('bot'); b.classList.add('cursor');
   let r={messages:[]}; try{ r=await fetch('/api/dm/messages?id='+encodeURIComponent(t.id),{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
   b.classList.remove('cursor');
-  const lines=(r.messages||[])
+  const msgs=(r.messages||[])
     .map(m=>({m, b:String(m.body||m.content||'').trim()}))
     // 無駄行を除去: システム初期化行 / 「@名前」だけのメンション単独行
-    .filter(x=> x.b && x.b!=='Task message thread initialized.' && !/^@\S+$/.test(x.b))
-    .map(({m,b})=>{
-      const nm=esc(m.sender_name||(m.sender_id==null?'システム':String(m.sender_id)));
-      const ts=m.created_at?('（'+esc(String(m.created_at).slice(5,16).replace('T',' '))+'）'):'';
-      // 先頭メンション(@名前 )を除去し、改行を詰めて1メッセージ=1行に
-      const body=esc(b.replace(/^@\S+[\s　]+/,'').replace(/\s*\n\s*/g,' ').trim());
-      return '- **'+nm+'**'+ts+'：'+body;   // リスト描画=行間が詰まって読みやすい
-    }).join('\n');
-  let md='### 💬 '+esc(t.peer||'DM')+' との会話\n'+(lines||'(本文取得不可)');
-  render(b,md);
-  // DM文脈を履歴に仕込む(返信/質問の土台＋代筆の宛先)。次の発言でこのスレッドが保存される。
-  history.push({role:'assistant',content:md+'\n[DM文脈] 相手='+(t.peer||'')+' / uid='+(t.peer_id||'')+' / thread='+t.id+
+    .filter(x=> x.b && x.b!=='Task message thread initialized.' && !/^@\S+$/.test(x.b));
+  // LINE風の吹き出し表示(相手=左/自分=右)。相手=peer_id、それ以外=自分側
+  const dmwrap=document.createElement('div'); dmwrap.className='dmwrap';
+  const linkify=(s)=>esc(s).replace(/(https?:\/\/[^\s　<]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>').replace(/\n/g,'<br>');
+  msgs.forEach(({m,b})=>{
+    const mine=(m.sender_id!=null) && String(m.sender_id)!==String(t.peer_id||'');
+    const row=document.createElement('div'); row.className='dmrow'+(mine?' mine':'');
+    const bub=document.createElement('div'); bub.className='dmbub'+(mine?' mine':'');
+    const nm=esc(m.sender_name||(mine?'自分':(t.peer||'相手')));
+    const ts=m.created_at?esc(String(m.created_at).slice(5,16).replace('T',' ')):'';
+    const body=linkify(b.replace(/^@\S+[\s　]+/,'').trim());
+    bub.innerHTML='<div class="dmmeta">'+nm+(ts?' · '+ts:'')+'</div><div class="dmtext">'+body+'</div>';
+    row.appendChild(bub); dmwrap.appendChild(row);
+  });
+  const hd=document.createElement('div'); hd.className='dmhead'; hd.textContent='💬 '+(t.peer||'DM')+' との会話';
+  b.innerHTML=''; b.appendChild(hd); b.appendChild(msgs.length?dmwrap:document.createTextNode('(メッセージ本文を取得できませんでした)'));
+  // DM文脈を履歴に仕込む(返信/質問の土台＋代筆の宛先・LLM向けはテキスト版)。
+  const mdctx='💬 '+(t.peer||'DM')+' との会話\n'+msgs.map(({m,b})=>((String(m.sender_id)!==String(t.peer_id||'')?'自分':(m.sender_name||t.peer||'相手'))+'：'+b.replace(/^@\S+[\s　]+/,'').replace(/\s*\n\s*/g,' ').trim())).join('\n');
+  history.push({role:'assistant',content:mdctx+'\n[DM文脈] 相手='+(t.peer||'')+' / uid='+(t.peer_id||'')+' / thread='+t.id+
     '。ユーザーが返信を書けば send_message(to_user_id=上記uid)で本人名義代筆。質問なら社内知識で回答。'});
   // 閲覧中はメッセージ欄を無効化→下のボタンで有効化
   inp.disabled=true; send.disabled=true; inp.placeholder='下の「返信」か「質問」を選ぶと入力できます';
@@ -734,7 +753,7 @@ async function openDM(t){
   const mk=(label,bd,fn)=>{ const x=document.createElement('button'); x.textContent=label;
     x.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid '+bd+';background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit'; x.onclick=fn; return x; };
   const enable=(mode,ph)=>{ curDM.mode=mode; inp.disabled=false; send.disabled=false; inp.placeholder=ph; inp.focus(); };
-  bar.appendChild(mk('↗ Scoreで見る','#334155',()=>window.open(SCORE_BASE+'/messages','_blank')));
+  bar.appendChild(mk('↗ 制作アプリ(Score)のメッセージ画面を開く','#334155',()=>window.open(SCORE_BASE+'/messages','_blank')));
   bar.appendChild(mk('✍ 返信','#22c55e',()=>enable('reply',(t.peer||'相手')+' さんへの返信を入力…')));
   bar.appendChild(mk('🧵 スレッド化','#3b82f6',()=>{ enable('question','このDMを起点に Casper と話す（スレッドとして残る）…'); if(typeof saveThread==='function'){ try{ saveThread(); }catch(e){} } }));
   b.appendChild(bar);

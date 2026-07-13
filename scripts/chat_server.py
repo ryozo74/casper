@@ -765,6 +765,61 @@ def _looks_like_action(msg):
     return bool(msg and _ACTION_Q_RE.search(msg))
 
 
+# ── スムースなファイル送付DM(殿頻出2026-07-13): リンク＋任意パスワード＋宛先 のDM依頼を決定的に処理。
+#    qwenのaction_routerが宛先解決失敗/カード未生成 で不揃いだった綻びの根治。
+_URL_RE = re.compile(r"https?://[^\s　」』)）\]】]+")
+_DM_INTENT_RE = re.compile(r"(DM|ディーエム|送っ?と?い?て|送信|送る|送って|連絡|伝え|渡(し|す|して)|共有|届け|投げ|報告|"
+                           r"dropbox|ドロップボックス|リンク|納品|校了|共有)", re.I)
+_PW_RE = re.compile(r"(?:🔑|パス(?:ワード)?|ぱす|pw|password|ＰＷ)\s*(?:は|=|＝|:|：)?\s*"
+                    r"([A-Za-z0-9][A-Za-z0-9!-/:-@\[-`{-~]{2,})", re.I)   # PWは英数字始まり(散文『パスワードで共有』を拾わない)
+# 文脈参照(『このファイル/これ/上記/先ほどの』)。発火は別途『URL無し＋DM意図＋宛先解決＋直前にURL有り』で厳重ゆえ広めで安全。
+_FILE_REF_RE = re.compile(r"(この|その|これ|それ|先(の|ほど)|上記|さっき|例の|上の|あれ|奴|やつ)", re.I)
+
+
+def _file_delivery_dm(user_msg, who, convo=None):
+    """【スムースなファイル送付DM】共有リンク(Dropbox等URL)＋任意パスワード＋宛先 のDM依頼を決定的に処理。
+    現メッセージにURLが無くても『このファイル/リンクをtetsuoにDMして』の文脈参照なら直前の会話からURL+PWを引く。
+    宛先を人物解決器で確実に解決・丁寧な文面を機構生成・URL/PWを保持して send_message 下書きを起こす。"""
+    q = user_msg or ""
+    if not _DM_INTENT_RE.search(q):
+        return None
+    urls = _URL_RE.findall(q)
+    src = q                                               # PW/URLの抽出元(既定=現メッセージ)
+    fname = None
+    if not urls and _FILE_REF_RE.search(q):               # 『このファイルを〜DMして』=直前の共有ブロックから引く
+        for mm in reversed(convo or []):
+            c = str(mm.get("content") or "")
+            if _URL_RE.search(c):
+                urls = _URL_RE.findall(c)
+                src = c + "\n" + q                        # PWは文脈側にある(🔑 M834.. 等)
+                mf = re.search(r"[📦🎬]\s*([^\n（(]+\.\w{1,5})", c)   # 共有ブロックのファイル名
+                if mf:
+                    fname = mf.group(1).strip()
+                break
+    if not urls:
+        return None
+    q_nourl = _URL_RE.sub(" ", q)                         # URL内の文字列を人物誤解決しないようURL除去して宛先解決
+    uid, name = _resolve_person(q_nourl, exclude=None)    # tetsuo/漢字名も確実に解決(qwen非依存)
+    if not uid:
+        return None                                       # 宛先不明→通常経路(聞き返し)
+    m = _PW_RE.search(_URL_RE.sub(" ", src))              # パスワード(URL除去後から・URL断片を拾わない・🔑印も可)
+    pw = m.group(1).strip("：:、。") if m else None
+    mn = re.search(r"[「『]([^」』]{2,120})[」』]", q)     # 「…」で明示された本文があれば採用(URLでない時)
+    if mn and not _URL_RE.search(mn.group(1)):
+        note = mn.group(1).strip()
+    else:
+        note = (f"「{fname}」をお送りします。ご確認ください。" if fname else "データをお送りします。ご確認ください。")
+    urls = list(dict.fromkeys(urls))                      # 重複URL除去
+    lines = [note] + urls + ([f"パスワード: {pw}"] if pw else [])
+    body = "\n".join(lines)
+    args = {"to_user_id": str(uid), "body": body}
+    if who.get("uid"):
+        args["actor_id"] = who["uid"]
+    reply = (f"**{name}** 宛に、下記のDM下書きを作成しました（まだ送っておりませぬ）。↓の承認カードで確認・編集し、"
+             "ボタンを押すと送信されまする。\n\n> " + body.replace("\n", "\n> "))
+    return {"tool": "send_message", "args": args, "reply": reply}
+
+
 def _extract_list_lines(text):
     """テキストから一覧行を verbatim で抜き出す(markdown表の行/[PJ]で始まる/· 区切りの短い行)。
     『上記リストをそのまま』のDMで、LLMに要約させず一覧を忠実に付ける為(殿御下命『基本リストはそのまま・模造排除』)。"""
@@ -5943,15 +5998,16 @@ class H(BaseHTTPRequestHandler):
             routed = None
         # Q1(Fable 選択カード): 曖昧な指示語(それ/あの件…)＋action意図で対象候補が複数→qwenに推測(捏造)
         # させず選択カードで人に決めさせる。routerより優先(推測の芽を潰す)。say型ゆえ副作用起票はしない。
-        choices_obj = None if _snz else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定(狭い_ACTION_Q_REに依存しない)
-        if not choices_obj and not _snz:                 # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
+        _fdm = None if _snz else _file_delivery_dm(ll_user, who, convo=msgs)   # 最優先: 文脈の共有リンク→DM(『これtetsuoに送っといて』の deixis で選択カードに横取りされぬよう choices より先)
+        choices_obj = None if (_snz or _fdm) else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定
+        if not choices_obj and not _snz and not _fdm:    # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
             choices_obj = _pj_task_choices(ll_user)
         if not _snz:
             attn_cards = _attention_action_cards(who, ll_user)       # Q4: 今日の3件の overdue/loop を選択カードで(draftは①で承認カード)
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
         # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
         if not _snz:                                # snooze確定時は routed を維持(上書き禁止)
-            routed = None if choices_obj else (_action_router(ll_user, sysadd, who, convo=msgs, gate=_gate) if _looks_like_action(ll_user) else None)
+            routed = _fdm or (None if choices_obj else (_action_router(ll_user, sysadd, who, convo=msgs, gate=_gate) if _looks_like_action(ll_user) else None))
             if choices_obj:                         # 曖昧→選択カード提示。生成ループはスキップ(routed扱い)
                 routed = {"_choices": True, "reply": choices_obj["prompt"]}
         # 追従: Casperが「下書きを表示しますか?」と申し出た直後の裸の肯定(おねがい/はい)=その申し出への同意→浮上
