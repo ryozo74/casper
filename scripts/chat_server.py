@@ -792,7 +792,8 @@ def _file_delivery_dm(user_msg, who, convo=None):
             if _URL_RE.search(c):
                 urls = _URL_RE.findall(c)
                 src = c + "\n" + q                        # PWは文脈側にある(🔑 M834.. 等)
-                mf = re.search(r"[📦🎬]\s*([^\n（(]+\.\w{1,5})", c)   # 共有ブロックのファイル名
+                mf = re.search(r"([^\s:：（(『」\n/]+\.(?:md|zip|pdf|xlsx?|docx?|pptx?|png|jpe?g|gif|mp4|mov|csv|txt|ai|psd|aep?))\b",
+                               c, re.I)                       # 共有ブロックからファイル名だけ抽出(『Dropbox共有:』等の接頭を含めない)
                 if mf:
                     fname = mf.group(1).strip()
                 break
@@ -1831,28 +1832,25 @@ def _resolve_person(query, exclude=None):
                 hit = re.search(re.escape(nm), query, re.I)
             if hit:
                 return _uid_int(u), nm                        # assigned_to は int ゆえ int に正規化(str "34"のまま返すと照合が全外れ)
-        # 読み仮名(ひらがな/カタカナ)→ローマ字 で roster ASCII名に一致(『てつお』→tetsuo・助詞を許容)。
-        # ひらがな→カタカナに寄せてから既存のカナ→ローマ字翻字→クエリのトークンが roster名で始まり残りが助詞なら一致。
-        q_kata = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in query)
-        q_roman = _translit_kana_runs(q_kata).lower()
-        _PART = ("", "ni", "he", "e", "wo", "o", "no", "ha", "wa", "mo", "to", "ga",
-                 "de", "kara", "made", "san", "sama", "kun", "dono", "sanni", "kunni", "samani")
-        toks = re.findall(r"[a-z0-9]+", q_roman)
-        for u, nm in _ROSTER_MAP.items():
-            if str(u) == str(exclude):
+        # 読み仮名(ひらがな/カタカナ)→ローマ字 で roster ASCII名に一致(『てつお』→tetsuo・『これてつおに』も)。
+        # 宛先は「に/へ/宛/さん/くん」の直前に来る=その直前のかな/漢字連続を切り出し翻字し、roster名が末尾に来れば一致。
+        # (クエリ全体を翻字すると『テツオニDM』→"tetsuonidm"のようにDM等がくっつき助詞判定が壊れる為、宛先位置を先に切る)
+        def _tr(seg):
+            k = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in seg)
+            return _translit_kana_runs(k).lower()
+        segs = [m.group(1) for m in re.finditer(r"([ぁ-ヿ一-龯]{2,12})(に|へ|宛|さん|くん|さま)", query)]
+        segs += re.findall(r"[ぁ-ヿ]{2,10}", query)         # 助詞無し(『てつお送っといて』)も候補に
+        _cand = sorted(((str(u), str(nm or "").lower()) for u, nm in _ROSTER_MAP.items()),
+                       key=lambda x: -len(x[1]))            # 長名優先(短い suffix の誤一致を避ける)
+        for seg in segs:
+            sr = re.sub(r"[^a-z0-9]", "", _tr(seg))         # 翻字漏れの小書きァ等の非ASCIIを除去→純ローマ字に
+            if len(sr) < 3:
                 continue
-            nm = str(nm or "").lower()
-            if len(nm) < 2 or not re.fullmatch(r"[a-z0-9]+", nm):
-                continue
-            for tok in toks:                                  # 名前が助詞の直前に出れば一致。長名(>=3)は融合トークン中の部分一致も許容(『これてつおに』=koretetsuoni)
-                idx = 0
-                while True:
-                    i = tok.find(nm, idx)
-                    if i < 0:
-                        break
-                    if (i == 0 or len(nm) >= 3) and tok[i + len(nm):] in _PART:
-                        return _uid_int(u), _ROSTER_MAP.get(str(u), nm)
-                    idx = i + 1
+            for u, nm in _cand:
+                if u == str(exclude) or len(nm) < 3 or not re.fullmatch(r"[a-z0-9]+", nm):
+                    continue                                # 読み一致は3字以上(ou/yu等の短名は誤爆回避)
+                if sr == nm or sr.endswith(nm):            # 『てつお』=tetsuo / 『をてつお』=wotetsuo(末尾一致)
+                    return _uid_int(u), _ROSTER_MAP.get(u, nm)
     except Exception:
         pass
     for alias, uid in sorted(_person_alias_index().items(), key=lambda x: -len(x[0])):
@@ -6287,14 +6285,19 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
         final, diagram = render_diagram(final)
-        if not final.strip() and (diagram or table_card):     # チャート/表だけ出力し本文が空→表の実データから要約を機構生成(空応答=途中切れ誤検知/無言の回避)
-            if table_card:
+        if not final.strip() and (diagram or table_card or _sched):   # チャート/表/CSVだけで本文が空(qwenのAURORA前置等)→機構で復元
+            if _sched:                                        # 工程表CSV: リンク＋案内を機構で(render_diagramに消されても復元)
+                final = (f"{_sched[1]['pj']} の工程表をCSVにしました。\n\n{_sched[0]}\n"
+                         "（Excelで開け、編集して取り込み直せます／Calendarへ直接反映も承認カードで行えます）")
+            elif table_card:
                 _rw = table_card.get("rows") or []
                 _summ = "、".join(f"{r[0]}（{r[1]}）" for r in _rw[:6] if r and len(r) > 1)
                 final = (f"{table_card['title']}にござる。主だったところは {_summ} 等。"
                          f"全{len(_rw)}件の件数・担当・締切は下表の通り。並べ替えは列見出しから。")
             else:
                 final = "下記の図に整理しました。ご確認くだされ。"
+        if _sched and _sched[0] not in final:                # CSVリンクは render_diagram 後も最終保証(AURORA前置で消えても付す)
+            final = final.rstrip() + f"\n\n{_sched[0]}"
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
         dev_log(who, ll_user, final, {"model": A.model, "backend": "ollama"})

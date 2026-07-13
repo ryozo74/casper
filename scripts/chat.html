@@ -861,7 +861,8 @@ async function dropboxTransferFiles(files){
     render(b,'📦 「'+esc(f.name)+'」を Dropbox へ転送中…（大きいファイルは少々かかり申す）'); log.scrollTop=log.scrollHeight;
     try{ const du=await _readDataURL(f); const r=await dpost('/api/dropbox/transfer',{filename:f.name,data_b64:du});
       b.classList.remove('cursor');
-      if(r.ok){ render(b,'📦 Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。'); _dbxLinkCard(b,r.name,r.link,r.password,'（'+(r.size/1e6).toFixed(1)+'MB）'); }
+      if(r.ok){ render(b,'📦 Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。'); _dbxLinkCard(b,r.name,r.link,r.password,'（'+(r.size/1e6).toFixed(1)+'MB）');
+        history.push({role:'assistant',content:'📦 Dropbox共有: '+r.name+'\n🔗 '+r.link+'\n🔑 '+r.password}); }   // 会話文脈に積む→『このファイルを◯◯にDMして』でサーバがリンクを拾える
       else render(b,'📦 転送に失敗いたした: '+esc(r.error||'不明'));
     }catch(err){ b.classList.remove('cursor'); render(b,'📦 転送エラー: '+esc(err.message||err)); }
     log.scrollTop=log.scrollHeight; return;
@@ -882,6 +883,7 @@ async function dropboxTransferFiles(files){
   if(sh.ok){
     render(b,'📦 **'+okn+'/'+files.length+'件** を1つのフォルダにまとめ申した。下記の**1リンク（パスワード付き）**で全ファイル共有できまする。');
     _dbxLinkCard(b,okn+'件のファイル',sh.link,sh.password,'（まとめリンク）');
+    history.push({role:'assistant',content:'📦 Dropbox共有('+okn+'件): '+up.filter(r=>r.ok).map(r=>r.name).join('、')+'\n🔗 '+sh.link+'\n🔑 '+sh.password});   // 会話文脈に積む→DM時にリンクを拾える
     const li=document.createElement('div'); li.style.cssText='margin-top:6px;font-size:12px;color:#9fb3c8';
     li.innerHTML='含まれるファイル: '+up.map(r=>esc(r.name)+(r.ok?'':' ⚠️')).join(' / ');
     b.appendChild(li);
