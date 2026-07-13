@@ -65,6 +65,28 @@ def _seg_boost(segs, text):
     return sum(min(len(s), 6) * 0.18 for s in segs if s.lower() in t)
 
 
+def candidates(query, n=60):
+    """字面recallの上位n候補チャンク(dict: src/title/t)を返す。意味再ランク(casper_embed)の入力用。
+    search()と同一スコアリングだが整形せず生chunkを返す=意味検索復活の土台(Fable M2)。"""
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = json.load(open(INDEX, encoding="utf-8")) if os.path.exists(INDEX) else []
+    qg = _tri(query)
+    qtok = set(re.findall(r"[A-Za-z0-9]{2,}", query.lower()))
+    segs = _segs(query)
+    scored = []
+    for e in _CACHE:
+        cg = _tri(e["t"])
+        if not cg:
+            continue
+        sc = (len(qg & cg) / (len(qg) + 1) + sum(0.4 for t in qtok if t in e["t"].lower())
+              + _seg_boost(segs, e["t"]))
+        if sc > 0.02:
+            scored.append((sc, e))
+    scored.sort(key=lambda x: -x[0])
+    return [e for _, e in scored[:n]]
+
+
 def search(query, k=8, budget=3800):
     global _CACHE
     if _CACHE is None:

@@ -14,6 +14,8 @@ CLI:
 import json
 import math
 import os
+import struct
+import sqlite3
 import sys
 import urllib.request
 
@@ -21,6 +23,7 @@ import casper_rag
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EMB_INDEX = os.path.join(HERE, "casper_embed_index.json")
+EMB_DB = os.path.join(HERE, "casper_embed.db")     # Fable M2: 411MB JSON→sqlite(候補だけ引く・26s全読込を消す)
 OLLAMA = os.environ.get("CASPER_EMBED_ENDPOINT",
                         os.environ.get("CASPER_OLLAMA", "http://192.168.44.119:11434")).rstrip("/")
 MODEL = os.environ.get("CASPER_EMBED_MODEL", "bge-m3")
@@ -136,7 +139,7 @@ def _load():
 
 
 def available():
-    return bool(_load())
+    return db_available()          # Fable M2: 411MB全読込でなくsqliteの有無で判定(hybridの発火条件)
 
 
 def _cos(a, b):
@@ -146,15 +149,73 @@ def _cos(a, b):
     return s / (na * nb)
 
 
+# ── Fable M2: 意味検索の復活。411MB JSON全読込(26s)+全走査(8s)を、sqlite(候補だけ引く)+字面recallで置換。numpy不要。
+def _key(src, t):
+    return f"{src}\x00{(t or '')[:400]}"
+
+
+def build_sqlite():
+    """casper_embed_index.json(411MB) → sqlite(key,src,title,t,vec=float32 packed BLOB)。一度だけ実行。"""
+    if not os.path.exists(EMB_INDEX):
+        print("no EMB_INDEX", file=sys.stderr); return 0
+    data = json.load(open(EMB_INDEX, encoding="utf-8"))
+    tmp = EMB_DB + ".tmp"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    con = sqlite3.connect(tmp)
+    con.execute("CREATE TABLE emb(key TEXT PRIMARY KEY, src TEXT, title TEXT, t TEXT, vec BLOB)")
+    rows = []
+    for e in data:
+        v = e.get("v")
+        if not v:
+            continue
+        rows.append((_key(e["src"], e["t"]), e["src"], e.get("title", ""), e["t"],
+                     struct.pack("<%df" % len(v), *v)))
+        if len(rows) >= 2000:
+            con.executemany("INSERT OR REPLACE INTO emb VALUES(?,?,?,?,?)", rows); rows = []
+    if rows:
+        con.executemany("INSERT OR REPLACE INTO emb VALUES(?,?,?,?,?)", rows)
+    con.commit(); con.close()
+    os.replace(tmp, EMB_DB)
+    return len(data)
+
+
+_DBCON = None
+
+
+def _db():
+    global _DBCON
+    if _DBCON is None and os.path.exists(EMB_DB):
+        _DBCON = sqlite3.connect(EMB_DB, check_same_thread=False)
+    return _DBCON
+
+
+def db_available():
+    return _db() is not None
+
+
+def _blob_vec(b):
+    return list(struct.unpack("<%df" % (len(b) // 4), b))
+
+
 def search(query, k=8, budget=3800):
-    """意味検索。埋め込み索引が無ければ casper_rag(字面)にフォールバック。"""
-    vec = _load()
-    if not vec:
-        return casper_rag.search(query, k=k, budget=budget)
+    """意味検索(Fable M2復活版): 字面recall→候補の埋め込みだけsqliteから引き→cosine再ランク。
+    sqlite/クエリ埋め込みが無ければ casper_rag(字面)にフォールバック。全走査(26s+8s)は行わない。"""
+    con = _db()
+    if con is None:
+        return casper_rag.search(query, k=k, budget=budget)   # sqlite未生成→字面
     qv = embed_one(query)
     if qv is None:
+        return casper_rag.search(query, k=k, budget=budget)   # bge-m3不在→字面
+    cands = casper_rag.candidates(query, n=60)                 # 字面recall(速い)
+    if not cands:
         return casper_rag.search(query, k=k, budget=budget)
-    scored = sorted(((  _cos(qv, e["v"]), e) for e in vec), key=lambda x: -x[0])
+    scored = []
+    for e in cands:
+        row = con.execute("SELECT vec FROM emb WHERE key=?", (_key(e["src"], e["t"]),)).fetchone()
+        if row:
+            scored.append((_cos(qv, _blob_vec(row[0])), e))
+    scored.sort(key=lambda x: -x[0])
     res, used, seen = [], 0, set()
     for sc, e in scored:
         norm = e["t"][:80]
@@ -168,7 +229,7 @@ def search(query, k=8, budget=3800):
         used += len(line)
         if len(res) >= k:
             break
-    return res
+    return res or casper_rag.search(query, k=k, budget=budget)
 
 
 def hybrid(query, k=8, budget=3800):

@@ -5714,7 +5714,8 @@ class H(BaseHTTPRequestHandler):
                     for m in convo[-7:-1])
             # 応答パスは高速な字面検索(casper_rag)を使う。意味検索(casper_embed 412MB)は load26s/検索8sで
             # 応答をhangさせる為 hot pathから外す(存在確認は台帳が担う)。索引の高速化(binary)は別課題。
-            hits = casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []
+            hits = (casper_embed.hybrid(last_user, k=8) if (casper_embed and last_user)   # M2: 意味検索復活(sqlite再ランク・内部で字面フォールバック)
+                    else (casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []))
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
             fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
             cal = build_digests(who, last_user)       # Fable M1: Ollama経路と同一の単一表から(entity/availability/gear/phase/fb_log/future_assign 欠落の解消)
@@ -5819,7 +5820,7 @@ class H(BaseHTTPRequestHandler):
                        "『Excelで開け、編集して取り込み直せる』旨を1文添えよ。ガントや全タスクの再掲はするな(冗長)。"
                        "Calendarへ直接反映したい場合は、その旨言えば承認カードで書込む と案内してよい。")
         try:
-            hits = (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user)
+            hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)   # M2: 意味検索復活(sqlite再ランク・内部で字面フォールバック)
                     else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
             if hits:
                 sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
