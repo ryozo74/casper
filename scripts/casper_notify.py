@@ -122,32 +122,36 @@ def compute(uid, now=None):
                        "body": body, "dedup_key": f"brief:{today}"})
         ust["brief_date"] = today
 
-    # ② 新規の納期超過(前回見た超過集合に無いもの＝今日新たに超過した)
+    # ② 新規の納期超過 → 個別でなく"1件にまとめて"通知(N件＋一覧・氾濫防止・殿指摘2026-07-13)
     seen_od = set(ust.get("seen_overdue", []))
-    for o in overdue:
-        key = f"overdue:{o['name']}"
-        if o["name"] and o["name"] not in seen_od:
-            notifs.append({"type": "new_overdue", "level": "warn", "title": "🔴 納期超過が発生",
-                           "body": f"{o['name']} が納期({o['due']})を過ぎました（{o['days']}日超過）。",
-                           "dedup_key": key})
+    new_od = [o for o in overdue if o.get("name") and o["name"] not in seen_od]
+    if new_od:
+        lst = "、".join(f"{o['name']}（{o['days']}日超過）" for o in new_od[:8])
+        more = f" ほか{len(new_od)-8}件" if len(new_od) > 8 else ""
+        notifs.append({"type": "new_overdue", "level": "warn",
+                       "title": f"🔴 納期超過 {len(new_od)}件",
+                       "body": f"新たに納期超過となりました：{lst}{more}。",
+                       "dedup_key": "overdue:" + ",".join(sorted(o["name"] for o in new_od))})
     ust["seen_overdue"] = sorted({o["name"] for o in overdue if o["name"]})
 
-    # ③ 停滞FB(3日以上動かない確認待ち)。新規のみ・古い順に上位5件だけ通知(氾濫防止・総数はブリーフが要約)。
+    # ③ 停滞FB(3日+動かない確認待ち) → 同じく"1件にまとめて"通知(N件＋古い順に上位を列挙)
     seen_stall = set(ust.get("seen_stall", []))
     stalled_sorted = sorted(stalled, key=lambda s: s.get("since") or "9999")   # 古い(=長く停滞)順
-    cur_stall = []
-    _stall_fired = 0
+    cur_stall, new_stall = [], []
     for s in stalled_sorted:
         key = f"stall:{s['shot'] or s['name']}:{s['since']}"
         cur_stall.append(key)
-        if key not in seen_stall and _stall_fired < 5:
-            nm = f"{s['shot']} {s['name']}".strip()
-            notifs.append({"type": "stalled_fb", "level": "warn", "title": "⏳ FB/確認が停滞",
-                           "body": f"{nm} が {s['since']} から {s['status']} のまま動いていません。催促しますか？",
-                           "dedup_key": key,
-                           "action": {"tool": "send_message", "hint": "催促DM下書き",
-                                      "assigned_to": s.get("assigned_to"), "subject": nm}})
-            _stall_fired += 1
+        if key not in seen_stall:
+            new_stall.append(s)
+    if new_stall:
+        names = [f"{s['shot']} {s['name']}".strip() for s in new_stall[:8]]
+        more = f" ほか{len(new_stall)-8}件" if len(new_stall) > 8 else ""
+        notifs.append({"type": "stalled_fb", "level": "warn",
+                       "title": f"⏳ FB/確認が停滞 {len(new_stall)}件",
+                       "body": f"確認待ちのまま動いていません：{'、'.join(names)}{more}。まとめて催促しますか？",
+                       "dedup_key": "stall:" + ",".join(sorted(f"{s['shot'] or s['name']}:{s['since']}" for s in new_stall)),
+                       "action": {"tool": "send_message", "hint": "催促DM下書き(まとめ)",
+                                  "subjects": [f"{s['shot']} {s['name']}".strip() for s in new_stall]}})
     ust["seen_stall"] = cur_stall
 
     st[ukey] = ust

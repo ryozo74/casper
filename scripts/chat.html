@@ -1055,7 +1055,11 @@ async function doSubmit(ccArea, c, file, note, intent, recognized){
 }
 function sendRouter(){
   const text=inp.value.trim();
-  if(uploaderOn && pendingFile){ const f=pendingFile, h=text; inp.value=''; inp.style.height='auto'; clearFile(); uploaderFlow(f,h); return; }
+  // 送信/DMの意図(『◯◯にDMして/送っといて/共有して』)は、添付フロー(用途選択=知識化)に吸わせずチャットへ流す。
+  // →『このファイルを◯◯にDMして』が _file_delivery_dm で承認カード化され、DMが完遂される(殿指摘2026-07-13)。
+  const dmIntent=/(DM|ディーエム|送っ|送信|送って|送る|共有し|渡し|届け|投げて)/i.test(text) && text.length>=4;
+  if(uploaderOn && pendingFile && !dmIntent){ const f=pendingFile, h=text; inp.value=''; inp.style.height='auto'; clearFile(); uploaderFlow(f,h); return; }
+  if(dmIntent && pendingFile){ clearFile(); }   // DM意図なら添付は用済み(Dropboxリンクは既に会話文脈に在る)
   ask();
 }
 send.onclick=sendRouter;

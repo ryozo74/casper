@@ -1825,6 +1825,28 @@ def _resolve_person(query, exclude=None):
                 hit = re.search(re.escape(nm), query, re.I)
             if hit:
                 return _uid_int(u), nm                        # assigned_to は int ゆえ int に正規化(str "34"のまま返すと照合が全外れ)
+        # 読み仮名(ひらがな/カタカナ)→ローマ字 で roster ASCII名に一致(『てつお』→tetsuo・助詞を許容)。
+        # ひらがな→カタカナに寄せてから既存のカナ→ローマ字翻字→クエリのトークンが roster名で始まり残りが助詞なら一致。
+        q_kata = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in query)
+        q_roman = _translit_kana_runs(q_kata).lower()
+        _PART = ("", "ni", "he", "e", "wo", "o", "no", "ha", "wa", "mo", "to", "ga",
+                 "de", "kara", "made", "san", "sama", "kun", "dono", "sanni", "kunni", "samani")
+        toks = re.findall(r"[a-z0-9]+", q_roman)
+        for u, nm in _ROSTER_MAP.items():
+            if str(u) == str(exclude):
+                continue
+            nm = str(nm or "").lower()
+            if len(nm) < 2 or not re.fullmatch(r"[a-z0-9]+", nm):
+                continue
+            for tok in toks:                                  # 名前が助詞の直前に出れば一致。長名(>=3)は融合トークン中の部分一致も許容(『これてつおに』=koretetsuoni)
+                idx = 0
+                while True:
+                    i = tok.find(nm, idx)
+                    if i < 0:
+                        break
+                    if (i == 0 or len(nm) >= 3) and tok[i + len(nm):] in _PART:
+                        return _uid_int(u), _ROSTER_MAP.get(str(u), nm)
+                    idx = i + 1
     except Exception:
         pass
     for alias, uid in sorted(_person_alias_index().items(), key=lambda x: -len(x[0])):
