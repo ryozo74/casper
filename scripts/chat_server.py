@@ -4358,7 +4358,10 @@ def seiri_projects(who):
                     if ds == "archived":
                         continue
                     slug = re.sub(r"[^\w\-]", "_", (p.get("name") or "project"))[:40] or "project"
-                    if slug in done:                  # 蒸留完了済はリストから外す(殿指示)
+                    # 蒸留完了済で外すのは"完了(offline)"のPJのみ。online(進行中)は結晶化済でも案件が生き続け
+                    # 新たな知識が積まれるゆえ整理対象に残す(殿指摘2026-07-13: LED Analyze 自律開発=online進行中
+                    # なのに今日の結晶化で消えていた)。onlineは常に候補、offlineは儀式了なら外す。
+                    if ds != "online" and slug in done:
                         continue
                     out.append({"id": p.get("id"), "name": p.get("name"),
                                 "description": (p.get("description") or "")[:120],
