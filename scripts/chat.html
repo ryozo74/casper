@@ -116,7 +116,8 @@
   .think{color:var(--mut);font-size:12.5px;font-style:italic;border-left:2px solid var(--line);
          padding-left:10px;margin:2px 0 6px;white-space:pre-wrap}
   /* LINE風 DM会話(吹き出し) */
-  .dmhead{font-size:15px;font-weight:700;margin:2px 0 12px;color:#e5e7eb}
+  .dmview{width:100%;max-width:820px;margin:6px auto 0;padding:0 2px}   /* Casperの吹き出しでなく全幅で会話を表示 */
+  .dmhead{font-size:16px;font-weight:700;margin:2px 0 12px;color:#e5e7eb}
   .dmwrap{display:flex;flex-direction:column;gap:8px;padding:2px 2px 4px}
   .dmrow{display:flex;justify-content:flex-start}
   .dmrow.mine{justify-content:flex-end}
@@ -719,11 +720,12 @@ function openDMById(el){   // ブリーフィングのDMリンク→そのDMをC
 async function openDM(t){
   closeSidebar();
   wrap.innerHTML=''; history.length=0;        // 追記でなく新規表示(画面をクリアしてDMを表示)
+  document.getElementById('notifBanner')?.remove();   // 通知(停滞/朝ブリーフ)はインデックス専用→DM表示では出さない(殿指摘: くどい)
   curThread='t'+Date.now(); localStorage.setItem('casper_thread',curThread);  // 返信/質問で新スレッドとして保存
   curDM={peer:t.peer||'',peer_id:t.peer_id||'',thread:t.id};                   // 代筆の宛先文脈
-  const b=el('bot'); b.classList.add('cursor');
+  const b=el('bot'); b.classList.add('cursor');   // ローディング用(取得後に撤去し、会話は全幅で出す)
   let r={messages:[]}; try{ r=await fetch('/api/dm/messages?id='+encodeURIComponent(t.id),{credentials:'same-origin'}).then(x=>x.json()); }catch(e){}
-  b.classList.remove('cursor');
+  b.remove();                                     // Casperの吹き出しは撤去→会話は小さな箱でなく全幅パネルで
   const msgs=(r.messages||[])
     .map(m=>({m, b:String(m.body||m.content||'').trim()}))
     // 無駄行を除去: システム初期化行 / 「@名前」だけのメンション単独行
@@ -742,7 +744,9 @@ async function openDM(t){
     row.appendChild(bub); dmwrap.appendChild(row);
   });
   const hd=document.createElement('div'); hd.className='dmhead'; hd.textContent='💬 '+(t.peer||'DM')+' との会話';
-  b.innerHTML=''; b.appendChild(hd); b.appendChild(msgs.length?dmwrap:document.createTextNode('(メッセージ本文を取得できませんでした)'));
+  const view=document.createElement('div'); view.className='dmview';   // Casperコメントの箱でなく全幅パネル
+  view.appendChild(hd); view.appendChild(msgs.length?dmwrap:document.createTextNode('(メッセージ本文を取得できませんでした)'));
+  wrap.appendChild(view);
   // DM文脈を履歴に仕込む(返信/質問の土台＋代筆の宛先・LLM向けはテキスト版)。
   const mdctx='💬 '+(t.peer||'DM')+' との会話\n'+msgs.map(({m,b})=>((String(m.sender_id)!==String(t.peer_id||'')?'自分':(m.sender_name||t.peer||'相手'))+'：'+b.replace(/^@\S+[\s　]+/,'').replace(/\s*\n\s*/g,' ').trim())).join('\n');
   history.push({role:'assistant',content:mdctx+'\n[DM文脈] 相手='+(t.peer||'')+' / uid='+(t.peer_id||'')+' / thread='+t.id+
@@ -756,7 +760,7 @@ async function openDM(t){
   bar.appendChild(mk('↗ 制作アプリ(Score)のメッセージ画面を開く','#334155',()=>window.open(SCORE_BASE+'/messages','_blank')));
   bar.appendChild(mk('✍ 返信','#22c55e',()=>enable('reply',(t.peer||'相手')+' さんへの返信を入力…')));
   bar.appendChild(mk('🧵 スレッド化','#3b82f6',()=>{ enable('question','このDMを起点に Casper と話す（スレッドとして残る）…'); if(typeof saveThread==='function'){ try{ saveThread(); }catch(e){} } }));
-  b.appendChild(bar);
+  view.appendChild(bar);
   log.scrollTop=log.scrollHeight;
 }
 async function loadThread(id){
