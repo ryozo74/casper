@@ -205,7 +205,13 @@ _PJ_NOT_OVERDUE = {"deliver", "omit", "completed", "done", "complete",
                    "cancelled", "canceled", "approved"}
 
 
-def _overdue_days(due, status, today=None):
+def _not_overdue_set(scope):
+    """遅延判定の除外status集合。scope='task'は新19値の掟どおり{deliver,omit}のみ、'pj'は完了系も除外。
+    件数と表の二重基準ドリフト(approved超過タスクが件数=遅延/表=完了済 と食い違う)を防ぐ単一ソース(Fable指摘)。"""
+    return _TASK_NOT_OVERDUE if scope == "task" else _PJ_NOT_OVERDUE
+
+
+def _overdue_days(due, status, today=None, scope="pj"):
     """【納期超過=派生事実の唯一の判定機構(Fable: 集合/派生の判断は機構・LLMは修辞)】
     返り: 超過日数(int>0) / 0(超過でない) / None(日付不正)。
     完了/対象外statusは due<today でも超過に非ず(isOverdue派生)。qwenに due<today の計算をさせない為の単一ソース。"""
@@ -215,16 +221,16 @@ def _overdue_days(due, status, today=None):
     except Exception:
         return None
     today = today or _dt.date.today()
-    if str(status or "").lower() in _PJ_NOT_OVERDUE:
+    if str(status or "").lower() in _not_overdue_set(scope):
         return 0
     return (today - d).days if d < today else 0
 
 
-def _due_note_c(due, status, today=None):
+def _due_note_c(due, status, today=None, scope="pj"):
     """派生の『納期状況』を機構が確定して文字列化(qwen/表に日付計算を委ねない)。
     超過→🔴N日超過 / 本日締切→⚠️ / 過去だが完了→"完了済(納期超過ではない)"(誤計算封じ) / それ以外→""。"""
     import datetime as _dt
-    od = _overdue_days(due, status, today)
+    od = _overdue_days(due, status, today, scope)
     if od is None:
         return ""
     if od > 0:
@@ -234,7 +240,7 @@ def _due_note_c(due, status, today=None):
     except Exception:
         return ""
     today = today or _dt.date.today()
-    done = str(status or "").lower() in _PJ_NOT_OVERDUE
+    done = str(status or "").lower() in _not_overdue_set(scope)
     if d == today and not done:
         return "⚠️本日締切"
     if d < today and done:                       # 過去納期だが完了 → 明示し qwen の「N日超過」誤断を封じる
@@ -2126,7 +2132,7 @@ def entity_digest(query):
         ed = str(p.get("end_date") or "")[:10]
         # 納期状況は"派生事実"→機構が確定して渡す(qwenに end_date と本日の引き算をさせない)。
         # 完了PJの過去納期を「N日超過」と誤計算する事故(殿指摘2026-07-13・コンバトラーV)を根絶。
-        _dn = _due_note_c(ed, p.get("status")) or "予定内(納期超過ではない)"
+        _dn = _due_note_c(ed, p.get("status")) or ("納期未設定" if not ed else "予定内(納期超過ではない)")
         return ("\n\n## 【このPJの正体(これが全て・名前から社名/読みを推測するな)】\n"
                 f"- 正規名: {names[0]}\n"
                 f"- 状態: {p.get('status')}／期間: {sd or '—'}〜{ed or '—'}\n"
@@ -2729,18 +2735,23 @@ def _table_card(query, who):
     _name_hit = bool(_match_online_pj(q))                # 表記ゆれ耐性の名前解決器へ統一(生substring照合を残さない)
     today = datetime.date.today()
 
-    def _due_note(due, status=""):
+    def _due_note(due, status="", scope="pj"):
         # 納期状況は status を見て機構が確定(完了PJの過去納期を超過表示しない・単一ソース _due_note_c)。
-        return _due_note_c(due, status, today)
+        return _due_note_c(due, status, today, scope)
 
     # ⓪-a 停滞FB/確認の一覧(通知の『停滞FB N件』の実体) — 進捗の真実源=Calendar からのみ描く。
     #    vault/legacy_score(過去DBM2 2022)を拾わせない(殿指摘2026-07-13: 進捗はCalendarが全て/vaultに進捗は無い設計)。
     if _STALL_LIST_RE.search(q):
         try:
             import casper_notify
-            stalled = casper_notify._stalled_fb(casper_notify._all_tasks(), today.isoformat())
+            _tasks = casper_notify._all_tasks()
         except Exception:
-            stalled = []
+            _tasks = []
+        if not _tasks:
+            # Calendar取得失敗(API落ち/token失効等) → 「停滞ゼロ」と【確定】を名乗って断言しない(Fable掟3=機構の嘘の禁)。
+            # 取得失敗とゼロを同じ出口に流さず、通常経路へ落として正直に扱わせる。
+            return None
+        stalled = casper_notify._stalled_fb(_tasks, today.isoformat())
         pmn = {p.get("id"): p.get("name") for p in items}
         try:
             um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
@@ -2787,7 +2798,7 @@ def _table_card(query, who):
                     due = str(t.get("due_date") or "")[:10]
                     rows.append([t.get("name") or t.get("title") or "?", t.get("type") or "",
                                  um.get(t.get("assigned_to"), "未割当"),
-                                 t.get("status_label") or t.get("status") or "", due, _due_note(due, t.get("status"))])
+                                 t.get("status_label") or t.get("status") or "", due, _due_note(due, t.get("status"), "task")])
                 _hidden = (len(tks) - len(act)) if act else 0    # footerの嘘を断つ: 全件表示時は非表示0
                 _foot = "Calendar 確定データ。列見出しクリックで並べ替え。"
                 if _hidden:
@@ -2826,7 +2837,7 @@ def _table_card(query, who):
             due = due_m.get(pid, "")
             rows.append([pm.get(pid, pid or "?"), len(ts), ", ".join(who_names[:6]), due, _due_note(due, st_m.get(pid))])
         return {"title": f"進行中タスク（全社 計{len(tasks)}件）", "columns": ["プロジェクト", "件数", "担当", "締切", "状況"],
-                "rows": rows, "sortable": True, "numeric_cols": [1],
+                "rows": rows, "sortable": True, "numeric_cols": [1], "name_col": 0,
                 "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
 
     # ② 進行中PJ一覧(状態/締切) — リスト意図の時のみ(個別PJ名照会は除外)
@@ -2836,7 +2847,7 @@ def _table_card(query, who):
             due = str(p.get("end_date") or "")[:10]
             rows.append([p.get("name"), p.get("status") or "", due, _due_note(due, p.get("status"))])
         return {"title": f"進行中プロジェクト（{len(online)}件）", "columns": ["プロジェクト", "状態", "締切", "状況"],
-                "rows": rows, "sortable": True, "numeric_cols": [],
+                "rows": rows, "sortable": True, "numeric_cols": [], "name_col": 0,
                 "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
 
     # ③ 空き人材(人軸の負荷表) — 「空いている人は?」等。集合差は availability_digest と同源(機構確定・Fable処方1)
@@ -5571,7 +5582,9 @@ class H(BaseHTTPRequestHandler):
                         pass
                     return None
 
-                # 重複ガード: 同名PJ(非archived)が既存なら起票せず警告(Calendar側に冪等keyが無く二重起票が起きるため)
+                # 重複ガード + 再開(resume): 同名PJ(非archived)が既存の時、それが「中身空(verify-after-write で
+                # PJ だけ出来て shots/tasks 未投入)」なら二重起票でなく"続きから"投入する(Fable指摘: unverified後の
+                # 再試行が重複ガードで恒久デッドエンド化=PJだけ空・中身永遠に入らぬ、を防ぐ)。中身が既に在れば真の重複で中止。
                 try:
                     ex = json.loads(casper_mcp.call_tool("get_projects", {"actor_id": aid},
                                                          token=WRITE_TOKEN, actor=actor))
@@ -5579,59 +5592,103 @@ class H(BaseHTTPRequestHandler):
                             if str(p.get("name", "")).strip() == str(pname).strip()
                             and str(p.get("display_status", "online")) != "archived"]
                 except Exception:
-                    dups = []
-                if dups:
-                    self._json({"ok": False, "executed": False, "duplicate": True,
-                                "existing": [{"id": p.get("id"), "name": p.get("name")} for p in dups],
-                                "message": f"同名PJ「{pname}」が既に存在いたす(id {', '.join(str(p.get('id')) for p in dups)})。"
-                                           "二重起票を避けるため中止。別名にするか、既存PJへの追加起票を御指示くだされ。"})
+                    # get_projects 失敗 → 既存有無が判定不能。二重起票の危険を避け、起票を止めて正直に報告(黙って素通りしない)。
+                    self._json({"ok": False, "executed": False,
+                                "message": "Calendarへの照会に失敗し、既存PJの有無を確認できませんでした。"
+                                           "二重起票を避けるため起票を見送ります。少し置いて再試行してくだされ。"})
                     return
 
+                resume_pid = None
+                if dups:
+                    existing_pid = dups[0].get("id")
+                    try:
+                        _extk = [t for t in _all_tasks() if t.get("project_id") == existing_pid]
+                    except Exception:
+                        _extk = None                          # 判定不能
+                    if _extk is not None and not _extk and (prop.get("shots") or prop.get("tasks")):
+                        resume_pid = existing_pid             # 中身空のPJ=verify-after-writeの続き→createを飛ばし投入
+                    else:
+                        self._json({"ok": False, "executed": False, "duplicate": True,
+                                    "existing": [{"id": p.get("id"), "name": p.get("name")} for p in dups],
+                                    "message": f"同名PJ「{pname}」が既に存在し、タスクも入っております"
+                                               f"(id {', '.join(str(p.get('id')) for p in dups)})。"
+                                               "二重起票を避けるため中止。別名にするか、既存PJへの追加起票を御指示くだされ。"})
+                        return
+
                 results = []
-                pr = casper_mcp.call_tool("create_project",
-                                          _clean({"actor_id": aid, **(prop.get("project") or {})}),
-                                          token=WRITE_TOKEN, actor=actor)
-                results.append(pr)
-                new_pid = _extract_id(pr)
-                # 【verify-after-write】Calendar書込は応答が~30s超でtimeoutするが実体は作成される事象がある
-                # (殿指摘2026-07-13・tetsuo「起票したのに反映されない」の真因)。応答からidを取れない時は、
-                # 読みは速い get_projects で新規PJ名を照合し"実際に出来たか"を確認して実idを回収する。
-                # これを怠ると executed:true / project_id:null の"偽の成功"になる(Fable掟: 機構の嘘は最悪)。
-                if not new_pid:
-                    import time as _t
-                    for _ in range(6):
-                        _t.sleep(3)
-                        try:
-                            ck = json.loads(casper_mcp.call_tool("get_projects", {"actor_id": aid},
-                                                                 token=WRITE_TOKEN, actor=actor))
-                            hit = [p for p in (ck.get("projects") or ck.get("items") or [])
-                                   if str(p.get("name", "")).strip() == str(pname).strip()
-                                   and str(p.get("display_status", "online")) != "archived"]
-                            if hit:
-                                new_pid = hit[0].get("id"); break
-                        except Exception:
-                            pass
-                if not new_pid:
-                    # 確認が取れない → 正直に"未確認"を報告(偽の成功を出さない)。承認は pending に残し再試行可能に。
-                    pid = _register_pending("project_import", prop, who.get("uid"), summary)
-                    self._json({"ok": False, "executed": False, "unverified": True,
-                                "pending_id": pid, "summary": summary,
-                                "message": "Calendarの応答が遅く、起票の完了確認が取れませんでした。"
-                                           "（Calendar側で数十秒後に反映される場合がございます。）"
-                                           "少し置いてから反映をご確認くだされ。未反映なら本ボタンで再試行を。"})
-                    return
-                # PJ確認済 → shots / tasks(これらも遅延しうるが致命化させず結果に残す)
+                if resume_pid:
+                    new_pid = resume_pid                      # 作成済の空PJ → create を飛ばして冪等に再開
+                    results.append(f"(既存の空PJ id{resume_pid} に続きから投入=resume)")
+                else:
+                    pr = casper_mcp.call_tool("create_project",
+                                              _clean({"actor_id": aid, **(prop.get("project") or {})}),
+                                              token=WRITE_TOKEN, actor=actor)
+                    results.append(pr)
+                    new_pid = _extract_id(pr)
+                    # 【verify-after-write】Calendar書込は応答が~30s超でtimeoutするが実体は作成される事象がある
+                    # (殿指摘2026-07-13・tetsuo「起票したのに反映されない」の真因)。応答からidを取れない時は、
+                    # 読みは速い get_projects で新規PJ名を照合し"実際に出来たか"を確認して実idを回収する。
+                    # これを怠ると executed:true / project_id:null の"偽の成功"になる(Fable掟: 機構の嘘は最悪)。
+                    if not new_pid:
+                        import time as _t
+                        for _ in range(6):
+                            _t.sleep(3)
+                            try:
+                                ck = json.loads(casper_mcp.call_tool("get_projects", {"actor_id": aid},
+                                                                     token=WRITE_TOKEN, actor=actor))
+                                hit = [p for p in (ck.get("projects") or ck.get("items") or [])
+                                       if str(p.get("name", "")).strip() == str(pname).strip()
+                                       and str(p.get("display_status", "online")) != "archived"]
+                                if hit:
+                                    new_pid = hit[0].get("id"); break
+                            except Exception:
+                                pass
+                    if not new_pid:
+                        # 確認が取れない → 正直に"未確認"を報告(偽の成功を出さない)。承認は pending に残し再試行可能に。
+                        pid = _register_pending("project_import", prop, who.get("uid"), summary)
+                        self._json({"ok": False, "executed": False, "unverified": True,
+                                    "pending_id": pid, "summary": summary,
+                                    "message": "Calendarの応答が遅く、起票の完了確認が取れませんでした。"
+                                               "（Calendar側で数十秒後に反映される場合がございます。）"
+                                               "少し置いてから反映をご確認くだされ。未反映なら本ボタンで再試行を。"})
+                        return
+                # PJ確認済 → shots / tasks(これらも遅延しうるが致命化させず結果に残す)。
+                # tasks には project_id を明示付与(import_shots同様の紐付け・付けねば孤児化/不着の因)。
                 if prop.get("shots") and new_pid and "import_shots" in avail:
                     results.append(casper_mcp.call_tool("import_shots",
                         {"actor_id": aid, "project_id": new_pid,
                          "shots": [_clean(s) for s in prop["shots"]]},
                         token=WRITE_TOKEN, actor=actor))
+                _exp_tasks = len(prop.get("tasks") or [])
                 if prop.get("tasks") and "bulk_create_tasks" in avail:
                     results.append(casper_mcp.call_tool("bulk_create_tasks",
-                        {"actor_id": aid, "tasks": [_clean(t) for t in prop["tasks"]]},
+                        {"actor_id": aid, "tasks": [{**_clean(t), "project_id": new_pid} for t in prop["tasks"]]},
                         token=WRITE_TOKEN, actor=actor))
+                # 【tasks も verify-after-write】bulk_create_tasks は timeout/スキーマ差で"黙って0件"になり得る。
+                # PJ側だけ verified:true と名乗ると tasks の偽成功になる(Fable鉄則二)→実着地数を数えて正直に報告。
+                _landed = None
+                if _exp_tasks:
+                    import time as _t2
+                    for _ in range(6):
+                        _t2.sleep(3)
+                        try:
+                            _landed = len([t for t in _all_tasks() if t.get("project_id") == new_pid])
+                        except Exception:
+                            _landed = None
+                        if _landed:
+                            break
+                if _exp_tasks and not _landed:
+                    # PJは出来たが tasks が着地していない → verified:true と偽らず、部分成功として正直に報告。
+                    self._json({"ok": True, "executed": True, "verified": False, "tasks_landed": 0,
+                                "tasks_expected": _exp_tasks, "project_id": new_pid, "summary": summary,
+                                "message": f"プロジェクト「{pname}」は作成できましたが、タスク {_exp_tasks}件の"
+                                           "登録がCalendar側で確認できませんでした（応答遅延またはタスク登録の不整合）。"
+                                           "少し置いて反映をご確認くだされ。未反映なら本ボタンで再試行を（重複せず続きから投入します）。",
+                                "results": [str(r)[:300] for r in results]})
+                    return
                 self._json({"ok": True, "executed": True, "verified": True, "summary": summary,
-                            "project_id": new_pid, "results": [str(r)[:500] for r in results]})
+                            "project_id": new_pid, "tasks_landed": _landed, "tasks_expected": _exp_tasks,
+                            "results": [str(r)[:500] for r in results]})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
@@ -6388,21 +6445,26 @@ class H(BaseHTTPRequestHandler):
         if table_card:                                    # 表カードがある時、本文が重複md表を再現しても機構で剥がす
             # (qwenが「表を再現するな」指示を無視して全再現する→截ち切れ源。Fable: 服従に頼らず機構で強制)
             _rows = table_card.get("rows") or []
-            _names = []                                   # 代表名(列0)を重複/空を除いて収集
-            for _r in _rows:
-                _nm = str(_r[0]) if _r and _r[0] else ""
-                if _nm and _nm != "—" and _nm not in _names:
-                    _names.append(_nm)
             _nod = [ln for ln in final.split("\n") if not re.match(r"\s*\|.*\|", ln)]   # md表行(|…|)を除去
             _nod_txt = re.sub(r"\n{3,}", "\n\n", "\n".join(_nod)).strip()
-            _mentioned = sum(1 for _nm in _names if _nm in _nod_txt)
-            if _nod_txt and _mentioned >= 3:              # 表を剥がしても本文が代表名に十分触れている→そのまま
-                final = _nod_txt
-            elif _names:                                  # 名前が表行に偏り本文が薄い→機構で代表名を1文添える(全再現でなく網羅を保証)
-                _summ = "、".join(_names[:6])
-                _lead = _nod_txt or f"{table_card['title']}にござる。"
-                final = f"{_lead}\n\n主なものは {_summ} 等。全{len(_rows)}件は下表の通り、並べ替えは列見出しから。".strip()
-            elif _nod_txt:
+            # 代表名の網羅保証は"名前の列"を持つカードのみ(name_col)。列0がPJ名でないカード(停滞FB=カット番号)で
+            # 「主なものは c012、—」と珍妙になるのを防ぐ(Fable指摘: カードを作った機構がname_colを申告)。
+            _ncol = table_card.get("name_col")
+            _names = []
+            if _ncol is not None:
+                for _r in _rows:
+                    _nm = str(_r[_ncol]) if _r and len(_r) > _ncol and _r[_ncol] else ""
+                    if _nm and _nm != "—" and _nm not in _names:
+                        _names.append(_nm)
+            if _names:
+                _mentioned = sum(1 for _nm in _names if _nm in _nod_txt)
+                if _nod_txt and _mentioned >= min(3, len(_names)):   # 本文が代表名に十分触れている→そのまま
+                    final = _nod_txt
+                else:                                     # 名前が表行に偏り本文が薄い→代表名を1文添え網羅保証(全再現は避ける)
+                    _summ = "、".join(_names[:6])
+                    _lead = _nod_txt or f"{table_card['title']}にござる。"
+                    final = f"{_lead}\n\n主なものは {_summ} 等。全{len(_rows)}件は下表の通り、並べ替えは列見出しから。".strip()
+            elif _nod_txt:                                # name_col無しカード(停滞FB/タスク表)は剥がすのみ
                 final = _nod_txt
         if not final.strip() and (diagram or table_card or _sched):   # チャート/表/CSVだけで本文が空(qwenのAURORA前置等)→機構で復元
             if _sched:                                        # 工程表CSV: リンク＋案内を機構で(render_diagramに消されても復元)
