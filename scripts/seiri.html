@@ -225,13 +225,15 @@ function doInterview(ans){
     free($('b4'));renderIV(d);
   }).catch(e=>{free($('b4'));$('ivout').textContent='失敗: '+e;});
 }
+let IV_ANS='';   // 逆インタビュー回答の累積(過去の回答を落とさず全て知識へ反映=同じ質問の繰り返しを断つ)
 function answerInterview(){
   const a=$('ivans').value.trim(); if(!a)return alert('回答を入れてくだされ');
-  // 回答を知識へ足し、再結晶化してから再判定(有用な状態に近づける)
+  IV_ANS+=(IV_ANS?'\n':'')+a;   // 今回の回答を累積へ足す(最新1件だけで上書きしない)
+  // 累積回答を知識へ足し、再結晶化してから再判定(有用な状態に近づける)
   busy($('b5'),'反映中…');
   fetch('/api/seiri/crystallize',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({project:SEL.name,materials:$('materials').value,qa:$('askans').value+'\n\n[追加回答]\n'+a})}).then(r=>r.json()).then(d=>{
-    KNOW=d.knowledge||KNOW;$('learnout').innerHTML='<div class="out">'+esc(KNOW)+'</div>';$('ivans').value='';free($('b5'));doInterview(a);
+    body:JSON.stringify({project:SEL.name,materials:$('materials').value,qa:$('askans').value+'\n\n[逆インタビュー回答]\n'+IV_ANS})}).then(r=>r.json()).then(d=>{
+    KNOW=d.knowledge||KNOW;$('learnout').innerHTML='<div class="out">'+esc(KNOW)+'</div>';$('ivans').value='';free($('b5'));doInterview(IV_ANS);
   }).catch(e=>{free($('b5'));$('ivout').textContent='失敗: '+e;});
 }
 function renderIV(d){

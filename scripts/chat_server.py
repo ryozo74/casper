@@ -4549,13 +4549,14 @@ def seiri_interview(who, project_name, knowledge, answers):
             v = json.loads(m.group(0)); rubric = v.get("rubric") or {}; evidence = v.get("evidence") or {}
     except Exception:
         pass
-    # evidence検証(Fable指摘): trueの各項は引用が結晶化知識中に実在せねば false へ降格(引用の捏造を弾く)
-    _kn = re.sub(r"\s+", "", knowledge or "")
-    for _k in list(rubric.keys()):
-        if rubric.get(_k):
-            _ev = re.sub(r"\s+", "", str(evidence.get(_k, "")))[:30]
-            if not _ev or (len(_ev) >= 6 and _ev not in _kn):
-                rubric[_k] = False                         # 引用なし/知識に不在=自己申告捏造→false
+    # rubric を"証拠駆動"の単一機構に一本化(Fable鉄則四: 判断は機構・弱モデルの自己申告true/falseに委ねない)。
+    # 各項は、LLMが挙げた evidence 引用が"手元の材料"(knowledge＋直近回答)に実在し実質的(6字以上)なら true、
+    # でなければ false。照合に answers を含めるのが要諦——含めねば、回答で穴を埋めても引用が knowledge に無く
+    # false のまま→missing不変→同じ質問を無限再生成する(殿指摘2026-07-13)。捏造引用は不在ゆえ弾かれ false-positiveも防ぐ。
+    _kn = re.sub(r"\s+", "", (knowledge or "") + "\n" + (answers or ""))
+    for _k in ("段取り", "落とし穴", "見積", "判断根拠", "外部やりとり"):
+        _ev = re.sub(r"\s+", "", str(evidence.get(_k, "")))
+        rubric[_k] = bool(len(_ev) >= 6 and _ev[:40] in _kn)
     # ready をコードで決定的判定(LLMの自己申告readyを信じない): 必須コア＋残り3中2
     core = bool(rubric.get("判断根拠")) and bool(rubric.get("落とし穴"))
     rest = sum(1 for k in ("段取り", "見積", "外部やりとり") if rubric.get(k))
@@ -4566,9 +4567,23 @@ def seiri_interview(who, project_name, knowledge, answers):
     questions = ""
     if not ready:
         sys_q = ("あなたは Casper。下記『不足項目』を埋める逆インタビュー質問を最大3個、簡潔に挙げよ。"
-                 "各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
+                 "**『これまでの回答』で既に答えられた点は問い直すな**。同じ質問の繰り返しを避け、まだ埋まらぬ穴を"
+                 "別の角度から具体的に突け。各質問1行・前置き不要・語尾は軽く『〜にござる』等。")
         questions = strip_think(llm_text(sys_q,
-                    f"PJ: {project_name}\n不足: {missing or '全般の精度向上'}\n\n現在の知識:\n{knowledge[:1500]}", num_predict=300)).strip()
+                    f"PJ: {project_name}\n不足: {missing or '全般の精度向上'}\n\n"
+                    f"これまでの回答:\n{(answers or '(なし)')[:800]}\n\n現在の知識:\n{knowledge[:1500]}", num_predict=300)).strip()
+    # 逆インタビューのログ(殿御下命2026-07-13: 同じ質問を繰り返す原因を追えるように残す)。
+    # rubric/missing/questions と、回答が採点に効いたかを1行ずつ seiri_interview.jsonl に記録。
+    try:
+        with open(os.path.join(HERE, "seiri_interview.jsonl"), "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "project": project_name, "ready": ready, "core_ok": core,
+                "rubric": rubric, "missing": missing,
+                "answers_in": (answers or "")[:300], "kn_len": len(knowledge or ""),
+                "questions": questions[:400]}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     return {"ready": ready, "rubric": rubric, "evidence": evidence, "missing": missing,
             "questions": questions, "core_ok": core, "reason": reason}
 
