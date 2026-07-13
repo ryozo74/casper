@@ -41,6 +41,10 @@ try:
 except Exception:
     casper_embed = None
 try:
+    import casper_notify                          # M3: 割り込み政策エンジン(朝ブリーフ/閾値割り込み・push型)
+except Exception:
+    casper_notify = None
+try:
     import casper_manifest                       # 資産台帳(実ファイルの決定的真実源)=出口検問/検索の基盤
 except Exception:
     casper_manifest = None
@@ -4786,6 +4790,15 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e), "n": 0})
             return
+        elif self.path == "/api/notifications":         # M3: 先回り通知(未読)。本人のもののみ。
+            who = identify(self)
+            uid = who.get("uid")
+            try:
+                items = casper_notify.pending(uid) if (casper_notify and uid) else []
+            except Exception:
+                items = []
+            self._json({"items": items, "count": len(items)})
+            return
         elif self.path == "/api/seiri/projects":       # ① online PJ 一覧(整理対象の候補)
             try:
                 self._json({"projects": seiri_projects(identify(self))})
@@ -4848,7 +4861,12 @@ class H(BaseHTTPRequestHandler):
                 _btxt = open_briefing(_who)
                 if _cards:                             # カードを出す旨を一言添える(唐突なカード出現を避ける)
                     _btxt += f"\n\n📝 **承認待ちの下書きが {len(_cards)}件** ございます。下のカードで中身を確認し「送信」か「破棄」をお選びくだされ。"
-                self._json({"text": _btxt, "cards": _cards})
+                _notifs = []                           # M3: 先回り通知(未読)を briefing に同梱
+                try:
+                    _notifs = casper_notify.pending(_who.get("uid")) if (casper_notify and _who.get("uid")) else []
+                except Exception:
+                    _notifs = []
+                self._json({"text": _btxt, "cards": _cards, "notifications": _notifs})
             except Exception as e:
                 self._json({"text": "", "error": str(e)})
             return
@@ -5000,6 +5018,16 @@ class H(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
+        if self.path == "/api/notifications/read":   # M3: 通知を既読に(本人のみ・dedup_keys省略で全既読)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            try:
+                c = casper_notify.mark_read(who.get("uid"), req.get("keys")) if (casper_notify and who.get("uid")) else 0
+                self._json({"marked": c})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
         if self.path.startswith("/api/mcp/"):     # 個人MCP管理(本人のみ・JWT検証済uid)
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
@@ -6440,5 +6468,26 @@ _threading.Thread(target=_warm_model_loop, daemon=True).start()   # 起動直後
 _threading.Thread(target=_profile_worker, daemon=True).start()    # アイドル便乗で個性プロファイル育成
 _threading.Thread(target=_events_puller, daemon=True).start()     # 全社ログ集約(get_events 増分pull)
 _threading.Thread(target=_digest_refresh_loop, daemon=True).start()  # digest をライブ自動更新(RO非依存・恒久)
+def _notify_scheduler():
+    """M3 司令塔: 常駐して割り込み政策エンジンを定期実行(既定15分毎)。朝ブリーフ(1日1回)＋閾値割り込みを
+    通知ストアへ積む。実送信はせず"積む"だけ(承認/配信は別)。対象uidは環境変数 or 既定[28](殿)。"""
+    import threading, time as _t
+    if not casper_notify:
+        return
+    uids = [u.strip() for u in os.environ.get("CASPER_NOTIFY_UIDS", "28").split(",") if u.strip()]
+    interval = int(os.environ.get("CASPER_NOTIFY_INTERVAL", "900"))   # 秒(既定15分)
+
+    def _loop():
+        _t.sleep(20)                                   # 起動直後は少し待つ(索引ロード等の混雑回避)
+        while True:
+            try:
+                casper_notify.tick(uids)
+            except Exception:
+                pass
+            _t.sleep(interval)
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 print(f"Casper chat -> http://localhost:{A.port}  (model {A.model} @ {A.endpoint})", flush=True)
+_notify_scheduler()                                    # M3: 常駐スケジューラ起動(先回り通知)
 ThreadingHTTPServer(("0.0.0.0", A.port), H).serve_forever()

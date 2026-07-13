@@ -37,3 +37,4 @@ queue/casper_alerts.jsonl
 scripts/cases_pending.jsonl
 scripts/.casper_dropbox_token
 scripts/casper_embed.db
+scripts/casper_notify_state.json

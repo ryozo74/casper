@@ -759,10 +759,30 @@ document.getElementById('who').onclick=async()=>{
   if(confirm('ログアウトしますか?')){ await jpost('/api/logout',{}); location.href='/login'; }
 };
 (function(){ const d=new Date(),w='日月火水木金土'[d.getDay()]; document.getElementById('today').textContent='本日 '+(d.getMonth()+1)+'月'+d.getDate()+'日('+w+')'; })();
+// M3: 先回り通知バナー(非モーダル・上部に積む)。既読ボタンで /api/notifications/read。
+function renderNotifications(notifs){
+  const lv={info:'#5b9dff',warn:'#f5a623',bad:'#f2637e'};
+  const box=document.createElement('div');
+  box.id='notifBanner';
+  box.style.cssText='margin:8px 0 12px;display:flex;flex-direction:column;gap:6px';
+  notifs.forEach(nt=>{
+    const c=lv[nt.level]||'#5b9dff';
+    const row=document.createElement('div');
+    row.style.cssText='border:1px solid #232a35;border-left:3px solid '+c+';background:#161a21;border-radius:10px;padding:9px 12px;font-size:13.5px;color:#dfe6f2;display:flex;justify-content:space-between;gap:10px;align-items:flex-start';
+    const t=document.createElement('div'); t.innerHTML='<b>'+(nt.title||'')+'</b><br><span style="color:#c4ccd8">'+(nt.body||'').replace(/\n/g,'<br>')+'</span>';
+    const btn=document.createElement('button'); btn.textContent='✓ 確認';
+    btn.style.cssText='flex:0 0 auto;background:#1c222c;border:1px solid #232a35;color:#9aa4b2;border-radius:7px;padding:4px 10px;cursor:pointer;font-size:12px';
+    btn.onclick=async()=>{ try{ await fetch('/api/notifications/read',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys:[nt.dedup_key]})}); }catch(e){} row.remove(); if(!box.querySelector('div')) box.remove(); };
+    row.appendChild(t); row.appendChild(btn); box.appendChild(row);
+  });
+  log.insertBefore(box, log.firstChild);
+}
 (async()=>{
   const b0=el('bot'); b0.textContent='Casper にござる。（タスク・新着DMを確認中…）';   // 即時表示で白画面を防ぐ
   try{ const w=await fetch('/api/whoami',{credentials:'same-origin'}).then(x=>x.json()); if(w.name) document.getElementById('whoname').textContent=w.name; if(w.avatar){ USER_AV=w.avatar; document.getElementById('whoav').innerHTML='<img src="'+USER_AV+'" alt="" style="width:20px;height:20px;border-radius:5px;object-fit:cover;vertical-align:middle" onerror="this.replaceWith(document.createTextNode(\'👤\'))">'; } }catch(e){}
-  try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json()); if(br.text){ render(b0,br.text); renderMermaid(b0); if(br.cards&&br.cards.length){ br.cards.forEach(pa=>renderConfirm(b0,pa)); }   // 一往復短縮: 滞留下書きを承認カードで直接提示(Fable Q4)
+  try{ const br=await fetch('/api/briefing',{credentials:'same-origin'}).then(x=>x.json());
+    if(br.notifications&&br.notifications.length){ renderNotifications(br.notifications); }   // M3: 先回り通知(未読)をバナー表示
+    if(br.text){ render(b0,br.text); renderMermaid(b0); if(br.cards&&br.cards.length){ br.cards.forEach(pa=>renderConfirm(b0,pa)); }   // 一往復短縮: 滞留下書きを承認カードで直接提示(Fable Q4)
     log.scrollTop=log.scrollHeight; history.push({role:'assistant',content:br.text}); } }catch(e){}   // ブリーフィング(タスク一覧/DM)を会話文脈に載せる=「上記のタスク」等の指示語を解決可能に
   refreshThreads(); })();
 // ===== Score Uploader ツール =====
