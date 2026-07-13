@@ -799,9 +799,15 @@ def _file_delivery_dm(user_msg, who, convo=None):
     if not urls:
         return None
     q_nourl = _URL_RE.sub(" ", q)                         # URL内の文字列を人物誤解決しないようURL除去して宛先解決
-    uid, name = _resolve_person(q_nourl, exclude=None)    # tetsuo/漢字名も確実に解決(qwen非依存)
+    uid, name = _resolve_person(q_nourl, exclude=None)    # tetsuo/漢字名/ひらがな読み も確実に解決(qwen非依存)
     if not uid:
-        return None                                       # 宛先不明→通常経路(聞き返し)
+        uid, name = _fuzzy_person(q_nourl)                # 『Testo』→tetsuo 等のタイポを近傍一致で救済
+    if not uid:
+        # ファイル送付の意図は明確(共有リンク＋DM＋『このファイル』)だが宛先だけ不明→
+        # qwenに投げて『添付してください』の的外れ返答にせず、決定的に宛先だけ聞き返す(ファイルは理解済みと示す)。
+        return {"_choices": True,
+                "reply": "共有リンクは受け取りました。**どなた宛にDMしましょう？** お名前を教えてくだされ"
+                         "（例: てつお／tetsuo／寺島さん 等）。"}
     m = _PW_RE.search(_URL_RE.sub(" ", src))              # パスワード(URL除去後から・URL断片を拾わない・🔑印も可)
     pw = m.group(1).strip("：:、。") if m else None
     mn = re.search(r"[「『]([^」』]{2,120})[」』]", q)     # 「…」で明示された本文があれば採用(URLでない時)
@@ -1853,6 +1859,44 @@ def _resolve_person(query, exclude=None):
         if str(uid) != str(exclude) and alias in query:
             return _uid_int(uid), _ROSTER_MAP.get(str(uid), alias)
     return None, None
+
+
+def _editdist(a, b):
+    """Levenshtein 編集距離(タイポ近傍一致用)。"""
+    if a == b:
+        return 0
+    m, n = len(a), len(b)
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        cur = [i] + [0] * n
+        for j in range(1, n + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+        prev = cur
+    return prev[n]
+
+
+def _fuzzy_person(query, exclude=None):
+    """クエリ中の名前らしきASCIIトークンを roster名に近傍一致(タイポ救済・『Testo』→tetsuo)。
+    編集距離<=2・名前長>=4・唯一の最良のみ採用(誤救済を避ける)。返り=(uid, name) or (None,None)。"""
+    toks = set(re.findall(r"[A-Za-z]{4,}", (query or "").lower()))
+    if not toks:
+        return None, None
+    cands = []
+    for u, nm in (_ROSTER_MAP or {}).items():
+        if str(u) == str(exclude):
+            continue
+        nm = str(nm or "").lower()
+        if len(nm) < 4 or not re.fullmatch(r"[a-z]+", nm):
+            continue
+        d = min((_editdist(tok, nm) for tok in toks), default=99)
+        if d <= 2:
+            cands.append((d, u, nm))
+    if not cands:
+        return None, None
+    cands.sort()
+    if len(cands) > 1 and cands[0][0] == cands[1][0]:      # 最良が同距離で複数=曖昧→救済しない
+        return None, None
+    return _uid_int(cands[0][1]), _ROSTER_MAP.get(str(cands[0][1]), cands[0][2])
 
 
 def _uid_int(u):
