@@ -67,7 +67,7 @@
     <div class="sb">
       <div class="drop" id="drop"><input type="file" id="seirifile" accept="image/*,video/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.md,.html,.htm" multiple hidden>📎 画像・PDF・Office・テキスト・動画をドラッグ、またはクリックで選択<br><span class="mut">複数まとめて選択・ドロップ可（1つずつ追加も可）／画像・PDF・文書=Casperが読解して素材化／資料動画=Vimeoへアップしてリンクを素材に</span></div>
       <div style="display:flex;gap:6px;margin:8px 0">
-        <input id="auroraurl" type="text" placeholder="📚 Aurora資料のURLを貼る（観測外のLINE/Slack等をAuroraに保存したノート）" style="flex:1;background:#0c131f;border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:8px 11px;font-size:13px">
+        <input id="auroraurl" type="text" placeholder="📚 Aurora資料のURLを貼る（複数可・改行/スペース/カンマ区切り／観測外のLINE/Slack等を保存したノート）" style="flex:1;background:#0c131f;border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:8px 11px;font-size:13px">
         <button style="margin-top:0" onclick="ingestAurora()">取り込む</button>
       </div>
       <textarea id="materials" placeholder="プロジェクトの補足・外部やりとり・決定の背景などを貼り付け（無くても可）"></textarea>
@@ -155,16 +155,21 @@ function ingestFile(f){
   r.readAsDataURL(f);
 }
 // ② Aurora資料URL → 本文を取り込んで素材化(観測外のLINE/Slack等をAuroraに保存したものを引き込む)
+//    複数対応: 改行/スペース/カンマ区切りで複数URLをまとめ貼り可。各URLを個別に取り込み(1本失敗しても他は継続)。
 async function ingestAurora(){
-  const u=$('auroraurl').value.trim(); if(!u)return alert('Aurora資料のURLを貼ってくだされ');
-  const mark='[Aurora資料を取り込み中… '+u.slice(-46)+']';
-  $('materials').value+=($('materials').value?'\n\n':'')+mark;
-  try{
-    const d=await fetch('/api/seiri/aurora',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({url:u})}).then(x=>x.json());
-    if(d&&d.ok){ $('materials').value=$('materials').value.replace(mark,d.material); $('auroraurl').value=''; }
-    else{ $('materials').value=$('materials').value.replace(mark,'[Aurora取込失敗: '+((d&&d.error)||'不明')+']'); }
-  }catch(e){ $('materials').value=$('materials').value.replace(mark,'[Aurora取込失敗: '+e+']'); }
+  const raw=$('auroraurl').value.trim(); if(!raw)return alert('Aurora資料のURLを貼ってくだされ');
+  const urls=raw.split(/[\s,、，]+/).map(s=>s.trim()).filter(s=>/^https?:\/\//i.test(s));
+  if(!urls.length)return alert('http… で始まるAurora資料URLが見当たりませぬ');
+  $('auroraurl').value='';
+  for(const u of urls){
+    const mark='[Aurora資料を取り込み中… '+u.slice(-46)+']';
+    $('materials').value+=($('materials').value?'\n\n':'')+mark;
+    try{
+      const d=await fetch('/api/seiri/aurora',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({url:u})}).then(x=>x.json());
+      $('materials').value=$('materials').value.replace(mark,(d&&d.ok)?d.material:('[Aurora取込失敗: '+((d&&d.error)||'不明')+'（'+u+'）]'));
+    }catch(e){ $('materials').value=$('materials').value.replace(mark,'[Aurora取込失敗: '+e+'（'+u+'）]'); }
+  }
 }
 // 資料動画 → Vimeo(create→tus直送→リンクを素材に)。Score向け動画はScore Uploaderで別途。
 async function vimeoUploadSeiri(f){

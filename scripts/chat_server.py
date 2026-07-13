@@ -820,6 +820,13 @@ _PW_RE = re.compile(r"(?:🔑|パス(?:ワード)?|ぱす|pw|password|ＰＷ)\s*
                     r"([A-Za-z0-9][A-Za-z0-9!-/:-@\[-`{-~]{2,})", re.I)   # PWは英数字始まり(散文『パスワードで共有』を拾わない)
 # 文脈参照(『このファイル/これ/上記/先ほどの』)。発火は別途『URL無し＋DM意図＋宛先解決＋直前にURL有り』で厳重ゆえ広めで安全。
 _FILE_REF_RE = re.compile(r"(この|その|これ|それ|先(の|ほど)|上記|さっき|例の|上の|あれ|奴|やつ)", re.I)
+# "これは配信でなく"伝える"意図"の合図。担当違い/誤送/間違い等は、URLを配信するのでなく文面を書くべき。
+# (殿指摘2026-07-13: 誤QC依頼のURLを「このQCは担当でない旨をkiyotomoにDM」と言ったのにURL配信扱いされた)
+# 「担当出ない」のIME誤変換(で→出)も拾う。「違う」単独は拾わない(『違うファイルを送って』の正当配信を潰さぬ為)。
+_NOT_DELIVERY_RE = re.compile(
+    r"(担当|たんとう|管轄|所管|範囲|役割)[^。\n]{0,4}(で|出|じゃ|では)[^。\n]{0,3}(な|無)|"
+    r"(私|わたし|自分|うち|こちら)[^。\n]{0,5}(担当|案件|仕事|もの|役割)[^。\n]{0,4}(で|出|じゃ)[^。\n]{0,3}(な|無)|"
+    r"(間違(った|い|え)|まちが(った|い|え)|誤(送|り|って)|お門違い|人違い|宛先[^。\n]{0,3}(違|誤|間違))", re.I)
 
 
 def _file_delivery_dm(user_msg, who, convo=None):
@@ -828,6 +835,10 @@ def _file_delivery_dm(user_msg, who, convo=None):
     宛先を人物解決器で確実に解決・丁寧な文面を機構生成・URL/PWを保持して send_message 下書きを起こす。"""
     q = user_msg or ""
     if not _DM_INTENT_RE.search(q):
+        return None
+    if _NOT_DELIVERY_RE.search(q):
+        # 「担当でない/誤送/間違い」=URLを配信するのでなく"その旨を伝える"文面が要る→配信fast-pathを退き、
+        # 通常のDM作成(LLMが文脈のQC情報から丁寧な誤送連絡を起こす+承認カード)に委ねる(殿指摘2026-07-13)。
         return None
     urls = _URL_RE.findall(q)
     src = q                                               # PW/URLの抽出元(既定=現メッセージ)
@@ -1638,6 +1649,19 @@ def image_asset_digest(query):
         return ""
 
 
+def _thread_is_new(uid, msgs):
+    """スレッドが"新着(要対応)"か判定する唯一の機構。最新メッセージが自分の送信なら新着でない
+    (自分で送ったDMを新着扱いしない・殿指摘2026-07-13)。それ以外は相手発の未読(read_at無し)が
+    1通でもあれば新着。dm_threads と 朝ブリーフで同一判定を共有(件数と一覧を割らせない・Fable鉄則五)。"""
+    msgs = msgs or []
+    if not msgs:
+        return False
+    newest = max(msgs, key=lambda m: str(m.get("created_at") or m.get("ts") or m.get("id") or ""))
+    if str(newest.get("sender_id")) == str(uid):
+        return False
+    return any(str(m.get("sender_id")) != str(uid) and not m.get("read_at") for m in msgs)
+
+
 def dm_threads(who):
     """ログイン中ユーザーのDMスレッド一覧を取得(get_messages相当)。
     書込トークン(per-user)が要る→未発行時は空。{threads:[{id,peer,unread,last,ts}], available:bool}"""
@@ -1664,8 +1688,7 @@ def dm_threads(who):
                 r = casper_mcp.call_tool("get_messages", {"actor_id": int(uid), "thread_id": int(t.get("thread_id"))},
                                          token=WRITE_TOKEN, actor=uid)
                 md = json.loads(r) if (r or "").strip().startswith("{") else {}
-                return (t, any(str(m.get("sender_id")) != str(uid) and not m.get("read_at")
-                               for m in (md.get("messages", []) or [])))
+                return (t, _thread_is_new(uid, md.get("messages", [])))
             except Exception:
                 return (t, False)
         with _cf.ThreadPoolExecutor(max_workers=10) as _ex:
@@ -4266,8 +4289,7 @@ def open_briefing(who):
                                                  {"actor_id": int(uid), "thread_id": int(t.get("thread_id"))},
                                                  token=WRITE_TOKEN, actor=uid)
                         md = _j.loads(r) if (r or "").strip().startswith("{") else {}
-                        return (t, any(str(m.get("sender_id")) != str(uid) and not m.get("read_at")
-                                       for m in (md.get("messages", []) or [])))
+                        return (t, _thread_is_new(uid, md.get("messages", [])))
                     except Exception:
                         return (t, False)
                 with _cf.ThreadPoolExecutor(max_workers=10) as _ex:
