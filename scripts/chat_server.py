@@ -4407,6 +4407,49 @@ def _vault_excerpt(txt, name, per_file=700):
     return "\n".join(keep)[:per_file]
 
 
+def _caption_html_images(html, max_images=6):
+    """【Fable処方A】html内の埋込base64画像を Claude Sonnet vision でキャプション化(定量情報のみ・推測禁止)。
+    高度技術資料(RTAB-Map/LED等)の工学的核心は画像側(点群/グラフ/データフロー図)に在り、テキストだけでは
+    痩せて Qwen に核心が届かぬ為。判断(定量読解)を能力ある機構(Sonnet)へ寄せ、Qwenには"読み取れた事実"を渡す。
+    返り: (captions_text, n_images, n_captioned)。"""
+    imgs = re.findall(r"data:image/([A-Za-z0-9.+\-]+);base64,([A-Za-z0-9+/=]+)", html or "")
+    n_images = len(imgs)
+    if not n_images or VISION_BACKEND == "off":
+        return "", n_images, 0
+    import base64 as _b64
+    caps = []; n_cap = 0
+    scratch = os.path.join(HERE, "..", "_vision_tmp")
+    try:
+        os.makedirs(scratch, exist_ok=True)
+    except Exception:
+        pass
+    prompt = ("この図/画像から読み取れる定量情報(数値・軸・単位・計測値・比較・構成要素、"
+              "データフロー図ならノードと矢印の流れ)だけを、推測せず短い箇条書きで日本語で述べよ。"
+              "読み取れない/判別不能なら『判読不可』とだけ書け。前置き不要。")
+    for i, (ext, b64) in enumerate(imgs[:max_images]):
+        ext2 = {"jpeg": "jpg", "svg+xml": "svg"}.get(ext.lower(), ext.lower())
+        fp = os.path.join(scratch, f"aimg_{os.getpid()}_{i}.{ext2}")
+        try:
+            with open(fp, "wb") as _f:
+                _f.write(_b64.b64decode(b64 + "=" * (-len(b64) % 4)))
+            cap = strip_think(claude_cli_vision(fp, prompt)).strip()
+            if cap and not cap.startswith("[vision"):
+                caps.append(f"[図{i+1}] {cap}")
+                if "判読不可" not in cap[:24]:
+                    n_cap += 1
+        except Exception:
+            pass
+        finally:
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+    txt = ("\n\n## 図表から読み取れた事実(Sonnet vision・推測なし)\n" + "\n".join(caps)) if caps else ""
+    if n_images > max_images:
+        txt += f"\n（図は全{n_images}枚中 上位{max_images}枚のみ読解）"
+    return txt, n_images, n_cap
+
+
 def seiri_aurora_fetch(url):
     """Aurora資料のURL(base/doc/{slug})から本文を取得し、整理の"追加素材"テキストに変換して返す。
     観測外資料(LINE/Slack等)をAuroraに保存したものを、URL一つで整理フローへ引き込む(殿御下命2026-07-13)。
@@ -4436,10 +4479,10 @@ def seiri_aurora_fetch(url):
         return {"ok": False, "error": "Aurora資料の形式を解釈できませんでした。"}
     doc = d.get("document") or d.get("doc") or d
     title = doc.get("title") or ref
+    html = doc.get("html") or doc.get("body") or doc.get("content") or ""
     text = doc.get("text") or ""
     if not text:                                          # text 欠落時は html をタグ除去して平文化
-        body = doc.get("html") or doc.get("body") or doc.get("content") or ""
-        body = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", body, flags=re.S | re.I)  # CSS/JS塊を除去
+        body = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", html, flags=re.S | re.I)  # CSS/JS塊を除去
         body = re.sub(r"<br\s*/?>", "\n", body)
         body = re.sub(r"</(p|div|li|h[1-6]|tr)>", "\n", body)
         text = _htmlmod.unescape(re.sub(r"<[^>]+>", "", body))
@@ -4447,10 +4490,26 @@ def seiri_aurora_fetch(url):
     text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", text, flags=re.S | re.I)
     text = re.sub(r"[^\n{}]*\{[^{}]*\}", "", text) if text.count("{") > 3 else text  # CSSルール多数=コード資料→除去
     text = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
-    if not text:
+    # 【Fable処方A】高度資料は核心が画像側に在る(点群/グラフ/データフロー図)。埋込画像をvisionでキャプション化し
+    # "図表から読み取れた事実"として素材に合流させる(テキストだけ渡すと痩せて Qwen に核心が届かぬ)。
+    caps, n_img, n_cap = _caption_html_images(html)
+    img_bytes = sum(len(b) for b in re.findall(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", html))
+    image_dominant = bool(img_bytes > 200000 and len(text) < 4000)
+    # 【Fable処方B】被覆率の正直な申告: 画像主体なのに vision で図を読めていない(off/失敗)時は、痩せた素材で
+    # 黙って結晶化させず"欠落"を素材に明記する(結晶化・逆インタビューが浅い合格を出すのを防ぐ・鉄則一/二)。
+    warn = ""
+    if image_dominant and n_cap == 0:
+        warn = ("\n\n⚠️【被覆率の警告】この資料は視覚情報が主体(埋込画像が本文を大きく上回る)ですが、"
+                "図の読解ができていません(vision未実施/失敗)。テキストだけでは工学的核心(計測値・点群品質・"
+                "データフロー等)が欠落しています。結晶化の前に、図の要点を人が補足するか、vision読解を通してくだされ。")
+    body_txt = (text + caps + warn).strip()
+    if not body_txt:
         return {"ok": False, "error": "本文が空でした(URL/権限をご確認くだされ)。"}
-    material = f"【Aurora資料: {title}】\n{text}"[:8000]
-    return {"ok": True, "title": title, "url": u, "material": material}
+    material = f"【Aurora資料: {title}】\n{body_txt}"[:16000]   # 図キャプション分の余地を持たせる
+    coverage = {"text_len": len(text), "n_images": n_img, "n_captioned": n_cap,
+                "img_bytes": img_bytes, "image_dominant": image_dominant,
+                "insufficient": bool(image_dominant and n_cap == 0)}
+    return {"ok": True, "title": title, "url": u, "material": material, "coverage": coverage}
 
 
 def seiri_vault_material(project_name, cap=12000):

@@ -167,7 +167,10 @@ async function ingestAurora(){
     try{
       const d=await fetch('/api/seiri/aurora',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({url:u})}).then(x=>x.json());
-      $('materials').value=$('materials').value.replace(mark,(d&&d.ok)?d.material:('[Aurora取込失敗: '+((d&&d.error)||'不明')+'（'+u+'）]'));
+      let tail='';
+      const cv=d&&d.coverage;
+      if(cv&&cv.n_images){ tail='\n（📷 図'+cv.n_images+'枚中 '+cv.n_captioned+'枚をvision読解'+(cv.insufficient?'・⚠️視覚主体で読解不足':'')+'）'; }
+      $('materials').value=$('materials').value.replace(mark,(d&&d.ok)?(d.material+tail):('[Aurora取込失敗: '+((d&&d.error)||'不明')+'（'+u+'）]'));
     }catch(e){ $('materials').value=$('materials').value.replace(mark,'[Aurora取込失敗: '+e+'（'+u+'）]'); }
   }
 }
