@@ -4385,6 +4385,52 @@ def _vault_excerpt(txt, name, per_file=700):
     return "\n".join(keep)[:per_file]
 
 
+def seiri_aurora_fetch(url):
+    """Aurora資料のURL(base/doc/{slug})から本文を取得し、整理の"追加素材"テキストに変換して返す。
+    観測外資料(LINE/Slack等)をAuroraに保存したものを、URL一つで整理フローへ引き込む(殿御下命2026-07-13)。
+    返り: {ok, title, url, material} or {ok:False, error}。"""
+    import casper_aurora as _au
+    import html as _htmlmod
+    u = (url or "").strip()
+    if not u:
+        return {"ok": False, "error": "URLが空です。"}
+    if not _au.configured():
+        return {"ok": False, "error": "Auroraが未接続です(.casper_aurora 設定要)。"}
+    m = re.search(r"/doc/(.+?)(?:[?#].*)?$", u)          # slug はスラッシュを含む(casper/2026-.../…)ゆえ貪欲に拾う
+    ref = _htmlmod.unescape(m.group(1) if m else u.rstrip("/").split("/")[-1]).strip()
+    if not ref:
+        return {"ok": False, "error": "URLから資料IDを取り出せませんでした。"}
+    try:
+        raw = _au.get(ref)
+    except Exception as e:
+        return {"ok": False, "error": f"Aurora取得失敗: {str(e)[:120]}"}
+    if not raw or (isinstance(raw, str) and raw.strip().startswith("(Aurora")):
+        return {"ok": False, "error": "Aurora資料が取得できませんでした(URL/権限をご確認くだされ)。"}
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        d = None
+    if not isinstance(d, dict):
+        return {"ok": False, "error": "Aurora資料の形式を解釈できませんでした。"}
+    doc = d.get("document") or d.get("doc") or d
+    title = doc.get("title") or ref
+    text = doc.get("text") or ""
+    if not text:                                          # text 欠落時は html をタグ除去して平文化
+        body = doc.get("html") or doc.get("body") or doc.get("content") or ""
+        body = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", body, flags=re.S | re.I)  # CSS/JS塊を除去
+        body = re.sub(r"<br\s*/?>", "\n", body)
+        body = re.sub(r"</(p|div|li|h[1-6]|tr)>", "\n", body)
+        text = _htmlmod.unescape(re.sub(r"<[^>]+>", "", body))
+    # text 側に紛れた <style>/<script> 塊や生CSSも掃う(図解HTMLアプリ資料での混入を防ぐ)
+    text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", text, flags=re.S | re.I)
+    text = re.sub(r"[^\n{}]*\{[^{}]*\}", "", text) if text.count("{") > 3 else text  # CSSルール多数=コード資料→除去
+    text = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
+    if not text:
+        return {"ok": False, "error": "本文が空でした(URL/権限をご確認くだされ)。"}
+    material = f"【Aurora資料: {title}】\n{text}"[:8000]
+    return {"ok": True, "title": title, "url": u, "material": material}
+
+
 def seiri_vault_material(project_name, cap=12000):
     """PJ名で vault を横断し、既存の議事録/asset影武者/DB書庫/人物 等から素材を自動収集。
     60_projects(自らの結晶化=citogenesis回避)と汎用短名は除外。総量を上限で抑える。返り値=(素材text, 出典数)。"""
@@ -5283,6 +5329,8 @@ class H(BaseHTTPRequestHandler):
                     self._json(seiri_closed_book(who, req.get("project", ""), req.get("knowledge", "")))
                 elif self.path == "/api/seiri/offline":      # ⑥ Calendar offline(人承認後)
                     self._json(seiri_offline(who, req.get("project_id")))
+                elif self.path == "/api/seiri/aurora":       # ② Aurora資料URL→本文を取り込んで追加素材に
+                    self._json(seiri_aurora_fetch(req.get("url", "")))
                 else:
                     self._json({"error": "unknown seiri endpoint"})
             except Exception as e:
