@@ -200,6 +200,46 @@ MCP_ACTOR_TOOLS = {"upload_asset", "add_reference_material", "send_message", "ge
 # 完了は deliver のみ。遅延は status でなく isOverdue 派生(due<today かつ status∉{deliver,omit})。旧値は互換期間中も許容。
 _TASK_DONE = {"deliver", "completed", "done", "complete", "approved"}   # 完了扱い(新=deliverのみ・旧値も互換で吸収)
 _TASK_NOT_OVERDUE = {"deliver", "omit"}                                 # 遅延判定の除外(完了+作業対象外)
+# PJ が納期超過に"成り得ない"status(完了/対象外)。新値deliver+旧値completed等を互換吸収。
+_PJ_NOT_OVERDUE = {"deliver", "omit", "completed", "done", "complete",
+                   "cancelled", "canceled", "approved"}
+
+
+def _overdue_days(due, status, today=None):
+    """【納期超過=派生事実の唯一の判定機構(Fable: 集合/派生の判断は機構・LLMは修辞)】
+    返り: 超過日数(int>0) / 0(超過でない) / None(日付不正)。
+    完了/対象外statusは due<today でも超過に非ず(isOverdue派生)。qwenに due<today の計算をさせない為の単一ソース。"""
+    import datetime as _dt
+    try:
+        d = _dt.date.fromisoformat(str(due)[:10])
+    except Exception:
+        return None
+    today = today or _dt.date.today()
+    if str(status or "").lower() in _PJ_NOT_OVERDUE:
+        return 0
+    return (today - d).days if d < today else 0
+
+
+def _due_note_c(due, status, today=None):
+    """派生の『納期状況』を機構が確定して文字列化(qwen/表に日付計算を委ねない)。
+    超過→🔴N日超過 / 本日締切→⚠️ / 過去だが完了→"完了済(納期超過ではない)"(誤計算封じ) / それ以外→""。"""
+    import datetime as _dt
+    od = _overdue_days(due, status, today)
+    if od is None:
+        return ""
+    if od > 0:
+        return f"🔴{od}日超過"
+    try:
+        d = _dt.date.fromisoformat(str(due)[:10])
+    except Exception:
+        return ""
+    today = today or _dt.date.today()
+    done = str(status or "").lower() in _PJ_NOT_OVERDUE
+    if d == today and not done:
+        return "⚠️本日締切"
+    if d < today and done:                       # 過去納期だが完了 → 明示し qwen の「N日超過」誤断を封じる
+        return "完了済(納期超過ではない)"
+    return ""
 _TASK_ACTIVE = {"mk", "wip", "modeling", "lookdev", "caching", "rig", "facial",   # 未着手+進行中の工程群
                 "todo", "in-progress", "in_progress"}                             # (旧値互換)
 _TASK_ST_LABEL = {   # status → 表示ラベル(絵文字つき・5カテゴリ準拠)
@@ -2084,12 +2124,18 @@ def entity_digest(query):
         desc = (p.get("description") or "").replace("\n", " ").strip()[:220]
         sd = str(p.get("start_date") or "")[:10]
         ed = str(p.get("end_date") or "")[:10]
+        # 納期状況は"派生事実"→機構が確定して渡す(qwenに end_date と本日の引き算をさせない)。
+        # 完了PJの過去納期を「N日超過」と誤計算する事故(殿指摘2026-07-13・コンバトラーV)を根絶。
+        _dn = _due_note_c(ed, p.get("status")) or "予定内(納期超過ではない)"
         return ("\n\n## 【このPJの正体(これが全て・名前から社名/読みを推測するな)】\n"
                 f"- 正規名: {names[0]}\n"
                 f"- 状態: {p.get('status')}／期間: {sd or '—'}〜{ed or '—'}\n"
+                f"- 納期状況(確定値): {_dn}\n"
                 + (f"- 概要: {desc}\n" if desc else "")
                 + "**この実レコードだけがこのPJの正体。名前の字面から社名・商品名・意味を勝手に補完/展開するな"
-                "(例『◯◯（△△株式会社）』のような括弧書きの推測は禁止)。上の概要に無い属性を創作するな。**")
+                "(例『◯◯（△△株式会社）』のような括弧書きの推測は禁止)。上の概要に無い属性を創作するな。**\n"
+                "**納期の超過/未超過は上の『納期状況(確定値)』が唯一の正。end_date と本日を突き合わせて"
+                "自分で超過日数を計算・言及するな(完了/deliver済のPJは過去納期でも納期超過ではない)。**")
     except Exception:
         return ""
 
@@ -2410,6 +2456,7 @@ def active_tasks_digest(query):
         _pjs = json.load(open("/tmp/cal_projects.json")).get("items", [])
         pm = {p.get("id"): p.get("name") for p in _pjs}
         due_m = {p.get("id"): str(p.get("end_date") or "")[:10] for p in _pjs}   # ③ 期限ファセット
+        st_m = {p.get("id"): p.get("status") for p in _pjs}                      # PJ status(超過判定用)
         try:
             um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
                   for u in casper_tools._get("/users?limit=200").get("items", [])}
@@ -2425,15 +2472,8 @@ def active_tasks_digest(query):
             nm = pm.get(pid, pid or "?")
             who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
             due = due_m.get(pid, "")
-            od = ""
-            try:
-                d = datetime.date.fromisoformat(due)
-                if d < _today:
-                    od = f"（🔴{(_today - d).days}日超過）"
-                elif d == _today:
-                    od = "（本日締切）"
-            except Exception:
-                pass
+            _dn = _due_note_c(due, st_m.get(pid), _today)      # 完了PJの過去納期を超過表示しない(単一機構)
+            od = f"（{_dn}）" if _dn else ""
             lines.append(f"- **{nm}**: {len(ts)}件 | 担当 {', '.join(who_names[:6])} | 締切 {due or '—'}{od}")
         return (f"\n\n## 【現在進行中(wip/工程)のタスク一覧(Calendar・確定)】\n"
                 f"全プロジェクトで進行中のタスクは計 {len(act)}件。**この一覧を根拠に答えよ。"
@@ -2680,16 +2720,9 @@ def _table_card(query, who):
     _name_hit = bool(_match_online_pj(q))                # 表記ゆれ耐性の名前解決器へ統一(生substring照合を残さない)
     today = datetime.date.today()
 
-    def _due_note(due):
-        try:
-            d = datetime.date.fromisoformat(str(due)[:10])
-            if d < today:
-                return f"🔴{(today - d).days}日超過"
-            if d == today:
-                return "⚠️本日締切"
-        except Exception:
-            pass
-        return ""
+    def _due_note(due, status=""):
+        # 納期状況は status を見て機構が確定(完了PJの過去納期を超過表示しない・単一ソース _due_note_c)。
+        return _due_note_c(due, status, today)
 
     # ⓪ 特定PJのタスク一覧(『マルコメのタスク見せて』等) — 名前解決器で unique に解けた時のみ表を描く
     #    (曖昧/不在は None を返し、呼び側が選択カード/近傍候補で拾う=無言None落ちさせない・Fable)
@@ -2716,7 +2749,7 @@ def _table_card(query, who):
                     due = str(t.get("due_date") or "")[:10]
                     rows.append([t.get("name") or t.get("title") or "?", t.get("type") or "",
                                  um.get(t.get("assigned_to"), "未割当"),
-                                 t.get("status_label") or t.get("status") or "", due, _due_note(due)])
+                                 t.get("status_label") or t.get("status") or "", due, _due_note(due, t.get("status"))])
                 _hidden = (len(tks) - len(act)) if act else 0    # footerの嘘を断つ: 全件表示時は非表示0
                 _foot = "Calendar 確定データ。列見出しクリックで並べ替え。"
                 if _hidden:
@@ -2739,6 +2772,7 @@ def _table_card(query, who):
             return None
         pm = {p.get("id"): p.get("name") for p in items}
         due_m = {p.get("id"): str(p.get("end_date") or "")[:10] for p in items}
+        st_m = {p.get("id"): p.get("status") for p in items}     # PJ status(超過判定にstatusを渡す為)
         try:
             um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
                   for u in casper_tools._get("/users?limit=200").get("items", [])}
@@ -2752,7 +2786,7 @@ def _table_card(query, who):
         for pid, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
             who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
             due = due_m.get(pid, "")
-            rows.append([pm.get(pid, pid or "?"), len(ts), ", ".join(who_names[:6]), due, _due_note(due)])
+            rows.append([pm.get(pid, pid or "?"), len(ts), ", ".join(who_names[:6]), due, _due_note(due, st_m.get(pid))])
         return {"title": f"進行中タスク（全社 計{len(tasks)}件）", "columns": ["プロジェクト", "件数", "担当", "締切", "状況"],
                 "rows": rows, "sortable": True, "numeric_cols": [1],
                 "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
@@ -2762,7 +2796,7 @@ def _table_card(query, who):
         rows = []
         for p in online:
             due = str(p.get("end_date") or "")[:10]
-            rows.append([p.get("name"), p.get("status") or "", due, _due_note(due)])
+            rows.append([p.get("name"), p.get("status") or "", due, _due_note(due, p.get("status"))])
         return {"title": f"進行中プロジェクト（{len(online)}件）", "columns": ["プロジェクト", "状態", "締切", "状況"],
                 "rows": rows, "sortable": True, "numeric_cols": [],
                 "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
