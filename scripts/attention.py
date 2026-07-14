@@ -94,6 +94,55 @@ def _latest_states():
     return latest
 
 
+ATT_LOG = os.path.join(HERE, "attention.jsonl")
+
+
+def _alog(msg):
+    """接地の被覆率ログ(Fable鉄則: 開門は最も見られる面ゆえ接地劣化を残す)。"""
+    try:
+        with open(ATT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"), "msg": msg},
+                               ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _my_pids(uid):
+    """本人が担当タスクを持つ project_id 集合(帰属の裏どり: あなたがこのPJに担当を持つ→あなたの事)。RO API。"""
+    pids = set()
+    if not uid:
+        return pids
+    try:
+        import casper_tools
+        off = 0
+        while True:
+            page = casper_tools._get(f"/tasks?limit=500&offset={off}").get("items", [])
+            for t in page:                             # RO /tasks の assignee_id フィルタは効かぬ→client側で担当照合
+                if str(t.get("assigned_to")) == str(uid) and t.get("project_id") is not None:
+                    pids.add(str(t.get("project_id")))
+            if len(page) < 500:
+                break
+            off += 500
+    except Exception:
+        pass
+    return pids
+
+
+def _company_overdue(today):
+    """全社の納期超過PJ [{id,name,due}](online・完了/中止除く)。帰属でなく"事実"の集合。"""
+    out = []
+    try:
+        for p in json.load(open(CAL_PROJECTS)).get("items", []):
+            if str(p.get("display_status") or "online") != "online":
+                continue
+            due = str(p.get("end_date") or "")[:10]
+            if due and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled"):
+                out.append({"id": p.get("id"), "name": str(p.get("name", "")), "due": due})
+    except Exception:
+        pass
+    return out
+
+
 def gather(uid):
     """注意すべき候補を集める(この人向け)。返り=[{kind, title, detail, score, ref}]。"""
     cands = []
@@ -115,16 +164,17 @@ def gather(uid):
                           "score": 30 + _days_since(lp.get("created_at")), "ref": lp.get("id")})
     except Exception:
         pass
-    # (c) 納期超過PJ(この人が関わる or 全社)
+    # (c) 納期超過PJ — 帰属スコープ: 本人が担当タスクを持つPJのみ(Fable処方: 帰属できない全社事を
+    #     "あなたの注意事項"の見出しで出すのは"帰属の嘘"。全社の超過は briefing_lines の降格見出しで参考提示)。
     try:
         today = datetime.date.today().isoformat()
-        for p in json.load(open(CAL_PROJECTS)).get("items", []):
-            if str(p.get("display_status") or "online") != "online":
-                continue
-            due = str(p.get("end_date") or "")[:10]
-            if due and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled"):
-                cands.append({"kind": "overdue", "title": str(p.get("name", ""))[:50],
-                              "detail": f"納期超過(〆{due})", "score": 40, "ref": p.get("id")})
+        mine = _my_pids(uid)                                   # 本人担当PJ集合(帰属の裏どり)
+        all_od = _company_overdue(today)
+        my_od = [p for p in all_od if str(p["id"]) in mine]
+        _alog(f"overdue uid={uid}: 全社{len(all_od)}件中 担当{len(my_od)}件を提示(帰属スコープ)")   # 被覆率ログ
+        for p in my_od:
+            cands.append({"kind": "overdue", "title": p["name"][:50],
+                          "detail": f"納期超過(〆{p['due']})", "score": 40, "ref": p["id"]})
     except Exception:
         pass
     cands = [c for c in cands if not is_muted(uid, c.get("ref"))]   # snooze/dismiss 済は除外(alert fatigue対策)
@@ -169,11 +219,29 @@ def briefing_lines(uid, include_drafts=True):
     three = today_three(uid)
     if not include_drafts:
         three = [c for c in three if c.get("kind") != "draft"]
-    if not three:
-        return ""
-    icon = {"draft": "📝", "loop": "🔗", "overdue": "🔴"}
-    lines = [f"{icon.get(c['kind'], '・')} {c['title']} — {c['detail']}" for c in three]
-    return "\n\n**今日の3件（気にかけどころ）**\n" + "\n".join(lines)
+    icon = {"draft": "📝", "overdue": "🔴"}
+    out = ""
+    if three:
+        # 推論項目(loop=未了の約束)は「未確認」印を機構で付す(Fable処方: 確定=担当/DM と 推論=分類ラベル を
+        # 視覚的に分ける。断定形でなく"推測"と分かる印にし、確定情報と同じ重みに見せない)。
+        def _fmt(c):
+            if c["kind"] == "loop":
+                return f"🔗未確認 {c['title']} — {c['detail']}（推測・元DM要確認）"
+            return f"{icon.get(c['kind'], '・')} {c['title']} — {c['detail']}"
+        out += "\n\n**今日の3件（気にかけどころ）**\n" + "\n".join(_fmt(c) for c in three)
+    # 全社の納期超過は"参考(降格見出し)"で。本人の3件に無い分だけ、帰属でなく「参考・担当外」と明示して出す
+    # (Fable処方: 事実として真でも"あなたの注意事項"には混ぜない。見出しが帰属を約束する)。
+    try:
+        today = datetime.date.today().isoformat()
+        mine_refs = {str(c.get("ref")) for c in three if c["kind"] == "overdue"}
+        extra = [p for p in _company_overdue(today) if str(p["id"]) not in mine_refs]
+        if extra:
+            names = "、".join(f"{p['name']}（〆{p['due']}）" for p in extra[:5])
+            more = f" ほか{len(extra) - 5}件" if len(extra) > 5 else ""
+            out += (f"\n\n**🏢 全社の納期状況（参考・あなたの担当外）**\n🔴 {len(extra)}件: {names}{more}")
+    except Exception:
+        pass
+    return out
 
 
 if __name__ == "__main__":
