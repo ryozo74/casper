@@ -107,6 +107,18 @@ def _alog(msg):
         pass
 
 
+def _is_owner(uid):
+    """このCasperの持ち主(統括)か。デプロイ設定 .casper_owner(uid) / env CASPER_OWNER_UID で持つ
+    (役職ハードコードでなく設定=鉄則八回避。別の人に配れば各自が自分のuidを設定)。統括は全社を自分事とする。"""
+    own = os.environ.get("CASPER_OWNER_UID", "").strip()
+    if not own:
+        try:
+            own = open(os.path.join(HERE, ".casper_owner"), encoding="utf-8").read().strip()
+        except Exception:
+            own = ""
+    return bool(own) and str(uid) == own
+
+
 def _my_pids(uid):
     """本人が担当タスクを持つ project_id 集合(帰属の裏どり: あなたがこのPJに担当を持つ→あなたの事)。RO API。"""
     pids = set()
@@ -166,13 +178,19 @@ def gather(uid):
     except Exception:
         pass
     # (c) 納期超過PJ — 帰属スコープ: 本人が担当タスクを持つPJのみ(Fable処方: 帰属できない全社事を
-    #     "あなたの注意事項"の見出しで出すのは"帰属の嘘"。全社の超過は briefing_lines の降格見出しで参考提示)。
+    #     "あなたの注意事項"の見出しで出すのは"帰属の嘘")。ただし統括(owner=このCasperの持ち主・.casper_owner設定)は
+    #     全社を統べる立場ゆえ全社overdueを自分事(行動対象)として持つ。owner判別は役職ハードコードでなくデプロイ設定
+    #     (鉄則八回避)。staffには全社超過を briefing_lines の降格見出し「全社(参考)」で非行動提示する。
     try:
         today = datetime.date.today().isoformat()
-        mine = _my_pids(uid)                                   # 本人担当PJ集合(帰属の裏どり)
         all_od = _company_overdue(today)
-        my_od = [p for p in all_od if str(p["id"]) in mine]
-        _alog(f"overdue uid={uid}: 全社{len(all_od)}件中 担当{len(my_od)}件を提示(帰属スコープ)")   # 被覆率ログ
+        if _is_owner(uid):                                     # 統括: 全社を自分事(帰属あり=全社を管掌)
+            my_od = all_od
+            _alog(f"overdue uid={uid}(owner): 全社{len(all_od)}件を統括スコープで提示")
+        else:                                                  # staff: 担当PJのみ(帰属の裏どり)
+            mine = _my_pids(uid)
+            my_od = [p for p in all_od if str(p["id"]) in mine]
+            _alog(f"overdue uid={uid}: 全社{len(all_od)}件中 担当{len(my_od)}件を提示(帰属スコープ)")
         for p in my_od:
             cands.append({"kind": "overdue", "title": p["name"][:50],
                           "detail": f"納期超過(〆{p['due']})", "score": 40, "ref": p["id"]})
@@ -234,8 +252,8 @@ def briefing_lines(uid, include_drafts=True):
                 return f"🔗未確認 {c['title']} — {c['detail']}{link}"
             return f"{icon.get(c['kind'], '・')} {c['title']} — {c['detail']}"
         out += "\n\n**今日の3件（気にかけどころ）**\n" + "\n".join(_fmt(c) for c in three)
-    # 全社の納期超過は"参考(降格見出し)"で。本人の3件に無い分だけ、帰属でなく「参考・担当外」と明示して出す
-    # (Fable処方: 事実として真でも"あなたの注意事項"には混ぜない。見出しが帰属を約束する)。
+    # 全社の納期超過は"参考(降格見出し)"で。本人の3件(actionable)に無い分だけ提示。統括(owner)は全社を管掌ゆえ
+    # 「担当外」と言わず単に参考、staffは帰属でなく「担当外」と明示(Fable: 見出しが帰属を約束する)。
     try:
         today = datetime.date.today().isoformat()
         mine_refs = {str(c.get("ref")) for c in three if c["kind"] == "overdue"}
@@ -243,7 +261,8 @@ def briefing_lines(uid, include_drafts=True):
         if extra:
             names = "、".join(f"{p['name']}（〆{p['due']}）" for p in extra[:5])
             more = f" ほか{len(extra) - 5}件" if len(extra) > 5 else ""
-            out += (f"\n\n**🏢 全社の納期状況（参考・あなたの担当外）**\n🔴 {len(extra)}件: {names}{more}")
+            head = "🏢 全社の納期状況（参考）" if _is_owner(uid) else "🏢 全社の納期状況（参考・あなたの担当外）"
+            out += (f"\n\n**{head}**\n🔴 {len(extra)}件: {names}{more}")
     except Exception:
         pass
     return out
