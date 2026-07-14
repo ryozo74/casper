@@ -200,9 +200,33 @@ def _all_notifs():
 
 
 def pending(uid, limit=20):
-    """未読通知(新しい順)。"""
+    """未読通知(新しい順)。停滞FBは"保存時のスナップショット"を凍結せず、表示のたび現データで作り直す
+    (殿指摘2026-07-14: 完了済タスク T57/v1 等を古い通知が「停滞中」と見せ続ける陳腐化を防ぐ。完了は現status
+    が _STALL_STATUS 外ゆえ自動で落ち、今ゼロなら通知自体を出さない=殿の「完了はクローズ扱い」に一致)。"""
     u = str(uid)
-    return [n for n in reversed(_all_notifs()) if n.get("uid") == u and not n.get("read")][:limit]
+    out = []
+    _fresh = None                                          # 停滞FBの現況(遅延計算・1回のみ)
+    for n in reversed(_all_notifs()):
+        if n.get("uid") != u or n.get("read"):
+            continue
+        if n.get("type") == "stalled_fb":
+            if _fresh is None:
+                try:
+                    _fresh = _stalled_fb(_all_tasks(), datetime.date.today().isoformat())
+                except Exception:
+                    _fresh = []
+            if not _fresh:
+                continue                                   # 今は停滞ゼロ→古い「N件停滞」を出さない
+            names = [f"{s['shot']} {s['name']}".strip()
+                     for s in sorted(_fresh, key=lambda s: s.get("since") or "9999")[:8]]
+            more = f" ほか{len(_fresh) - 8}件" if len(_fresh) > 8 else ""
+            n = dict(n)                                     # 現データで本文を作り直す(凍結を捨てる)
+            n["title"] = f"⏳ FB/確認が停滞 {len(_fresh)}件"
+            n["body"] = f"確認待ちのまま動いていません：{'、'.join(names)}{more}。まとめて催促しますか？"
+        out.append(n)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def mark_read(uid, dedup_keys=None):
