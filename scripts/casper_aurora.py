@@ -50,7 +50,7 @@ def _call(name, args):
 
 
 def doc_base():
-    """文書ビューの基底URL(MCP url から /mcp を外す)。例: http://192.168.44.155:8100"""
+    """文書ビューの基底URL(MCP url から /mcp を外す)。例: http://nina_notepc_02:8100"""
     url, _ = _conf()
     return re.sub(r"/mcp/?$", "", url).rstrip("/")
 
