@@ -6092,7 +6092,11 @@ class H(BaseHTTPRequestHandler):
                                 rec = strip_think(llm_text(
                                     "次のDMは相手に『成果物(動画/資料)の作成・アップ・提出』を依頼しているか判定し JSONのみ返せ:"
                                     " {\"track\":true|false, \"kind\":\"vimeo\"|\"asset\"|\"\", \"keyword\":\"追跡に使う対象名(PJ名/作品名・簡潔に)\"}。"
-                                    "動画のVimeoアップ依頼なら kind=vimeo、資料ファイルなら asset。単なる連絡・質問なら track=false。",
+                                    "動画のVimeoアップ依頼なら kind=vimeo、Casperにアップされる資料ファイルなら asset。"
+                                    "**ただし相手がこれから作成し外部で受け渡す成果物(報告書/レポート/議事録/回答など、"
+                                    "Casperのアップロードや資料庫に現れず完了を観測できないもの)は track=false**"
+                                    "(観測不能な依頼を追跡すると永久に未了の偽約束になる為・殿指摘2026-07-13)。"
+                                    "単なる連絡・質問・割り振り依頼も track=false。keyword は実在しうる簡潔な対象名のみ(長い説明文を連結するな)。",
                                     body, num_predict=120))
                                 mm = re.search(r"\{.*\}", rec, re.S)
                                 d = json.loads(mm.group(0)) if mm else {}

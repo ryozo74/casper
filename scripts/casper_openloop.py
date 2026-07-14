@@ -79,6 +79,21 @@ def add(who, title, probe, referent=None, assignee=None, notify=None):
     return rec
 
 
+def dismiss(loop_id, reason=""):
+    """未了の約束を手動で無効化(status=dismissed)。誤検知/誤ラベル/観測不能の約束を索引から外す(殿指摘2026-07-13)。
+    close(完了検知)と区別し、evidenceに理由を残す。返り: 無効化した件数。"""
+    n = 0
+    with _LOCK:
+        recs = _load()
+        for r in recs:
+            if r.get("id") == loop_id and r.get("status") == "open":
+                r["status"] = "dismissed"; r["closed_at"] = _now()
+                r["evidence"] = f"手動無効化: {reason}"[:200]; n += 1
+        if n:
+            _save_all(recs)
+    return n
+
+
 def _probe_now(probe):
     """現状のマッチID集合を返す。エラー時 None(=不明・空と区別)。"""
     t = (probe or {}).get("type")
