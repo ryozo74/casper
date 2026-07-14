@@ -6687,38 +6687,16 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
         final, diagram = render_diagram(final)
-        # 【レガシー記録名の機構的除去(殿指示2026-07-14)】context(RAG/persona/digest)は既にlegacyを除外済ゆえ、
-        # 出力に旧Score記録名(DBM2/legacy_score/旧スコア/レガシー記録)が出るのは弱qwenの捏造(confabulation)。
-        # framing指示で守り切れぬ分を機構で強制(鉄則六)。当該文だけ落とし、正しい「現行データに該当なし」は残す。
-        if re.search(r"DBM2|legacy_score|旧スコア|レガシー|旧Score|EVA|NZ2|GNF", final):
-            _kept = [_s for _s in re.split(r"(?<=。)", final)
-                     if not re.search(r"DBM2|legacy_score|旧スコア|レガシー|旧Score|EVA|NZ2|GNF", _s)]
-            _scrubbed = "".join(_kept).strip()
-            if _scrubbed:                                 # 全消しは避け、残るなら差し替え
-                final = _scrubbed
-        if table_card:                                    # 表カードがある時、本文が重複md表を再現しても機構で剥がす
-            # (qwenが「表を再現するな」指示を無視して全再現する→截ち切れ源。Fable: 服従に頼らず機構で強制)
-            _rows = table_card.get("rows") or []
+        # ※出力の文単位legacyスクラブは撤去(Fable審査2026-07-14): 接地はcontext入口(casper_rag除外)で断つのが本筋。
+        #   bare"legacy/EVA/NZ2"の文単位除去は正当文まで落とし応答を途切れさせる乱暴さ=修辞の破損。入口で断てている
+        #   ゆえ二重防壁の下段(出口)は不要。実ログでlegacy漏れゼロを観測済。
+        if table_card:                                    # 表カードがある時、本文が重複md表を再現しても機構で剥がすのみ
+            # (qwenが「表を再現するな」指示を無視して全再現する→截ち切れ源。Fable: 服従に頼らず機構で強制)。
+            # ※代表名augmentation(「主なものは…全N件は下表の通り」)は撤去(Fable審査: table_cardが名前を網羅済ゆえ
+            #   本文で二重render=蛇足。DM下書き等の非一覧応答にまで漏れ、件数不整合/"test"混入を招いた)。剥がすだけ。
             _nod = [ln for ln in final.split("\n") if not re.match(r"\s*\|.*\|", ln)]   # md表行(|…|)を除去
             _nod_txt = re.sub(r"\n{3,}", "\n\n", "\n".join(_nod)).strip()
-            # 代表名の網羅保証は"名前の列"を持つカードのみ(name_col)。列0がPJ名でないカード(停滞FB=カット番号)で
-            # 「主なものは c012、—」と珍妙になるのを防ぐ(Fable指摘: カードを作った機構がname_colを申告)。
-            _ncol = table_card.get("name_col")
-            _names = []
-            if _ncol is not None:
-                for _r in _rows:
-                    _nm = str(_r[_ncol]) if _r and len(_r) > _ncol and _r[_ncol] else ""
-                    if _nm and _nm != "—" and _nm not in _names:
-                        _names.append(_nm)
-            if _names:
-                _mentioned = sum(1 for _nm in _names if _nm in _nod_txt)
-                if _nod_txt and _mentioned >= min(3, len(_names)):   # 本文が代表名に十分触れている→そのまま
-                    final = _nod_txt
-                else:                                     # 名前が表行に偏り本文が薄い→代表名を1文添え網羅保証(全再現は避ける)
-                    _summ = "、".join(_names[:6])
-                    _lead = _nod_txt or f"{table_card['title']}にござる。"
-                    final = f"{_lead}\n\n主なものは {_summ} 等。全{len(_rows)}件は下表の通り、並べ替えは列見出しから。".strip()
-            elif _nod_txt:                                # name_col無しカード(停滞FB/タスク表)は剥がすのみ
+            if _nod_txt:
                 final = _nod_txt
         if not final.strip() and (diagram or table_card or _sched):   # チャート/表/CSVだけで本文が空(qwenのAURORA前置等)→機構で復元
             if _sched:                                        # 工程表CSV: リンク＋案内を機構で(render_diagramに消されても復元)

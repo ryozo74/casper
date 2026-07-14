@@ -200,29 +200,53 @@ def _all_notifs():
 
 
 def pending(uid, limit=20):
-    """未読通知(新しい順)。停滞FBは"保存時のスナップショット"を凍結せず、表示のたび現データで作り直す
-    (殿指摘2026-07-14: 完了済タスク T57/v1 等を古い通知が「停滞中」と見せ続ける陳腐化を防ぐ。完了は現status
-    が _STALL_STATUS 外ゆえ自動で落ち、今ゼロなら通知自体を出さない=殿の「完了はクローズ扱い」に一致)。"""
+    """未読通知。**volatile な派生通知(停滞FB/納期超過/朝ブリーフ)は type毎に最新1件へ集約し、表示のたび現データで
+    作り直す**(殿指摘2026-07-14: ①同type通知が日をまたいで重複表示される ②完了済タスクを古い通知が停滞/超過中と
+    見せ続ける陳腐化、の両方を断つ)。完了は現状で自動的に落ち、今ゼロなら通知自体を出さない=殿の「完了はクローズ扱い」。"""
     u = str(uid)
+    today = datetime.date.today().isoformat()
+    unread = [n for n in reversed(_all_notifs()) if n.get("uid") == u and not n.get("read")]
+    # ① type毎に最新1件へ集約(重複排除)。新しい順ゆえ最初に出た1件を採る。
+    seen_type = set(); collapsed = []
+    for n in unread:
+        t = n.get("type")
+        if t in ("stalled_fb", "new_overdue", "morning_brief"):
+            if t in seen_type:
+                continue
+            seen_type.add(t)
+        collapsed.append(n)
+    # ② volatile は現データで作り直す(凍結スナップショットを捨てる)
     out = []
-    _fresh = None                                          # 停滞FBの現況(遅延計算・1回のみ)
-    for n in reversed(_all_notifs()):
-        if n.get("uid") != u or n.get("read"):
-            continue
-        if n.get("type") == "stalled_fb":
-            if _fresh is None:
-                try:
-                    _fresh = _stalled_fb(_all_tasks(), datetime.date.today().isoformat())
-                except Exception:
-                    _fresh = []
-            if not _fresh:
-                continue                                   # 今は停滞ゼロ→古い「N件停滞」を出さない
+    for n in collapsed:
+        t = n.get("type")
+        if t == "stalled_fb":
+            fresh = []
+            try:
+                fresh = _stalled_fb(_all_tasks(), today)
+            except Exception:
+                pass
+            if not fresh:
+                continue
             names = [f"{s['shot']} {s['name']}".strip()
-                     for s in sorted(_fresh, key=lambda s: s.get("since") or "9999")[:8]]
-            more = f" ほか{len(_fresh) - 8}件" if len(_fresh) > 8 else ""
-            n = dict(n)                                     # 現データで本文を作り直す(凍結を捨てる)
-            n["title"] = f"⏳ FB/確認が停滞 {len(_fresh)}件"
+                     for s in sorted(fresh, key=lambda s: s.get("since") or "9999")[:8]]
+            more = f" ほか{len(fresh) - 8}件" if len(fresh) > 8 else ""
+            n = dict(n); n["title"] = f"⏳ FB/確認が停滞 {len(fresh)}件"
             n["body"] = f"確認待ちのまま動いていません：{'、'.join(names)}{more}。まとめて催促しますか？"
+        elif t == "new_overdue":
+            od = []
+            try:
+                od = _overdue_projects(today)
+            except Exception:
+                pass
+            if not od:
+                continue                                   # 今は超過ゼロ→古い「N件超過」を出さない
+            lst = "、".join(f"{o['name']}（{o['days']}日超過）" for o in od[:8])
+            more = f" ほか{len(od) - 8}件" if len(od) > 8 else ""
+            n = dict(n); n["title"] = f"🔴 納期超過 {len(od)}件"
+            n["body"] = f"納期超過となっています：{lst}{more}。"
+        elif t == "morning_brief":
+            if str(n.get("dedup_key", "")).endswith(today) is False and n.get("ts", "")[:10] != today:
+                continue                                   # 今日のブリーフでなければ出さない(古い朝ブリーフを消す)
         out.append(n)
         if len(out) >= limit:
             break
