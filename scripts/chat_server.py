@@ -2783,6 +2783,16 @@ _PROJ_LIST_RE = re.compile(r"(動いて(る|いる)|進行中|稼働中|全.{0,2
                            r"(納期|締切|遅れ|遅延|超過).{0,10}(プロジェクト|PJ|案件|一覧|もの|の))", re.I)
 
 # 停滞FB/確認の"一覧"意図(通知の『停滞FB N件』の実体を見せる)。進捗の真実源はCalendar(vault/legacyでなく)。
+# 【二軸classifier】status/進捗(現況=Calendar排他)の問いを検出→vault抑制。知識/文脈の問いはvault許容(現・過去とも)。
+# status語彙: 進捗/状態/どうなってる/停滞/確認待ち/納期超過/締切/残り/件数/アサイン状況/タスクの有無・一覧。
+_STATUS_Q_RE = re.compile(
+    r"進捗|ステータス|状態|どうな(って|ってる|る)|状況|"
+    r"停滞|滞留|確認待ち|止ま(って|った)|動いて(い)?(ない|ません)|"
+    r"納期|締切|〆|超過|遅延|遅れ|オンスケ|on.?schedule|"
+    r"(タスク|作業|task).{0,10}(は\?|ある|残|何件|一覧|教え|見せ|どれ|進|担当|状況|やること)|"
+    r"(残り|あと|未(完|着手)).{0,6}(タスク|作業|は|何)|何件|残件|件数|"
+    r"(担当|アサイン).{0,8}(状況|一覧|は\?|誰|空き|負荷)", re.I)
+
 _STALL_LIST_RE = re.compile(
     r"(停滞|滞留|止ま(って|った)|溜ま(って|った)|たまって).{0,8}(FB|ＦＢ|確認|チェック|検収|レビュー)|"
     r"(FB|ＦＢ|確認|チェック|検収|レビュー).{0,8}(停滞|滞留|止ま|溜ま|たまって)|"
@@ -6374,15 +6384,21 @@ class H(BaseHTTPRequestHandler):
                        f"**回答には必ず次のダウンロードリンクをそのまま改変せず含めよ: {_slink}**。"
                        "『Excelで開け、編集して取り込み直せる』旨を1文添えよ。ガントや全タスクの再掲はするな(冗長)。"
                        "Calendarへ直接反映したい場合は、その旨言えば承認カードで書込む と案内してよい。")
+        # 【二軸classifier(Fable設計2026-07-14): 真実源は"種類軸"で決まる】
+        # status/進捗の問い(現況)は Calendar が排他的真実源。vault(RAG)を注入経路から外す=status質問がvaultに漏れて
+        # legacy/過去知識/捏造を拾う「一つの病」を入口で断つ。table_card等のCalendar機構が発火済ならその母集合が答え。
+        # knowledge/文脈の問いのみ vault を引く(現・過去とも・時間除外は不要=legacyも知識としてなら許容)。
+        _status_q = bool(table_card or _sched or _STATUS_Q_RE.search(ll_user or ""))
         try:
-            hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)   # M2: 意味検索復活(sqlite再ランク・内部で字面フォールバック)
-                    else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
-            if hits:
-                sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
-            src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
-            if fulltext:
-                sysadd += ("\n\n## 該当資料(右脳vault・" + src + ") — サムネ等の画像URL `![](/asset/..)` は"
-                           "ここから一字一句コピーせよ。これに無い画像URLは創作するな:\n" + fulltext[:7000])
+            if not _status_q:                             # knowledge経路のみ vault を引く
+                hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)
+                        else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
+                if hits:
+                    sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
+                src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
+                if fulltext:
+                    sysadd += ("\n\n## 該当資料(右脳vault・" + src + ") — サムネ等の画像URL `![](/asset/..)` は"
+                               "ここから一字一句コピーせよ。これに無い画像URLは創作するな:\n" + fulltext[:7000])
         except Exception:
             pass
         # 会話履歴が長いと入力が num_ctx(12288) を埋め、出力(表等)が途中で切れる=文脈オーバーフロー。
@@ -6693,6 +6709,23 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
         final, diagram = render_diagram(final)
+        # 【出口検問: 存在否定の資格(Fable処方1・掟6 服従でなく機構で強制)】status回答で「PJのタスクが無い/0件/
+        # 登録されていない」と否定する時、そのPJが実際にはCalendarにタスクを持つなら、母集合未確認の嘘(94件を0件)。
+        # framingで頼むだけでは弱qwenが破るゆえ、機構が実データで否定を差し止め訂正する(存在否定は最も重い機構の嘘)。
+        try:
+            _neg_re = re.compile(r"登録され(ていません|ておりません)|1件も(無|な)い|存在しません|見当たりません|"
+                                 r"(タスク|task)[^。]{0,16}(ありません|ございません)")
+            if _status_q and _neg_re.search(final):
+                _online_pjs = json.load(open("/tmp/cal_projects.json")).get("items", [])
+                _hit_pj = next((p for p in _online_pjs if p.get("name") and p["name"] in final), None)
+                if _hit_pj:
+                    _cnt = sum(1 for t in _all_tasks() if t.get("project_id") == _hit_pj.get("id"))
+                    if _cnt > 0:                          # PJ名が出て否定されているが実際はタスク在り→存在否定の嘘を差し止め
+                        final = (f"**{_hit_pj['name']}** には Calendar 上、現在 **{_cnt}件** のタスクが登録されています"
+                                 "（「無い/0件」は母集合を確認せぬ誤りにつき訂正）。"
+                                 "特定の条件（工程・確認待ち等）で絞りたい場合は、条件を明示してくだされ。")
+        except Exception:
+            pass
         # ※出力の文単位legacyスクラブは撤去(Fable審査2026-07-14): 接地はcontext入口(casper_rag除外)で断つのが本筋。
         #   bare"legacy/EVA/NZ2"の文単位除去は正当文まで落とし応答を途切れさせる乱暴さ=修辞の破損。入口で断てている
         #   ゆえ二重防壁の下段(出口)は不要。実ログでlegacy漏れゼロを観測済。

@@ -73,9 +73,10 @@ def _seg_boost(segs, text):
 _EXCLUDE_SRC = ("80_legacy_score",)
 # legacy を主題/引用する chunk の本文マーカー。人物profile(_kiyotomo等)が legacy_score/DBM2 を"源"として
 # 大量引用しRAGで拾われる漏れ(殿指摘2026-07-14)を、chunk単位で断つ。profile内の非legacy部分(役割/氏名)は残る。
-_EXCLUDE_TEXT_RE = re.compile(
-    r"legacy_score|DBM2|旧スコア|80_legacy_score|persona_rnd_legacy|"
-    r"Score\s*(入力|転記|記録|上)|cut別FB|cut別\s*FB", re.I)
+# legacyの明確なマーカーのみ(Fable審査2026-07-14: 「Score(入力|記録|上)」は現行PJの正当文「Scoreに記録済み」等まで
+# 常時消す危険=腐る定数ゆえ撤去)。status質問のlegacy漏れは二軸classifier(vault抑制)が担い、ここは knowledge経路で
+# legacy生データ/分析成果物を落とす最小限に留める。
+_EXCLUDE_TEXT_RE = re.compile(r"legacy_score|80_legacy_score|persona_rnd_legacy|旧スコア", re.I)
 
 
 def _excluded(src, text=""):
