@@ -1662,24 +1662,45 @@ def _thread_is_new(uid, msgs):
     return any(str(m.get("sender_id")) != str(uid) and not m.get("read_at") for m in msgs)
 
 
-# 開発時に注入されたseed/テストDMの判別(殿指摘2026-07-14: Scoreで見つからぬ幻DMを新着に出していた)。
-# 強いseedシグナル: 10000xxx帯のthread_id(システム連番) / システムマーカー本文 / テスト名参加者。実在するDMは残す。
+# 【暫定】開発時に注入されたseed/テストDMの判別(殿指摘2026-07-14: Scoreで見つからぬ幻DMを新着に出していた)。
+# ★これは真実源(Calendar/Nibu)が is_seed フラグを提供するまでの"暫定フィルタ"。閾値/マーカーは腐る定数(鉄則八)ゆえ、
+#   Nibu確認後は Calendar側の is_seed を読むだけに寄せる(判別を機構=真実源へ)。Fable指摘で "test"完全一致は撤去
+#   (実在の人物が本当に「test」とだけDMした時に永久除外する誤除外=false-negativeを避ける)。
 _SEED_MARK_RE = re.compile(r"Task message thread initialized|Thread started\.|thread initialized", re.I)
 _SEED_NAME_RE = re.compile(r"User\s*\d+|Spec\s*Admin", re.I)
 
 
 def _is_seed_thread(t):
-    """seed/テストDMスレッドか。真実源(Calendar messaging)に開発用の投入が残っている分を新着表示から外す。"""
+    """seed/テストDMスレッドか(暫定ヒューリスティック)。真実源が is_seed を返すならそれを優先。"""
+    if isinstance(t.get("is_seed"), bool):                # Nibu が真実源で明示するなら機構を信じる(暫定regex不要)
+        return t["is_seed"]
     try:
-        if int(t.get("thread_id") or 0) >= 10000000:      # 10000000始まりの連番=システム/seed
+        if int(t.get("thread_id") or 0) >= 10000000:      # 10000000始まりの連番=システム/seed(将来採番到達で見直し要)
             return True
     except Exception:
         pass
-    lm = str(t.get("last_message") or "")
-    if _SEED_MARK_RE.search(lm) or lm.strip().lower() == "test":
+    if _SEED_MARK_RE.search(str(t.get("last_message") or "")):
         return True
     names = " ".join(str(p.get("name") or "") for p in (t.get("participants") or []))
     return bool(_SEED_NAME_RE.search(names))
+
+
+def _partition_dm_threads(threads, uid=None):
+    """seed除外を"一本の経路"で(2箇所重複を排す・Fable鉄則五)。返り: (kept, seed_n)。
+    除外件数は必ずログ(消した数を数えぬフィルタは次の機構の嘘になる・Fable)。"""
+    kept, seed_n = [], 0
+    for t in (threads or []):
+        if _is_seed_thread(t):
+            seed_n += 1
+        else:
+            kept.append(t)
+    if seed_n:
+        try:
+            import attention as _a
+            _a._alog(f"dm uid={uid}: seed除外{seed_n}件 / 残{len(kept)}件(暫定フィルタ・Nibu確認待ち)")
+        except Exception:
+            pass
+    return kept, seed_n
 
 
 def dm_threads(who):
@@ -1699,7 +1720,7 @@ def dm_threads(who):
         import concurrent.futures as _cf
         raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
         data = json.loads(raw) if (raw or "").strip().startswith("{") else {}
-        _allt = [t for t in (data.get("threads") or []) if not _is_seed_thread(t)]   # seed/テストDMを除外
+        _allt, _seedn = _partition_dm_threads(data.get("threads") or [], uid)   # seed除外(一本の経路・件数ログ)
         threads = sorted(_allt, key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:20]
         for _t in threads:                              # DM participants から名簿を収穫(RO非依存で恒久cacheが育つ)
             _roster_observe(_t.get("participants"))
@@ -4301,7 +4322,7 @@ def open_briefing(who):
             dm = casper_mcp.call_tool("get_messages", {"actor_id": uid, "limit": 30}, token=WRITE_TOKEN, actor=uid)
             dm_ok = (dm or "").strip().startswith("{")    # 有効JSON→DM取得成功(0件と取得失敗を分ける)
             d = _j.loads(dm) if dm_ok else {}
-            _thr = [t for t in (d.get("threads", []) or []) if not _is_seed_thread(t)]   # seed/テストDMを除外
+            _thr, _seedn = _partition_dm_threads(d.get("threads", []) or [], uid)   # seed除外(一本の経路・件数ログ)
             th = sorted(_thr, key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:15]
             if th:
                 # 未読判定を並列実行(get_messages が1件~2秒ゆえ直列だと遅い→並列で短縮)
@@ -4345,7 +4366,9 @@ def open_briefing(who):
         if not dm_ok:
             fact_line += "新着DMは確認できませんでした。"
         elif unread_n:
-            fact_line += f"新着未読DMが{unread_n}件。"
+            # Fable鉄則二: seedマーカーが無い=実在DMの証明でない。真実源(Nibu)未確認のうちは"確定新着"と名乗らず
+            # 「出所確認中」と格下げして述べる(殿がScoreで見つけられぬDMを確定扱いしていた事故の是正)。
+            fact_line += f"出所確認中のDMが{unread_n}件（Nibu確認待ち）。"
     _al = "未取得" if not task_ok else ("ゼロ" if task_n == 0 else "あり")
     def _gen_greet():
         return strip_think(llm_text(
@@ -4364,7 +4387,8 @@ def open_briefing(who):
             _ex2.shutdown(wait=False)
     except Exception:
         opener = ""
-    opener = re.sub(r"[0-9０-９]+\s*件?", "", opener or "").strip()   # 安全網: qwenが数字を書いても機構が剥がす
+    opener = re.sub(r"[0-9０-９]+\s*件", "", opener or "").strip()   # 安全網: 盛られた"N件"のみ剥がす('件'必須で
+    # C03/Number i/2026年 等の固有名の数字は保護・Fable指摘)。裸の数字は害薄ゆえ触らない(件数は別途機構が述べる)。
     if not opener:
         opener = f"{g}、殿。Casper にござる。"
     greet = (opener.rstrip("。 ") + "。 " + fact_line).strip() if fact_line else opener
@@ -4377,7 +4401,9 @@ def open_briefing(who):
     if task_lines:                                        # 見出しは挨拶が件数を述べる為 省く(上下の空行を作らぬ)
         lines += task_lines
     if dm_lines:
-        lines.append(f"💬 新着DM {unread_n}件（クリックで開く・「○○さんに返信」で代筆可）")
+        # Fable処方: 出所未確認のDMは"確定新着トップ"でなく格下げ見出し＋裏どり導線(クリックで元スレッド)。
+        # Nibu が真実源(is_seed/実DMソース)を確定させたら「💬新着DM」に戻す。
+        lines.append(f"⚠️ 出所確認中のDM {unread_n}件（Nibu確認待ち・クリックで元スレッドを確認）")
         lines += dm_lines
     if uid is None and not who.get("authed"):
         lines.append("ログイン頂ければ、本日のタスク・新着DMもお知らせいたす。")

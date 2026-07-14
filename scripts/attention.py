@@ -191,6 +191,12 @@ def gather(uid):
             mine = _my_pids(uid)
             my_od = [p for p in all_od if str(p["id"]) in mine]
             _alog(f"overdue uid={uid}: 全社{len(all_od)}件中 担当{len(my_od)}件を提示(帰属スコープ)")
+            # 沈黙の劣化を検知(Fable指摘): .casper_owner未設定で統括が担当0overdue→全社ビュー縮退で本来の
+            # 行動項目が消える回帰が再発しうる。担当0かつ全社overdueありなら警告ログ(owner設定漏れの疑い)。
+            _own_set = bool(os.environ.get("CASPER_OWNER_UID", "").strip()) or \
+                os.path.exists(os.path.join(HERE, ".casper_owner"))
+            if not _own_set and not my_od and all_od:
+                _alog(f"⚠️ owner未設定(uid={uid}): 担当overdue 0だが全社{len(all_od)}件あり。統括なら .casper_owner 設定漏れの疑い")
         for p in my_od:
             cands.append({"kind": "overdue", "title": p["name"][:50],
                           "detail": f"納期超過(〆{p['due']})", "score": 40, "ref": p["id"]})
