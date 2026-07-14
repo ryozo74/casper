@@ -71,11 +71,18 @@ def _seg_boost(segs, text):
 # (ファイル列挙=腐る定数を避け、機構的signal=名前の"legacy"で。人物profile(_kiyotomo等)は名にlegacyを持たず温存され、
 #  正当な人物情報は残る。legacyは根拠引用として profile 内に留まり、current回答の一次には出ない)。
 _EXCLUDE_SRC = ("80_legacy_score",)
+# legacy を主題/引用する chunk の本文マーカー。人物profile(_kiyotomo等)が legacy_score/DBM2 を"源"として
+# 大量引用しRAGで拾われる漏れ(殿指摘2026-07-14)を、chunk単位で断つ。profile内の非legacy部分(役割/氏名)は残る。
+_EXCLUDE_TEXT_RE = re.compile(
+    r"legacy_score|DBM2|旧スコア|80_legacy_score|persona_rnd_legacy|"
+    r"Score\s*(入力|転記|記録|上)|cut別FB|cut別\s*FB", re.I)
 
 
-def _excluded(src):
+def _excluded(src, text=""):
     s = str(src or "").lstrip("./").lower()
     if "legacy" in s:                                     # legacy専用資料(生データ＋分析成果物)を一括除外
+        return True
+    if text and _EXCLUDE_TEXT_RE.search(str(text)):       # 本文がlegacyを引用するchunkも除外(どのファイルでも)
         return True
     return any(s == p or s.startswith(p + "/") or s.startswith(p) for p in _EXCLUDE_SRC)
 
@@ -91,7 +98,7 @@ def candidates(query, n=60):
     segs = _segs(query)
     scored = []
     for e in _CACHE:
-        if _excluded(e.get("src")):                # legacy_score(過去DBM2)は進捗汚染源ゆえ除外
+        if _excluded(e.get("src"), e.get("t")):    # legacy(80_legacy_score/DBM2/旧スコア引用)をsrc+本文で除外
             continue
         cg = _tri(e["t"])
         if not cg:
@@ -113,7 +120,7 @@ def search(query, k=8, budget=3800):
     segs = _segs(query)
     scored = []
     for e in _CACHE:
-        if _excluded(e.get("src")):                # legacy_score(過去DBM2)は進捗汚染源ゆえ除外
+        if _excluded(e.get("src"), e.get("t")):    # legacy(80_legacy_score/DBM2/旧スコア引用)をsrc+本文で除外
             continue
         cg = _tri(e["t"])
         if not cg:
