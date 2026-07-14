@@ -241,11 +241,15 @@ def a_choices_option(substr):
 
 
 def a_mentions_online_pjs(minhit=3):
+    """online PJ を minhit 種以上"網羅"しているか。本文＋表カードの両方を見る(Fable審査2026-07-14:
+    PJ一覧は散文でなくカード側が網羅する新設計。本文に名前を並べさせるのは截ち切れの元=蛇足ゆえ、
+    検問対象を本文→カードへ移す。カードが名前を担保していればよい)。"""
     def _f(text, cards):
         names = _online_pj_names()
-        hit = [n for n in names if n and n in text]
+        blob = (text or "") + " " + _table_text(cards)
+        hit = [n for n in names if n and n in blob]
         if len(hit) < minhit:
-            return False, f"online PJ名の言及が{len(hit)}件(>= {minhit}を期待)"
+            return False, f"online PJ名の網羅が{len(hit)}件(本文＋カード)(>= {minhit}を期待)"
         return True, ""
     return _f
 
@@ -305,11 +309,15 @@ def a_not_only(name):
 
 
 def a_min_length(n=60):
-    """回答が途中で切れず十分な内容量か(『途中で止まる』/空応答/はぐらかしを検知)。"""
+    """回答が途中で切れず十分な内容量か(『途中で止まる』/空応答/はぐらかしを検知)。
+    ただし表カード/図が内容を担う時は本文は"継ぎ目の修辞"で短くてよい(Fable審査2026-07-14: カードがあるのに
+    本文の長さを要求するのは蛇足の強制=截ち切れの元。カード有時は最低限の非空だけ検問)。"""
     def _f(text, cards):
         t = (text or "").strip()
-        if len(t) < n:
-            return False, f"回答が短すぎ({len(t)}字 < {n})・途中切れ/空応答の疑い"
+        _has_card = any(c.get("tool") in ("table", "diagram") for c in (cards or []))
+        floor = 15 if _has_card else n                     # カード有=内容はカード側→本文は非空(15字)で足る
+        if len(t) < floor:
+            return False, f"回答が短すぎ({len(t)}字 < {floor})・途中切れ/空応答の疑い"
         return True, ""
     return _f
 
