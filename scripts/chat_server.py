@@ -1662,6 +1662,26 @@ def _thread_is_new(uid, msgs):
     return any(str(m.get("sender_id")) != str(uid) and not m.get("read_at") for m in msgs)
 
 
+# 開発時に注入されたseed/テストDMの判別(殿指摘2026-07-14: Scoreで見つからぬ幻DMを新着に出していた)。
+# 強いseedシグナル: 10000xxx帯のthread_id(システム連番) / システムマーカー本文 / テスト名参加者。実在するDMは残す。
+_SEED_MARK_RE = re.compile(r"Task message thread initialized|Thread started\.|thread initialized", re.I)
+_SEED_NAME_RE = re.compile(r"User\s*\d+|Spec\s*Admin", re.I)
+
+
+def _is_seed_thread(t):
+    """seed/テストDMスレッドか。真実源(Calendar messaging)に開発用の投入が残っている分を新着表示から外す。"""
+    try:
+        if int(t.get("thread_id") or 0) >= 10000000:      # 10000000始まりの連番=システム/seed
+            return True
+    except Exception:
+        pass
+    lm = str(t.get("last_message") or "")
+    if _SEED_MARK_RE.search(lm) or lm.strip().lower() == "test":
+        return True
+    names = " ".join(str(p.get("name") or "") for p in (t.get("participants") or []))
+    return bool(_SEED_NAME_RE.search(names))
+
+
 def dm_threads(who):
     """ログイン中ユーザーのDMスレッド一覧を取得(get_messages相当)。
     書込トークン(per-user)が要る→未発行時は空。{threads:[{id,peer,unread,last,ts}], available:bool}"""
@@ -1679,7 +1699,8 @@ def dm_threads(who):
         import concurrent.futures as _cf
         raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
         data = json.loads(raw) if (raw or "").strip().startswith("{") else {}
-        threads = sorted((data.get("threads") or []), key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:20]
+        _allt = [t for t in (data.get("threads") or []) if not _is_seed_thread(t)]   # seed/テストDMを除外
+        threads = sorted(_allt, key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:20]
         for _t in threads:                              # DM participants から名簿を収穫(RO非依存で恒久cacheが育つ)
             _roster_observe(_t.get("participants"))
 
@@ -4280,7 +4301,8 @@ def open_briefing(who):
             dm = casper_mcp.call_tool("get_messages", {"actor_id": uid, "limit": 30}, token=WRITE_TOKEN, actor=uid)
             dm_ok = (dm or "").strip().startswith("{")    # 有効JSON→DM取得成功(0件と取得失敗を分ける)
             d = _j.loads(dm) if dm_ok else {}
-            th = sorted((d.get("threads", []) or []), key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:15]
+            _thr = [t for t in (d.get("threads", []) or []) if not _is_seed_thread(t)]   # seed/テストDMを除外
+            th = sorted(_thr, key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:15]
             if th:
                 # 未読判定を並列実行(get_messages が1件~2秒ゆえ直列だと遅い→並列で短縮)
                 import concurrent.futures as _cf
