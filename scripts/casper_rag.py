@@ -65,13 +65,18 @@ def _seg_boost(segs, text):
     return sum(min(len(s), 6) * 0.18 for s in segs if s.lower() in t)
 
 
-# 進捗の真実源は Calendar。過去のレガシー記録(2022 DBM2)は"進捗/現況"に混ぜない(殿指摘2026-07-13)。
-# vault側にも進捗は入らない設計ゆえ、legacy_score を RAG から常時除外し current な回答の汚染を断つ。
+# 進捗の真実源は Calendar。過去のレガシー記録(2022 DBM2/旧Score/LINEログ)は"進捗/現況"に混ぜない
+# (殿指摘2026-07-13/14: LINEチャットログはPJ完了段階で入る=そのタスクはクローズ扱い。現行の停滞タスクに legacy を出すな)。
+# パスに "legacy" を含む資料を除外: 80_legacy_score/ の生データ＋ persona_rnd_legacy_score.md の分析成果物 両方を捕捉
+# (ファイル列挙=腐る定数を避け、機構的signal=名前の"legacy"で。人物profile(_kiyotomo等)は名にlegacyを持たず温存され、
+#  正当な人物情報は残る。legacyは根拠引用として profile 内に留まり、current回答の一次には出ない)。
 _EXCLUDE_SRC = ("80_legacy_score",)
 
 
 def _excluded(src):
-    s = str(src or "").lstrip("./")
+    s = str(src or "").lstrip("./").lower()
+    if "legacy" in s:                                     # legacy専用資料(生データ＋分析成果物)を一括除外
+        return True
     return any(s == p or s.startswith(p + "/") or s.startswith(p) for p in _EXCLUDE_SRC)
 
 
