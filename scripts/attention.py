@@ -161,7 +161,8 @@ def gather(uid):
         for lp in (casper_openloop.open_for(uid) or [])[:5]:
             cands.append({"kind": "loop", "title": str(lp.get("title", ""))[:60],
                           "detail": "未了の約束" + (f"(相手:{lp['assignee']})" if lp.get("assignee") else ""),
-                          "score": 30 + _days_since(lp.get("created_at")), "ref": lp.get("id")})
+                          "score": 30 + _days_since(lp.get("created_at")), "ref": lp.get("id"),
+                          "source": lp.get("source")})   # 裏どり導線(元DM)用
     except Exception:
         pass
     # (c) 納期超過PJ — 帰属スコープ: 本人が担当タスクを持つPJのみ(Fable処方: 帰属できない全社事を
@@ -226,7 +227,11 @@ def briefing_lines(uid, include_drafts=True):
         # 視覚的に分ける。断定形でなく"推測"と分かる印にし、確定情報と同じ重みに見せない)。
         def _fmt(c):
             if c["kind"] == "loop":
-                return f"🔗未確認 {c['title']} — {c['detail']}（推測・元DM要確認）"
+                src = c.get("source") or {}
+                tid = src.get("thread_id"); pid = src.get("to_user_id")
+                # 裏どり導線: 元DMがあればクリックで原文へ(推測が実態とずれても一手で戻れる)。無ければ要確認注記。
+                link = f"（[元DMを確認](casper-dm:{tid}:{pid})）" if tid else "（推測・元DM要確認）"
+                return f"🔗未確認 {c['title']} — {c['detail']}{link}"
             return f"{icon.get(c['kind'], '・')} {c['title']} — {c['detail']}"
         out += "\n\n**今日の3件（気にかけどころ）**\n" + "\n".join(_fmt(c) for c in three)
     # 全社の納期超過は"参考(降格見出し)"で。本人の3件に無い分だけ、帰属でなく「参考・担当外」と明示して出す

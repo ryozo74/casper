@@ -58,9 +58,10 @@ def _vimeo_ids(q):
         return None                                        # エラー=不明(空でない)
 
 
-def add(who, title, probe, referent=None, assignee=None, notify=None):
+def add(who, title, probe, referent=None, assignee=None, notify=None, source=None):
     """未了の約束を登録。probe例: {"type":"vimeo","q":"TKP"} / {"type":"asset","name":"X.png"} / {"type":"manual"}。
-    vimeo/asset は登録時の"現状"をbaselineに取り、それを超える新出現で完了判定(=新規アップ/新規ファイル)。"""
+    vimeo/asset は登録時の"現状"をbaselineに取り、それを超える新出現で完了判定(=新規アップ/新規ファイル)。
+    source: 推論の出所(元DM等){thread_id,to_user_id}。裏どり導線(クリックで原文に戻る)に使う(Fable処方3)。"""
     probe = dict(probe or {"type": "manual"})
     if probe.get("type") == "vimeo" and "baseline" not in probe:
         probe["baseline"] = _vimeo_ids(probe.get("q", ""))     # None(エラー)なら check() で後日 re-baseline
@@ -71,7 +72,7 @@ def add(who, title, probe, referent=None, assignee=None, notify=None):
         except Exception:
             probe["baseline"] = None
     rec = {"id": uuid.uuid4().hex[:12], "created_at": _now(), "who": who, "title": title,
-           "referent": referent, "assignee": assignee, "probe": probe,
+           "referent": referent, "assignee": assignee, "probe": probe, "source": source,
            "notify": notify or who, "status": "open", "closed_at": None, "evidence": None}
     with _LOCK:
         with open(STORE, "a", encoding="utf-8") as f:          # 追記(O_APPEND・check()の再load-mergeと直列化)

@@ -6122,10 +6122,17 @@ class H(BaseHTTPRequestHandler):
                                 d = json.loads(mm.group(0)) if mm else {}
                                 if d.get("track") and d.get("keyword") and d.get("kind") in ("vimeo", "asset"):
                                     to = (pend.get("args") or {}).get("to_user_id")
+                                    _tid = None                    # 元DMのthread_id(裏どり導線用・Fable処方3)
+                                    try:
+                                        _rd = json.loads(result) if isinstance(result, str) else result
+                                        _tid = (_rd or {}).get("thread_id")
+                                    except Exception:
+                                        pass
                                     casper_openloop.add(
                                         who=str(actor),
                                         title=f"{_uid_to_name(to)}に「{d['keyword']}」の{'Vimeoアップ' if d['kind']=='vimeo' else '資料提出'}を依頼",
-                                        probe={"type": d["kind"], "q": d["keyword"]}, assignee=_uid_to_name(to))
+                                        probe={"type": d["kind"], "q": d["keyword"]}, assignee=_uid_to_name(to),
+                                        source=({"thread_id": _tid, "to_user_id": to} if _tid else None))
                         except Exception:
                             pass
                 if casper_outbox:                          # 状態を確定(=『送信済』の唯一の真実源)
