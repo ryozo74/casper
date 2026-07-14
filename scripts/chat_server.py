@@ -4231,6 +4231,7 @@ def open_briefing(who):
     g = "おはようございます" if h < 11 else ("こんにちは" if h < 18 else "こんばんは")
     uid = who.get("uid")
     task_n = None                                          # 事実を集め→末尾でCasperが"考えて"挨拶
+    task_ok = False; dm_ok = False                         # 取得成否(失敗とゼロを別出口に・Fable処方2/鉄則一)
     task_lines = []
     task_ctx = ""
     dm_lines = []
@@ -4248,7 +4249,7 @@ def open_briefing(who):
                 items = [it for it in items                # 完了・除外(held/omit) は残務一覧に出さぬ(API category優先)
                          if not _task_is_done(it) and (it.get("status") or "").lower() != "omit"
                          and (it.get("status_category") or "") != "held"]
-                task_n = len(items)
+                task_n = len(items); task_ok = True       # get_today_tasks が有効JSON→取得成功(件数が真)
                 pmap = {}                                 # project_id→PJ名(高精細表示に必須)
                 try:
                     pj = casper_mcp.call_tool("get_projects", {"actor_id": uid}, token=WRITE_TOKEN, actor=uid)
@@ -4277,7 +4278,8 @@ def open_briefing(who):
             pass
         try:
             dm = casper_mcp.call_tool("get_messages", {"actor_id": uid, "limit": 30}, token=WRITE_TOKEN, actor=uid)
-            d = _j.loads(dm) if (dm or "").strip().startswith("{") else {}
+            dm_ok = (dm or "").strip().startswith("{")    # 有効JSON→DM取得成功(0件と取得失敗を分ける)
+            d = _j.loads(dm) if dm_ok else {}
             th = sorted((d.get("threads", []) or []), key=lambda t: str(t.get("updated_at") or ""), reverse=True)[:15]
             if th:
                 # 未読判定を並列実行(get_messages が1件~2秒ゆえ直列だと遅い→並列で短縮)
@@ -4306,31 +4308,49 @@ def open_briefing(who):
                     dm_lines.append(f"🔴 {ts}　[{nm}：{snip}](casper-dm:{t.get('thread_id')}:{pid})")
         except Exception:
             pass
-    # 挨拶は Casper が"考える"(定型テンプレ廃止)。タスクの中身まで踏まえ、気の利いた一言をLLM生成。
-    ctx = (f"時間帯の挨拶語: {g}。本日のタスク {('%d件' % task_n) if task_n is not None else '未取得'}"
-           + (f"(内訳: {task_ctx})" if task_ctx else "")
-           + f"。新着未読DM: {unread_n}件。相手: 殿。")
+    # 【Fable処方2】件数(事実)は機構が確定してテンプレに埋め、qwenには"数字を書くな・枕だけ"と指示。
+    # qwenに件数を渡すと数字を盛る/曖昧化する為(retrieve-then-render徹底・掟2)。取得失敗は「確認できませんでした」で
+    # ゼロと別出口に(鉄則一: 失敗とゼロを同じ出口に流さない=平穏な朝の偽装を防ぐ)。
+    if not (uid and WRITE_TOKEN and casper_mcp):
+        fact_line = ""                                    # 未ログイン等: 件数を騙らない
+    elif not task_ok:
+        fact_line = "本日のタスクは確認できませんでした（Calendar未取得）。"
+    elif task_n == 0:
+        fact_line = "本日締切のタスクはございませぬ。"
+    else:
+        fact_line = f"本日締切のタスクは{task_n}件。"
+    if uid and WRITE_TOKEN and casper_mcp:                 # DMの事実(失敗/0/N件を分ける)
+        if not dm_ok:
+            fact_line += "新着DMは確認できませんでした。"
+        elif unread_n:
+            fact_line += f"新着未読DMが{unread_n}件。"
+    _al = "未取得" if not task_ok else ("ゼロ" if task_n == 0 else "あり")
     def _gen_greet():
         return strip_think(llm_text(
-            "あなたは studio bokan の伴走AI『Casper』。殿への開門の一言を、下記の状況を踏まえ述べよ。"
-            "**短く・親しみやすく**。堅苦しい飾りや古語・詩的表現は使わず、文末だけ軽く『〜にござる』で締める。"
-            "本日のタスク件数(完了は除く)と、あれば着手の一押しを、**1文で**。未読DMがあれば件数だけ添える。"
-            "定型挨拶・締め文句(『お申し付けを』等)は不要。改行なし・一人称。",
-            ctx, num_predict=120)).strip().replace("\n", " ")
-    greet = ""
+            "あなたは studio bokan の伴走AI『Casper』。殿への開門の『枕』(挨拶＋気の利いた一言)を1文で。"
+            "**数字・件数は一切書くな**(件数は別途機構が正確に述べる)。堅苦しい飾り・古語・詩的表現は使わず、"
+            "文末だけ軽く『〜にござる』。定型締め文句(『お申し付けを』等)は不要。改行なし・一人称。",
+            f"時間帯の挨拶語: {g}。本日のタスクは{_al}。相手: 殿。", num_predict=80)).strip().replace("\n", " ")
+    opener = ""
     try:                                                  # 8秒cap: qwen多忙でブリーフィングをhangさせぬ→テンプレ退避
         import concurrent.futures as _cf2
         _ex2 = _cf2.ThreadPoolExecutor(max_workers=1)     # with を使わぬ=8秒超のqwenを待たずに手放す(shutdown wait=False)
         _fut = _ex2.submit(_gen_greet)
         try:
-            greet = _fut.result(timeout=8)
+            opener = _fut.result(timeout=8)
         finally:
             _ex2.shutdown(wait=False)
     except Exception:
-        greet = ""
-    if not greet:                                         # テンプレ退避時もタスク件数入りで味気なくせぬ
-        greet = (f"{g}、殿。本日のタスクは{task_n}件にござる。" if task_n
-                 else f"{g}、殿。Casper にござる。")
+        opener = ""
+    opener = re.sub(r"[0-9０-９]+\s*件?", "", opener or "").strip()   # 安全網: qwenが数字を書いても機構が剥がす
+    if not opener:
+        opener = f"{g}、殿。Casper にござる。"
+    greet = (opener.rstrip("。 ") + "。 " + fact_line).strip() if fact_line else opener
+    try:
+        import attention as _attlog
+        _attlog._alog(f"briefing uid={uid}: task_ok={task_ok}(n={task_n}) dm_ok={dm_ok}(unread={unread_n}) dm_lines={len(dm_lines)}")
+    except Exception:
+        pass
     lines = [greet]
     if task_lines:                                        # 見出しは挨拶が件数を述べる為 省く(上下の空行を作らぬ)
         lines += task_lines
