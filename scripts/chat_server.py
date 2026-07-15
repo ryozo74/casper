@@ -1666,23 +1666,24 @@ def _thread_is_new(uid, msgs):
 # ★これは真実源(Calendar/Nibu)が is_seed フラグを提供するまでの"暫定フィルタ"。閾値/マーカーは腐る定数(鉄則八)ゆえ、
 #   Nibu確認後は Calendar側の is_seed を読むだけに寄せる(判別を機構=真実源へ)。Fable指摘で "test"完全一致は撤去
 #   (実在の人物が本当に「test」とだけDMした時に永久除外する誤除外=false-negativeを避ける)。
-_SEED_MARK_RE = re.compile(r"Task message thread initialized|Thread started\.|thread initialized", re.I)
-_SEED_NAME_RE = re.compile(r"User\s*\d+|Spec\s*Admin", re.I)
+# 内容のテストマーカー: 自動テスト投稿(システム初期化文)・Casper自己疎通テスト・スタブ「test」。
+_SEED_MARK_RE = re.compile(r"Task message thread initialized|Thread started\.|thread initialized|疎通テスト", re.I)
+# テスト"口座"名のみ(Spec Admin)。★"User N"は撤去(Nibu確定2026-07-15: display名未設定の実在人物=Sato等も
+# 「User 55」表示になり、実DMを誤除外していた=false-negative)。実在人物をテスト扱いしない。
+_SEED_NAME_RE = re.compile(r"Spec\s*Admin", re.I)
 
 
 def _is_seed_thread(t):
-    """seed/テストDMスレッドか(暫定ヒューリスティック)。真実源が is_seed を返すならそれを優先。"""
+    """seed/テストDMスレッドか。真実源(Calendar/Nibu)が is_seed を返すならそれを優先。
+    ★ID帯(thread_id>=10000000)での判別は撤去(Nibu確定2026-07-15: この帯は"3人以上の多人数DMの採番帯"であり
+    本番業務DMが7本混在。ID帯除外は実在の多人数DMを幻として隠す誤り=Fableの警告した false-negative)。
+    残す判別は"内容の"テストマーカー(システム初期化文/テスト名参加者)のみ=自動テスト/スタブ投稿を拾う。"""
     if isinstance(t.get("is_seed"), bool):                # Nibu が真実源で明示するなら機構を信じる(暫定regex不要)
         return t["is_seed"]
-    try:
-        if int(t.get("thread_id") or 0) >= 10000000:      # 10000000始まりの連番=システム/seed(将来採番到達で見直し要)
-            return True
-    except Exception:
-        pass
-    if _SEED_MARK_RE.search(str(t.get("last_message") or "")):
+    if _SEED_MARK_RE.search(str(t.get("last_message") or "")):   # 「Task message thread initialized.」等=自動テスト投稿
         return True
     names = " ".join(str(p.get("name") or "") for p in (t.get("participants") or []))
-    return bool(_SEED_NAME_RE.search(names))
+    return bool(_SEED_NAME_RE.search(names))               # User N / Spec Admin 等=スタブ・テスト参加者
 
 
 def _partition_dm_threads(threads, uid=None):
@@ -4386,9 +4387,9 @@ def open_briefing(who):
         if not dm_ok:
             fact_line += "新着DMは確認できませんでした。"
         elif unread_n:
-            # Fable鉄則二: seedマーカーが無い=実在DMの証明でない。真実源(Nibu)未確認のうちは"確定新着"と名乗らず
-            # 「出所確認中」と格下げして述べる(殿がScoreで見つけられぬDMを確定扱いしていた事故の是正)。
-            fact_line += f"出所確認中のDMが{unread_n}件（Nibu確認待ち）。"
+            # Nibu確定2026-07-15: 280xxx/多人数帯とも実業務DMで真実源=Calendarは正常。「出所確認中」格下げは撤去し
+            # 通常の新着DMとして述べる(Scoreで見えぬのは/messagesが当事者スレッドのみ表示する仕様=未同期でない)。
+            fact_line += f"新着未読DMが{unread_n}件。"
     _al = "未取得" if not task_ok else ("ゼロ" if task_n == 0 else "あり")
     def _gen_greet():
         return strip_think(llm_text(
@@ -4423,7 +4424,7 @@ def open_briefing(who):
     if dm_lines:
         # Fable処方: 出所未確認のDMは"確定新着トップ"でなく格下げ見出し＋裏どり導線(クリックで元スレッド)。
         # Nibu が真実源(is_seed/実DMソース)を確定させたら「💬新着DM」に戻す。
-        lines.append(f"⚠️ 出所確認中のDM {unread_n}件（Nibu確認待ち・クリックで元スレッドを確認）")
+        lines.append(f"💬 新着DM {unread_n}件（クリックで開く・「○○さんに返信」で代筆可）")
         lines += dm_lines
     if uid is None and not who.get("authed"):
         lines.append("ログイン頂ければ、本日のタスク・新着DMもお知らせいたす。")
