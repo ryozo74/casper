@@ -38,3 +38,9 @@ scripts/cases_pending.jsonl
 scripts/.casper_dropbox_token
 scripts/casper_embed.db
 scripts/casper_notify_state.json
+
+# === 実行時状態 / push購読(秘匿: 端末のpush認証キー含む) 2026-07-15 ===
+scripts/push_subs.json
+scripts/dm_notify_state.json
+scripts/notify_prefs.json
+scripts/breaker.json

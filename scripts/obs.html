@@ -36,6 +36,12 @@ h1{font-size:22px;font-weight:800;margin:0;letter-spacing:.01em}
 .refresh{background:#1c222c;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12.5px}
 .refresh:hover{border-color:var(--acc)}
 code{background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12px;color:#a8d3ff}
+.daily{display:flex;align-items:flex-end;gap:8px;height:158px;padding-top:8px;overflow-x:auto}
+.daily .col{flex:1 0 auto;min-width:36px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%}
+.daily .colbar{width:66%;background:linear-gradient(180deg,var(--ok),#3aa87f);border-radius:5px 5px 0 0;min-height:2px}
+.daily .coln{font-size:16px;font-weight:800;color:var(--ok);margin-bottom:3px;font-variant-numeric:tabular-nums}
+.daily .cold{font-size:10.5px;color:var(--mut);margin-top:5px;white-space:nowrap}
+.daily .colreq{font-size:10px;color:var(--mut);margin-top:1px}
 </style></head>
 <body><div class="wrap">
 <header>
@@ -52,6 +58,11 @@ code{background:#0b0e13;border:1px solid var(--line);border-radius:5px;padding:1
     <h2>digest 発火率（どの機構が何%の応答で接地したか）</h2>
     <div id="digests"></div>
     <div class="muted" id="droppedNote"></div>
+  </div>
+  <div class="card span12">
+    <h2>日次トレンド — 日ごとに何回"嘘"を止めたか（＝価値の推移・直近14日）</h2>
+    <div id="daily" class="daily"></div>
+    <div class="muted">緑の数字＝その日に出口検問が捏造/味付けを止めた回数。下段＝その日の応答数。</div>
   </div>
   <div class="card span6">
     <h2>共発火（同時に出た digest の組・衝突の実証検出）</h2>
@@ -110,6 +121,12 @@ async function load(){
   document.getElementById('pmax').textContent=(L.max||0)+'s';
   document.getElementById('cardsR').textContent=(d.cards_rate||0)+'%';
   document.getElementById('routedR').textContent=(d.routed_rate||0)+'%';
+  const days=d.daily||[];
+  const dcmax=Math.max(1,...days.map(x=>x.checks));
+  document.getElementById('daily').innerHTML=days.map(x=>{
+    const hpx=Math.round(x.checks/dcmax*112);
+    return `<div class="col"><div class="coln">${x.checks}</div><div class="colbar" style="height:${hpx}px" title="${esc(x.day)} · ${x.n}応答 · p50 ${x.p50}s"></div><div class="cold">${esc(x.day.slice(5))}</div><div class="colreq">${x.n}件</div></div>`;
+  }).join('')||'<div class="muted">データなし</div>';
 }
 load(); setInterval(load,30000);
 </script>

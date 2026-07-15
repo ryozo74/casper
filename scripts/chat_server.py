@@ -73,6 +73,10 @@ try:
 except Exception:
     casper_health = None
 try:
+    import casper_push                             # M3配信: 自前Web Push(VAPID/RFC8291)=先回り通知を閉じてても端末へ
+except Exception:
+    casper_push = None
+try:
     import casper_breaker                          # サーキットブレーカー(依存ごと縮退/自動復帰・Fable北極星 柱2)
 except Exception:
     casper_breaker = None
@@ -152,8 +156,16 @@ DIRTY_USERS = {}                          # ukey -> 直近活動ts(要更新)
 PROFILE_BUILT = {}                        # ukey -> 最終生成ts(クールダウン)
 
 
+# 平文token退避(M2秘匿): 機微値を ext4 home の ~/.config/casper/secrets.env(0600) から os.environ へ載せる。
+# 以降の全ての os.environ.get(TOKEN/SECRET) が home 値を第一優先で拾う(9p上の平文ファイルは fallback に降格)。
+try:
+    import casper_secrets as _casper_secrets
+    _casper_secrets.load_into_env()
+except Exception:
+    pass
+
 # Casper 独自の署名鍵(Score とは分離)。本人確認は Calendar /api/auth/token で行い、JWT は Casper 自前で署名。
-# 固定鍵: env > .casper_secret ファイル(再起動で不変=ログイン維持) > 無ければ生成して保存。
+# 固定鍵: env(home secrets.env含む) > .casper_secret ファイル(再起動で不変=ログイン維持) > 無ければ生成して保存。
 JWT_SECRET = os.environ.get("CASPER_JWT_SECRET", "")
 if not JWT_SECRET:
     _secf = os.path.join(HERE, ".casper_secret")
@@ -1152,7 +1164,16 @@ def identify(handler):
         ck.load(handler.headers.get("Cookie", "") or "")
     except Exception:
         pass
-    uid = (handler.headers.get("X-Actor-User-Id", "") or "").strip()   # 組込み host が検証済の uid
+    # 【送信者詐称の是正・M2秘匿(2026-07-15)】X-Actor-User-Id は誰でも付けられるヘッダゆえ、無条件に信じると
+    # LAN上の第三者が任意uid(例:殿=28)へ成りすませる(bind=0.0.0.0:8770=LAN公開)。現状 inbound で本ヘッダを正当に
+    # 送る送り手は皆無(唯一の設定箇所 casper_mcp は Casper→Calendar の outbound)。ゆえ信じるのは①loopback発
+    # ②host共有secret一致 の時のみに機構で限定し、それ以外は JWT(casper_token)検証のみを認証とする(なりすまし機構否定)。
+    _xactor = (handler.headers.get("X-Actor-User-Id", "") or "").strip()
+    _cip = handler.client_address[0] if getattr(handler, "client_address", None) else ""
+    _origin_ok = _cip in ("127.0.0.1", "::1", "localhost")
+    _hsec = os.environ.get("CASPER_HOST_SECRET", "")
+    _secret_ok = bool(_hsec) and (handler.headers.get("X-Casper-Host-Secret", "") == _hsec)
+    uid = _xactor if (_xactor and (_origin_ok or _secret_ok)) else ""   # 信頼できるoriginのみ header を採用
     email = ""
     authed = bool(uid)
     if not uid:
@@ -1659,6 +1680,8 @@ def _thread_is_new(uid, msgs):
     newest = max(msgs, key=lambda m: str(m.get("created_at") or m.get("ts") or m.get("id") or ""))
     if str(newest.get("sender_id")) == str(uid):
         return False
+    # 真実源 read_at で判定(Nibu action A 2026-07-15: get_messages が read_at/is_read を正しく返すよう是正済。
+    # 暫定 local overlay は撤去し真実源一本に戻した)。相手発の未読(read_at無し)が1通でもあれば新着。
     return any(str(m.get("sender_id")) != str(uid) and not m.get("read_at") for m in msgs)
 
 
@@ -1753,6 +1776,54 @@ def dm_threads(who):
     except Exception as e:
         _dmlog(f"ERR uid={uid}: {e}")
         return {"available": False, "threads": [], "error": str(e)[:120]}
+
+
+_DM_NOTIFY_STATE = os.path.join(HERE, "dm_notify_state.json")   # uid -> {thread_id: 最後に処理した updated_at}
+
+
+def _dm_notify_check(uid):
+    """新着DM(相手発の未読)を検知し、前回未通知の新規スレッドだけ返す(M3先回りのDM着信版)。
+    read_at 真実源で判定。updated_at 差分で変化したスレッドだけ深掘り=Calendar負荷を抑える。
+    初回は現状を"既知"として記録し push しない(起動時に既存backlogを一斉通知しない)。
+    プライバシ: 返すのは差出人名と thread_id のみ・DM本文は state にも通知にも残さない。"""
+    if not (WRITE_TOKEN and casper_mcp and uid):
+        return []
+    try:
+        raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
+        threads = json.loads(raw).get("threads", []) if (raw or "").strip().startswith("{") else []
+    except Exception:
+        return []
+    try:
+        st = json.load(open(_DM_NOTIFY_STATE, encoding="utf-8"))
+    except Exception:
+        st = {}
+    seen = st.get(str(uid), {})
+    first = str(uid) not in st
+    fresh, new_seen = [], {}
+    for t in threads:
+        if _is_seed_thread(t):
+            continue
+        tid = str(t.get("thread_id"))
+        ts = str(t.get("updated_at") or "")
+        new_seen[tid] = ts
+        if first or seen.get(tid) == ts:              # 初回=既知扱い / 変化なし=深掘り不要(軽量スキップ)
+            continue
+        try:                                          # 変化あり: 相手発の未読か確認(自分の送信でtsが動いた場合を除外)
+            r = casper_mcp.call_tool("get_messages", {"actor_id": int(uid), "thread_id": int(tid)},
+                                     token=WRITE_TOKEN, actor=uid)
+            msgs = json.loads(r).get("messages", []) if (r or "").strip().startswith("{") else []
+        except Exception:
+            new_seen[tid] = seen.get(tid, "")         # 確認失敗→ts進めず次回再試行
+            continue
+        if _thread_is_new(uid, msgs):                 # 相手発の未読あり=新着DM
+            peers = [p for p in (t.get("participants") or []) if str(p.get("user_id")) != str(uid)]
+            fresh.append({"id": tid, "peer": "、".join(str(p.get("name") or p.get("user_id")) for p in peers[:3])})
+    st[str(uid)] = new_seen
+    try:
+        json.dump(st, open(_DM_NOTIFY_STATE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+    return fresh
 
 
 def dm_messages(who, thread_id):
@@ -3615,6 +3686,7 @@ def trace_stats(limit=5000):
             pass
     n = len(recs) or 1
     dig = collections.Counter(); cofire = collections.Counter(); fastpath = collections.Counter()
+    daily = {}   # 日次トレンド(Fable M2完了条件「日次で見える」): day -> {n, checks, lat[]}
     checks = {"validated": 0, "guarded_claim": 0, "gloss": 0, "vch": 0, "salvaged": 0, "echoed": 0, "abstained": 0}
     dropped = collections.Counter()
     lat = []; cards_n = routed_n = 0
@@ -3627,9 +3699,20 @@ def trace_stats(limit=5000):
                 cofire[" + ".join(sorted((fired[i], fired[j])))] += 1
         for d in (r.get("digests_dropped") or []):
             dropped[d] += 1
+        _rc = 0
         for k in checks:
             if r.get(k):
                 checks[k] += 1
+                _rc += 1
+        _day = str(r.get("ts") or "")[:10]                 # 日次バケット(ts=ISO ゆえ先頭10桁=YYYY-MM-DD)
+        if _day:
+            b = daily.get(_day)
+            if b is None:
+                b = daily[_day] = {"n": 0, "checks": 0, "lat": []}
+            b["n"] += 1
+            b["checks"] += _rc
+            if isinstance(r.get("gen_sec"), (int, float)):
+                b["lat"].append(r["gen_sec"])
         fastpath[r.get("fastpath") or "—(qwen)"] += 1
         if isinstance(r.get("gen_sec"), (int, float)):
             lat.append(r["gen_sec"])
@@ -3638,6 +3721,11 @@ def trace_stats(limit=5000):
         if r.get("routed"):
             routed_n += 1
     lat.sort()
+    _daily = []
+    for _d in sorted(daily.keys())[-14:]:                  # 直近14日ぶんの日次推移
+        _b = daily[_d]; _lt = sorted(_b["lat"])
+        _daily.append({"day": _d, "n": _b["n"], "checks": _b["checks"],
+                       "p50": (round(_lt[len(_lt) // 2], 1) if _lt else 0)})
 
     def pct(p):
         return round(lat[min(len(lat) - 1, int(len(lat) * p))], 1) if lat else 0
@@ -3653,6 +3741,7 @@ def trace_stats(limit=5000):
         "fastpath": [{"name": k, "count": v, "rate": round(v / n * 100)} for k, v in fastpath.most_common()],
         "latency": {"p50": pct(0.5), "p90": pct(0.9), "max": (round(lat[-1], 1) if lat else 0)},
         "cards_rate": round(cards_n / n * 100), "routed_rate": round(routed_n / n * 100),
+        "daily": _daily,
     }
 
 
@@ -5240,6 +5329,13 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e), "n": 0})
             return
+        elif self.path == "/api/push/key":              # M3 Web Push: VAPID公開鍵(applicationServerKey)
+            self._json({"key": casper_push.vapid_public_b64() if casper_push else ""})
+            return
+        elif self.path == "/api/push/prefs":            # M3③: 型別通知ON/OFF設定を返す(本人)
+            who = identify(self); uid = who.get("uid")
+            self._json(casper_push.get_prefs(uid) if (casper_push and uid) else {})
+            return
         elif self.path == "/api/notifications":         # M3: 先回り通知(未読)。本人のもののみ。
             who = identify(self)
             uid = who.get("uid")
@@ -5439,6 +5535,43 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(b)
             else:
                 self.send_response(404); self.end_headers()
+        elif self.path in ("/casper-ca.crt", "/casper-ca.pem"):   # ローカルCA証明書を配布(端末に信頼インストール→携帯Web Push可)
+            cp = os.path.join(os.path.expanduser("~"), ".config", "casper", "casper_ca.pem")
+            if os.path.exists(cp):
+                b = open(cp, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-x509-ca-cert")
+                self.send_header("Content-Disposition", "attachment; filename=casper-ca.crt")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+            else:
+                self.send_response(404); self.end_headers()
+        elif self.path == "/manifest.json":         # PWA manifest(iOS: ホーム画面追加→standalone→Web Push可)
+            man = json.dumps({
+                "name": "Casper", "short_name": "Casper", "start_url": "/", "scope": "/",
+                "display": "standalone", "background_color": "#0b1220", "theme_color": "#0b1220",
+                "icons": [{"src": "/icon", "sizes": "192x192", "type": "image/jpeg"},
+                          {"src": "/icon", "sizes": "512x512", "type": "image/jpeg"}]
+            }, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+            self.send_header("Content-Length", str(len(man)))
+            self.end_headers()
+            self.wfile.write(man)
+        elif self.path == "/sw.js":                 # M3 Web Push: Service Worker(root scope で配信=全体を制御)
+            swp = os.path.join(HERE, "sw.js")
+            if os.path.exists(swp):
+                b = open(swp, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Service-Worker-Allowed", "/")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+            else:
+                self.send_response(404); self.end_headers()
         elif self.path == "/api/prewarm":          # 先回りウォーム(Fable): 入力focus時に叩き、打っている間にqwenをロード
             if BACKEND not in ("claude_cli", "anthropic") and not _qwen_is_warm():
                 def _warm():
@@ -5594,6 +5727,51 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", "casper_token=; Path=/; Max-Age=0")
             b = b'{"ok":true}'
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+            return
+        if self.path == "/api/push/subscribe":          # M3 Web Push: ブラウザ購読を登録(本人のみ)
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            uid = who.get("uid")
+            sub = req.get("subscription") or req
+            if not (who.get("authed") and uid and casper_push and sub.get("endpoint")):
+                self._json({"ok": False, "reason": "unauth or no endpoint"}); return
+            try:
+                self._json({"ok": True, "count": casper_push.add_sub(uid, sub)})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/push/prefs":              # M3③: 型別通知ON/OFF設定を保存(本人)
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self); uid = who.get("uid")
+            if not (who.get("authed") and uid and casper_push):
+                self._json({"ok": False}); return
+            self._json({"ok": True, "prefs": casper_push.set_prefs(uid, req.get("prefs") or req)})
+            return
+        if self.path == "/api/aurora/upload":           # ファイル(HTML)を Aurora 資料としてアップ(ドロップ→ツール選択)
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            uid = who.get("uid")
+            if not (who.get("authed") and uid and casper_aurora and casper_aurora.configured()):
+                self._json({"ok": False, "error": "未認証 or Aurora未接続"}); return
+            title = str(req.get("title") or req.get("filename") or "無題").strip()
+            html = req.get("content") or ""
+            project = str(req.get("project") or "社内").strip() or "社内"
+            tags = req.get("tags") or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in re.split(r"[,\s、]+", tags) if t.strip()]
+            if not str(html).strip():
+                self._json({"ok": False, "error": "本文が空"}); return
+            try:
+                res = casper_aurora.create(title, html, author_id=str(uid), project=project, tags=tags)
+                d = json.loads(res) if isinstance(res, str) and res.strip().startswith("{") else (res or {})
+                slug = (d.get("slug") or d.get("id") or "") if isinstance(d, dict) else ""
+                url = (casper_aurora.doc_base() + "/doc/" + slug) if slug else ""
+                self._json({"ok": bool(slug), "url": url, "title": title})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
             return
         if self.path in ("/api/threads/list", "/api/threads/get", "/api/threads/save", "/api/threads/delete"):
             n = int(self.headers.get("Content-Length", 0))
@@ -7005,6 +7183,15 @@ def _events_puller():
             if casper_openloop:                             # 完了は open_loop_digest が"最近完了"として利用者へ先読み報告
                 for r in (casper_openloop.check() or []):
                     print(f"[openloop] closed: {r.get('title')} — {r.get('evidence')}", flush=True)
+                    _nuid = str(r.get("notify") or r.get("who") or "")   # M3①: 約束完了を本人へpush(型ON/OFF尊重)
+                    if casper_push and _nuid and casper_push.type_enabled(_nuid, "open_loop"):
+                        try:
+                            casper_push.push_to_uid(_nuid, {
+                                "title": "✅ 約束が完了しました",
+                                "body": str(r.get("title") or "")[:180],
+                                "tag": "casper-openloop", "url": "/", "sticky": False})
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -7052,20 +7239,129 @@ def _notify_scheduler():
     import threading, time as _t
     if not casper_notify:
         return
-    uids = [u.strip() for u in os.environ.get("CASPER_NOTIFY_UIDS", "28").split(",") if u.strip()]
+    base_uids = [u.strip() for u in os.environ.get("CASPER_NOTIFY_UIDS", "28").split(",") if u.strip()]
     interval = int(os.environ.get("CASPER_NOTIFY_INTERVAL", "900"))   # 秒(既定15分)
+
+    def _targets():
+        """通知を配る対象uid(動的): 既定(殿)＋push購読のある全ユーザー。誰でも🔔購読すれば自分の通知が届く。
+        各uidの通知は compute(uid)/_dm_notify_check(uid) が本人のタスク/DMに絞って算出(帰属の混線なし)。"""
+        u = list(base_uids)
+        try:
+            if casper_push:
+                for x in casper_push.subscribed_uids():
+                    if x not in u:
+                        u.append(x)
+        except Exception:
+            pass
+        return u
+
+    def _push_new(uid, notifs):
+        """M3配信: 新規の割り込みだけを殿の端末へ Web Push(閉じてても届く)。compute()がdedup済ゆえ再pushしない。"""
+        if not (casper_push and notifs):
+            return
+        for n in notifs:
+            if not casper_push.type_enabled(uid, n.get("type") or ""):   # 型別ON/OFF(ユーザー設定)
+                continue
+            try:
+                casper_push.push_to_uid(uid, {
+                    "title": n.get("title") or "Casper",
+                    "body": (n.get("body") or "")[:180],
+                    "tag": n.get("type") or "casper",
+                    "url": "/",
+                    "sticky": n.get("level") == "warn",
+                })
+            except Exception:
+                pass
+
+    def _propose_stalls(uid, notifs):
+        """M3②: 停滞FBの催促DMを承認カード(outbox proposed)として先行生成。宛先=assigned_to別にまとめ、
+        本人が開けば1タップ承認で送れる状態にしておく。純機構の定型文(LLM非使用)。dedupはoutbox側(同一key)。"""
+        if not casper_outbox:
+            return
+        for n in notifs:
+            if n.get("type") != "stalled_fb":
+                continue
+            by = {}
+            for it in ((n.get("action") or {}).get("items") or []):
+                a = str(it.get("assigned_to") or "")
+                if a and a != str(uid):
+                    by.setdefault(a, []).append(it)
+            for aid, its in by.items():
+                lst = "、".join(f"{(it.get('shot') or '')} {(it.get('name') or '')}".strip() for it in its[:8])
+                body = ("お疲れ様です。下記の確認が滞っております。お手すきにご確認いただけますと助かります。\n・" + lst)
+                args = {"to_user_id": int(aid) if aid.isdigit() else aid, "body": body}
+                try:
+                    casper_outbox.propose("send_message", args, str(uid),
+                                          _action_summary("send_message", args), origin="auto")
+                except Exception:
+                    pass
 
     def _loop():
         _t.sleep(20)                                   # 起動直後は少し待つ(索引ロード等の混雑回避)
         while True:
             try:
-                casper_notify.tick(uids)
+                for uid in _targets():
+                    new = casper_notify.compute(uid)   # dedup済=新規イベントのみ返る(状態はcompute内で更新)
+                    if new:
+                        casper_notify.store(uid, new)  # ストアへ積む(pull表示用)
+                        _push_new(uid, new)            # 端末へpush(配信)
+                        _propose_stalls(uid, new)      # 催促DM下書きを承認カードとして先行生成(M3②)
             except Exception:
                 pass
             _t.sleep(interval)
     threading.Thread(target=_loop, daemon=True).start()
 
+    # DM着信は時間に敏感ゆえ、政策ティックとは別に速い巡回(既定2分)で見張り、新着だけをpush(殿御下問2026-07-15)
+    dm_interval = int(os.environ.get("CASPER_DM_TICK", "120"))     # 秒(0で無効)
+
+    def _dm_loop():
+        _t.sleep(30)
+        while True:
+            try:
+                for uid in _targets():
+                    if not (casper_push and casper_push.type_enabled(uid, "dm")):   # DM通知OFFなら巡回スキップ
+                        continue
+                    fresh = _dm_notify_check(uid)
+                    if fresh:
+                        n = len(fresh)
+                        peers = "、".join(sorted({f["peer"] for f in fresh if f.get("peer")}))
+                        casper_push.push_to_uid(uid, {
+                            "title": (f"💬 新着DM {n}件" if n > 1 else "💬 新着DM"),
+                            "body": (f"{peers} より" if peers else "新しいDMが届きました"),
+                            "tag": "casper-dm", "url": "/", "sticky": True})
+            except Exception:
+                pass
+            _t.sleep(max(60, dm_interval))
+    if dm_interval > 0 and casper_push:
+        threading.Thread(target=_dm_loop, daemon=True).start()
+
 
 print(f"Casper chat -> http://localhost:{A.port}  (model {A.model} @ {A.endpoint})", flush=True)
 _notify_scheduler()                                    # M3: 常駐スケジューラ起動(先回り通知)
+
+# HTTPS リスナー(別ポート・非破壊): Web Push の購読はセキュアコンテキスト必須ゆえ、携帯/別端末が https で入れるように。
+# 既存 http(8770)はそのまま。証明書(~/.config/casper/casper_cert.pem)が在る時だけ起動。
+def _start_https():
+    hp = int(os.environ.get("CASPER_HTTPS_PORT", "8443"))
+    cdir = os.path.join(os.path.expanduser("~"), ".config", "casper")
+    cert = os.path.join(cdir, "casper_cert.pem")
+    key = os.path.join(cdir, "casper_key.pem")
+    if hp <= 0 or not (os.path.exists(cert) and os.path.exists(key)):
+        return
+    try:
+        import ssl as _ssl, threading as _th
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+
+        def _serve():
+            httpsd = ThreadingHTTPServer(("0.0.0.0", hp), H)
+            httpsd.socket = ctx.wrap_socket(httpsd.socket, server_side=True)
+            print(f"Casper chat -> https://localhost:{hp}  (Web Push対応・TLS)", flush=True)
+            httpsd.serve_forever()
+        _th.Thread(target=_serve, daemon=True).start()
+    except Exception as _e:
+        print(f"[https] 起動失敗: {_e}", flush=True)
+
+
+_start_https()
 ThreadingHTTPServer(("0.0.0.0", A.port), H).serve_forever()

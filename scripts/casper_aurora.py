@@ -11,6 +11,12 @@ import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+try:                                # 平文token退避(M2秘匿): home secrets.env(0600)の AURORA_* を env に載せる
+    import casper_secrets
+    casper_secrets.load_into_env()
+except Exception:
+    pass
+
 
 def _conf():
     """AURORA_MCP_URL / AURORA_TOKEN を .casper_aurora or env から。未設定は ('','')。"""
@@ -36,10 +42,72 @@ def configured():
     return bool(u and t)
 
 
+# ---- 自己修復リゾルバ(nina_notepc_02 は notebook で DHCP により IP が変動する。設定は hostname のまま保ち、
+#      叩けない時だけ LAN(192.168.44.x) で :8100 を自動発見して IP を差し込む。発見IPはキャッシュし次回warm start) ----
+_AURORA_IP_CACHE = os.path.join(os.path.expanduser("~"), ".config", "casper", "aurora_ip")
+
+
+def _reachable(url):
+    """MCP URL のホストが今叩けるか(軽い疎通)。4xxでも到達=Trueとみなす。"""
+    import urllib.request, urllib.error
+    base = re.sub(r"/mcp/?$", "", url).rstrip("/")
+    try:
+        urllib.request.urlopen(base + "/", timeout=3)
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
+def _discover_ip(port=8100):
+    """LAN(192.168.44.x)で :port を開くホストを1つ返す(nina_notepc_02のDHCP変動対策)。"""
+    import urllib.request, urllib.error, concurrent.futures as _cf
+
+    def probe(i):
+        ip = "192.168.44.%d" % i
+        try:
+            urllib.request.urlopen("http://%s:%d/" % (ip, port), timeout=1)
+            return ip
+        except urllib.error.HTTPError:
+            return ip
+        except Exception:
+            return None
+    with _cf.ThreadPoolExecutor(max_workers=64) as ex:
+        for r in ex.map(probe, range(1, 255)):
+            if r:
+                return r
+    return None
+
+
+def _resolved_url():
+    """叩ける Aurora MCP URL を返す。設定URL(hostname)がそのまま届けばそれを、駄目ならキャッシュIP→自動発見の順。"""
+    url, _ = _conf()
+    if not url or _reachable(url):
+        return url
+    host = re.sub(r"^https?://", "", url).split("/")[0].split(":")[0]
+    try:
+        ip = open(_AURORA_IP_CACHE, encoding="utf-8").read().strip()
+        if ip and _reachable(url.replace(host, ip, 1)):
+            return url.replace(host, ip, 1)
+    except Exception:
+        pass
+    ip = _discover_ip()
+    if ip:
+        try:
+            os.makedirs(os.path.dirname(_AURORA_IP_CACHE), exist_ok=True)
+            open(_AURORA_IP_CACHE, "w", encoding="utf-8").write(ip)
+        except Exception:
+            pass
+        return url.replace(host, ip, 1)
+    return url
+
+
 # ---- 接続層(Elvis殿のMCPへ・既存プロトコル流用) -------------------------
 def _call(name, args):
-    """Aurora MCP ツール呼出。未設定なら None。create/append は Elvis殿実装後に有効。"""
-    url, tok = _conf()
+    """Aurora MCP ツール呼出。未設定なら None。URLは自己修復リゾルバ経由(IP変動に耐える)。"""
+    _, tok = _conf()
+    url = _resolved_url()
     if not (url and tok):
         return None
     try:

@@ -2,10 +2,15 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Casper — Chat</title>
 <link rel="icon" type="image/jpeg" href="/icon">
 <link rel="apple-touch-icon" href="/icon">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Casper">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b1220">
 <style>
   :root{ --bg:#0b0f17; --panel:#121826; --panel2:#0e1420; --line:#1f2937;
          --txt:#e5e7eb; --mut:#94a3b8; --accent:#38bdf8; --me:#1e293b; }
@@ -191,6 +196,30 @@
   .ulsubmit{background:linear-gradient(135deg,var(--accent),#6366f1);color:#06121f;border:0;border-radius:10px;padding:9px 16px;font-weight:700;cursor:pointer;margin-top:8px}
   .dragover{outline:2px dashed var(--accent);outline-offset:-6px}
   @keyframes bl{50%{opacity:0}}
+
+  /* ── 携帯レイアウト(2026-07-15): 狭幅で溢れるヘッダ等を整える。iOS PWAのnotch/ホームバーもsafe-areaで避ける ── */
+  header{padding-top:max(14px,env(safe-area-inset-top));padding-left:max(20px,env(safe-area-inset-left));padding-right:max(20px,env(safe-area-inset-right))}
+  footer{padding-bottom:max(14px,env(safe-area-inset-bottom));padding-left:max(20px,env(safe-area-inset-left));padding-right:max(20px,env(safe-area-inset-right))}
+  @media (max-width:640px){
+    header{padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top));gap:8px}
+    header h1{font-size:19px}
+    header .logo{width:26px;height:26px}
+    header .nav{gap:5px;margin-left:6px;overflow-x:auto;flex:1 1 auto;min-width:0;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+    header .nav::-webkit-scrollbar{display:none}
+    header .nav a{font-size:11.5px;padding:5px 8px;white-space:nowrap}
+    header #today{display:none}                 /* 日付は隠して幅を確保 */
+    header #status{display:none}                 /* 接続dotは隠す(健全時) */
+    header .dot#who{margin-left:auto;font-size:11.5px;max-width:38vw;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    #menubtn{width:34px;height:34px;font-size:16px}
+    #log{padding:14px 12px}
+    .wrap{gap:12px}
+    .msg{gap:9px}
+    .msg .av{width:26px;height:26px}
+    .msg .bubble{font-size:14.5px;padding:10px 12px}
+    footer{padding:10px 12px;padding-bottom:max(10px,env(safe-area-inset-bottom))}
+    textarea#inp{font-size:16px}                 /* iOSで16px未満だと入力時に自動ズームする→16pxで防ぐ */
+    #sidebar{width:min(280px,86vw)}
+  }
 </style>
 <script type="module">
   // Mermaid: 工程/流れ/関係/タイムライン図を text から描画 (Canvas/Artifacts 方式の第一歩)
@@ -205,7 +234,7 @@
 <header>
   <button id="menubtn" title="スレッド一覧">☰</button>
   <div><h1 onclick="location.reload()" style="cursor:pointer" title="クリックで再読込">Casper</h1></div>
-  <nav class="nav"><a href="/learn">🧠 Casperに教える</a><a href="/play">🎲 Casperと遊ぶ</a><a href="/seiri">🧹 Casperで整理</a><a href="/peek">🔮 Casperをのぞく</a></nav>
+  <nav class="nav"><a href="/learn">🧠 Casperに教える</a><a href="/play">🎲 Casperと遊ぶ</a><a href="/seiri">🧹 Casperで整理</a><a href="/peek">🔮 Casperをのぞく</a><a href="#" id="pushbtn" title="この端末に先回り通知(納期超過・FB停滞・朝ブリーフ)を届ける">🔔 通知</a></nav>
   <span id="today" style="color:var(--mut);font-size:12px;margin-left:auto"></span>
   <div class="dot" id="who" title="ログイン"><span id="whoav">👤</span> <span id="whoname">ゲスト</span></div>
   <div class="dot" id="status"><b></b><span>接続確認中…</span></div>
@@ -270,6 +299,7 @@ function el(role){
   const b=document.createElement('div'); b.className='bubble'; m.appendChild(b);
   wrap.appendChild(m); log.scrollTop=log.scrollHeight; return b;
 }
+try{ window.el=el; }catch(_){}   // 別script(通知IIFE等)から el を使えるよう公開
 function attachEdit(msgDiv, idx, text){
   // 誤発言の地点まで巻き戻して編集(ロールバック)。idx=この発言の履歴位置。
   const e=document.createElement('span'); e.textContent='✏️ 編集';
@@ -898,10 +928,10 @@ async function dropboxTransferFiles(files){
   }else{ render(b,'📦 まとめリンクの作成に失敗いたした: '+esc(sh.error||'不明')+'（'+okn+'件はアップ済）'); }
   log.scrollTop=log.scrollHeight;
 }
-// ドラッグ&ドロップ: ファイルを画面に落とすと Dropbox へ転送(複数可・オーバーレイ表示)
+// ドラッグ&ドロップ: 落としたファイルは"ツールを選んで"処理(殿方針2026-07-15: Dropbox自動転送は廃止・拡張子で候補提示)
 (function(){
   const ov=document.createElement('div'); ov.id='dropov';
-  ov.innerHTML='<div style="pointer-events:none">📦 ドロップで Dropbox へ転送<br><span style="font-size:14px;opacity:.8">複数ファイル可</span></div>';
+  ov.innerHTML='<div style="pointer-events:none">📎 ドロップ → ツールを選択<br><span style="font-size:14px;opacity:.8">動画=Vimeo / HTML=Aurora / Dropbox など</span></div>';
   ov.style.cssText='position:fixed;inset:14px;z-index:9999;display:none;flex-direction:column;align-items:center;justify-content:center;'
     +'background:rgba(10,15,25,.78);backdrop-filter:blur(2px);border:3px dashed #38bdf8;border-radius:16px;font-size:22px;color:#cfe8ff;text-align:center';
   document.body.appendChild(ov);
@@ -911,8 +941,73 @@ async function dropboxTransferFiles(files){
   window.addEventListener('dragover',e=>{ if(ov.style.display==='flex') e.preventDefault(); });
   window.addEventListener('dragleave',e=>{ if(hasFiles(e)){ cnt--; if(cnt<=0){ cnt=0; ov.style.display='none'; } } });
   window.addEventListener('drop',e=>{ if(ov.style.display==='flex'){ e.preventDefault(); cnt=0; ov.style.display='none';
-    const fs=e.dataTransfer.files; if(fs&&fs.length) dropboxTransferFiles(fs); } });
+    const fs=e.dataTransfer.files; if(fs&&fs.length) onFilesDropped(fs); } });
 })();
+
+// ドロップ/選択したファイルの種類を見て"扱うツール"を提示(自動振り分けせず殿に選ばせる・殿方針2026-07-15)
+function fileKind(f){
+  const n=(f.name||'').toLowerCase(), t=f.type||'';
+  if(t.startsWith('image/')) return 'image';
+  if(t.startsWith('video/')||/\.(mp4|mov|mkv|avi|webm|m4v)$/.test(n)) return 'video';
+  if(/\.(html?|htm)$/.test(n)) return 'html';
+  if(/\.(md|pdf|docx?|pptx?|xlsx?|csv|txt)$/.test(n)) return 'doc';
+  return 'other';
+}
+function onFilesDropped(fs){
+  const btS='padding:6px 13px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit;font-size:12.5px;margin:3px 5px 0 0';
+  [...fs].forEach(f=>{
+    const k=fileKind(f), b=el('bot');
+    let btns='';
+    if(k==='image') btns='<button data-a="attach">🖼 チャットに添付</button>';
+    else if(k==='video') btns='<button data-a="vimeo">🎬 Vimeoへアップ</button>';
+    else if(k==='html') btns='<button data-a="aurora">📚 Auroraへアップ</button>';
+    else if(k==='doc') btns='<button data-a="aurora">📚 Auroraへアップ</button><button data-a="learn">🧹 整理で知識化</button>';
+    btns+='<button data-a="dropbox">📦 Dropboxで送る</button>';
+    b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:13px;background:rgba(255,255,255,.03)">'
+      +'<div style="margin-bottom:9px">📎 <b>'+esc(f.name)+'</b> — どのツールで扱いますか？</div>'
+      +'<div>'+btns.replace(/<button /g,'<button style="'+btS+'" ')+'</div></div>';
+    b.querySelectorAll('button[data-a]').forEach(bt=>{ bt.onclick=()=>{
+      const a=bt.dataset.a, lbl=bt.textContent;
+      b.innerHTML='<span style="color:var(--mut)">📎 '+esc(f.name)+' → '+esc(lbl)+'</span>';
+      if(a==='attach') takeFile(f);
+      else if(a==='vimeo'){ pendingFile={name:f.name,isImage:false,file:f}; vimeoUpload(); }
+      else if(a==='aurora') auroraUpload(f);
+      else if(a==='learn') location.href='/seiri';
+      else if(a==='dropbox') dropboxTransferFiles([f]);
+    }; });
+  });
+  log.scrollTop=log.scrollHeight;
+}
+async function auroraUpload(f){
+  const base=(f.name||'').replace(/\.[^.]+$/,'');
+  const b=el('bot');
+  const inS='width:100%;box-sizing:border-box;margin:2px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit';
+  const lbS='display:block;font-size:12px;color:var(--mut)';
+  const btS='padding:7px 16px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit';
+  b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:14px;background:rgba(255,255,255,.03)">'
+    +'<div style="font-weight:700;margin-bottom:10px">📚 Aurora へアップ — '+esc(f.name)+'</div>'
+    +'<label style="'+lbS+'">タイトル</label><input id="auTitle" style="'+inS+'" value="'+esc(base)+'">'
+    +'<label style="'+lbS+'">プロジェクト名</label><input id="auProj" style="'+inS+'" placeholder="例: Casper / marukome / 社内">'
+    +'<label style="'+lbS+'">タグ（カンマ/スペース区切り・任意）</label><input id="auTags" style="'+inS+'" placeholder="例: 設計 資料 fable">'
+    +'<div style="display:flex;gap:8px"><button id="auGo" style="'+btS+';border-color:#38bdf8">アップロード</button>'
+    +'<button id="auCancel" style="'+btS+'">キャンセル</button></div></div>';
+  b.querySelector('#auCancel').onclick=()=>{ b.textContent='（アップロードを中止しました）'; };
+  b.querySelector('#auGo').onclick=async()=>{
+    const title=b.querySelector('#auTitle').value.trim()||f.name;
+    const project=b.querySelector('#auProj').value.trim();
+    const tags=b.querySelector('#auTags').value.trim();
+    let content=''; try{ content=await f.text(); }catch(e){ render(b,'⚠️ ファイル読込に失敗しました'); return; }
+    if(!content.trim()){ render(b,'⚠️ 中身が空です'); return; }
+    render(b,'📚 Aurora へアップ中…（'+esc(title)+'）');
+    try{
+      const r=await apiPost('/api/aurora/upload',{filename:f.name,title:title,project:project,tags:tags,content:content});
+      if(r.ok){ render(b,'✅ **Aurora にアップしました** — '+esc(title)+'\n\n'+r.url); if(window.renderMermaid) renderMermaid(b); }
+      else render(b,'⚠️ アップ失敗: '+(r.error||'不明'));
+    }catch(e){ render(b,'⚠️ 通信エラー: '+e.message); }
+    log.scrollTop=log.scrollHeight;
+  };
+  log.scrollTop=log.scrollHeight;
+}
 function renderTools(){ toolsEl.innerHTML = uploaderOn ? '<span class="toolico" title="Score Uploader (クリックで外す)" onclick="offUploader()">🎬</span>' : ''; }
 function offUploader(){ uploaderOn=false; clearFile(); renderTools(); }
 function clearFile(){ pendingFile=null; attachEl.innerHTML=''; }
@@ -1198,6 +1293,75 @@ function repWireDrop(root){
     rd.readAsDataURL(f);
   });
 }
+</script>
+<script>
+// ── M3 Web Push: この端末を先回り通知の宛先に登録 ──
+(function(){
+  var btn=document.getElementById('pushbtn');
+  if(!btn) return;
+  function b64ToU8(s){ var p='='.repeat((4-s.length%4)%4); var b=(s+p).replace(/-/g,'+').replace(/_/g,'/'); var r=atob(b); var a=new Uint8Array(r.length); for(var i=0;i<r.length;i++)a[i]=r.charCodeAt(i); return a; }
+  function setLabel(){
+    if(!('Notification' in window)){ btn.textContent='🔔 通知(非対応)'; return; }
+    if(Notification.permission==='granted') btn.textContent='🔔 通知ON';
+    else if(Notification.permission==='denied') btn.textContent='🔔 通知(ブロック中)';
+    else btn.textContent='🔔 通知';
+  }
+  setLabel();
+  async function enable(){
+    try{
+      if(!('serviceWorker' in navigator)||!('PushManager' in window)){ alert('この端末/ブラウザはWeb Push非対応にございます'); return; }
+      var perm=await Notification.requestPermission();
+      if(perm!=='granted'){ setLabel(); return; }
+      var reg=await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      var kr=await (await fetch('/api/push/key')).json();
+      if(!kr.key){ alert('サーバのVAPID鍵が取得できませんでした'); return; }
+      var sub=await reg.pushManager.getSubscription();
+      if(!sub){ sub=await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToU8(kr.key)}); }
+      var res=await (await fetch('/api/push/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({subscription:sub})})).json();
+      setLabel();
+      if(res.ok){ btn.textContent='🔔 通知ON ✓'; }
+      else if((res.reason||'').indexOf('unauth')>=0){ alert('通知の登録にはログインが必要です。\nこの端末（'+location.host+'）で先にログインしてから、もう一度🔔を押してください。'); btn.textContent='🔔 要ログイン'; }
+      else { alert('通知の登録に失敗: '+(res.reason||res.error||'不明')); }
+    }catch(e){ console.error('push enable failed',e); alert('通知の有効化に失敗: '+(e&&e.message||e)); }
+  }
+  async function showPrefs(){
+    if(typeof window.el!=='function'){ return; }
+    var p={}; try{ p=await (await fetch('/api/push/prefs')).json(); }catch(e){}
+    var labels={morning_brief:'☀️ 朝のブリーフ', new_overdue:'🔴 納期超過', stalled_fb:'⏳ FB/確認の停滞', dm:'💬 新着DM', open_loop:'✅ 約束の完了'};
+    var rows=Object.keys(labels).map(function(k){
+      var on=p[k]!==false;
+      return '<label style="display:flex;align-items:center;justify-content:space-between;padding:8px 2px;border-bottom:1px solid #232a35;font-size:14px"><span>'+labels[k]+'</span><input type="checkbox" data-k="'+k+'" '+(on?'checked':'')+' style="width:20px;height:20px"></label>';
+    }).join('');
+    var b=window.el('bot');
+    b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:14px;background:rgba(255,255,255,.03)"><div style="font-weight:700;margin-bottom:8px">🔔 通知の種類（受け取るものを選ぶ）</div>'+rows+'<div style="font-size:12px;color:#9aa4b2;margin-top:8px">切り替えると即保存されます</div></div>';
+    b.querySelectorAll('input[data-k]').forEach(function(cb){
+      cb.onchange=async function(){
+        var prefs={}; prefs[cb.dataset.k]=cb.checked;
+        try{ await fetch('/api/push/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prefs:prefs})}); }catch(e){}
+      };
+    });
+  }
+  btn.addEventListener('click', function(ev){ ev.preventDefault();
+    if(('Notification' in window) && Notification.permission==='granted'){ showPrefs(); }  // 許可済→種類設定
+    else { enable(); }                                                                       // 未許可→有効化
+  });
+  // 既に許可済ならSW登録だけ静かに保つ
+  if(('serviceWorker' in navigator) && ('Notification' in window) && Notification.permission==='granted'){
+    navigator.serviceWorker.register('/sw.js').catch(function(){});
+  }
+  // モバイルではヘッダの🔔が切れて見つけにくい→未許可なら chat 内に大きな誘導カードを出す
+  try{
+    if(('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window) && Notification.permission==='default' && typeof window.el==='function'){
+      var cb=window.el('bot');
+      cb.innerHTML='<div style="border:1px solid #22c55e;border-radius:12px;padding:14px;background:rgba(34,197,94,.08)">'
+        +'<div style="font-weight:700;margin-bottom:6px">🔔 先回り通知を受け取りますか？</div>'
+        +'<div style="font-size:13px;color:#9aa4b2;margin-bottom:10px">納期超過・FB停滞・朝ブリーフ・新着DMを、Casperを閉じていてもこの端末へお知らせします。</div>'
+        +'<button id="pushEnableCard" style="padding:9px 20px;border-radius:9px;border:1px solid #22c55e;background:#122a1c;color:#a7f3c9;font:inherit;font-weight:700;cursor:pointer">🔔 通知を有効にする</button></div>';
+      var pe=cb.querySelector('#pushEnableCard'); if(pe) pe.onclick=function(){ enable(); };
+    }
+  }catch(_){}
+})();
 </script>
 </body>
 </html>

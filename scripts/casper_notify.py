@@ -156,7 +156,9 @@ def compute(uid, now=None):
                        "body": f"確認待ちのまま動いていません：{'、'.join(names)}{more}。まとめて催促しますか？",
                        "dedup_key": "stall:" + ",".join(sorted(f"{s['shot'] or s['name']}:{s['since']}" for s in new_stall)),
                        "action": {"tool": "send_message", "hint": "催促DM下書き(まとめ)",
-                                  "subjects": [f"{s['shot']} {s['name']}".strip() for s in new_stall]}})
+                                  "subjects": [f"{s['shot']} {s['name']}".strip() for s in new_stall],
+                                  "items": [{"name": s.get("name"), "shot": s.get("shot"),
+                                             "assigned_to": s.get("assigned_to")} for s in new_stall]}})
     ust["seen_stall"] = cur_stall
 
     st[ukey] = ust

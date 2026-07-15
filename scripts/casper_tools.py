@@ -8,7 +8,13 @@ import json, os, sys, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import casper_rag
 
-RO_TOKEN = os.environ.get("CASPER_RO_TOKEN", "")   # 読取/議事録用(env優先)
+try:                                                # 平文token退避(M2秘匿): home secrets.env(0600)を env に載せる
+    import casper_secrets
+    casper_secrets.load_into_env()
+except Exception:
+    pass
+
+RO_TOKEN = os.environ.get("CASPER_RO_TOKEN", "")   # 読取/議事録用(env優先・home secrets.env含む)
 if not RO_TOKEN:                                    # env 無ければローカル秘匿ファイルから(gitignore済・write tokenと同方式)
     for _fn in (".casper_ro_token", "CASPER_RO_TOKEN.txt"):
         try:

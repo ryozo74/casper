@@ -37,6 +37,14 @@ NAMES = {"28": "ryoji", "31": "kiyotomo", "34": "hori", "30": "tetsuo", "40": "t
 
 
 def _write_token():
+    # 平文token退避(M2秘匿): home secrets.env(0600) を env に載せ、env優先で読む。9p の平文ファイルは fallback。
+    try:
+        import casper_secrets
+        casper_secrets.load_into_env()
+    except Exception:
+        pass
+    if os.environ.get("CASPER_WRITE_TOKEN"):
+        return os.environ["CASPER_WRITE_TOKEN"]
     for fn in (".casper_write_token", "CASPER_WRITE_TOKEN.txt"):
         p = os.path.join(HERE, fn)
         if os.path.exists(p):
