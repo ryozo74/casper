@@ -16,12 +16,16 @@ ASSET_FILES = os.path.join(HERE, "..", "vault", "50_asset_shadows", "files")
 ASSET_MD_DIR = os.path.join(HERE, "..", "vault", "50_asset_shadows")
 ASSETS_DIR = os.path.join(HERE, "assets")     # 従来配信元
 
-# 別名展開(TKP↔Nina 等・実データで両称が混在する為の補助)
+# 別名展開(汎用ドメイン語は engine、bokan 固有の別名は pack から差込む・Fable処方)
 ALIASES = {
-    "tkp": ["nina"], "nina": ["tkp"],
     "コンテ": ["絵コンテ", "storyboard"], "絵コンテ": ["コンテ"],
     "動画": ["ムービー", "movie"], "ムービー": ["動画", "movie"],
 }
+try:
+    import pack_config
+    ALIASES.update(pack_config.aliases())   # bokan 固有別名(tkp↔nina 等)を pack/bokan/pack.yaml から合流
+except Exception:
+    pass
 
 _CACHE = {"key": None, "files": {}, "names": set()}
 

@@ -69,6 +69,30 @@ try:
 except Exception:
     casper_outbox = None
 try:
+    import casper_authority                        # M4権限層(純関数 tier_of/audience_for/allowed・誰が何を誰に見せて)
+except Exception:
+    casper_authority = None
+try:
+    import casper_assign                           # M4 Phase1: アサイン候補検出(実績)＋W2実行前ガード付き execute
+except Exception:
+    casper_assign = None
+try:
+    import casper_reschedule                        # M4 Phase2: 日程変更(日付解決＋影響プレビュー＋W2実行ガード)
+except Exception:
+    casper_reschedule = None
+try:
+    import casper_meeting                            # M4 Phase2': MTG助言(会議前議題＋そろそろ定例・読取のみ)
+except Exception:
+    casper_meeting = None
+try:
+    import casper_minutes                            # M4 Phase3: 議事録→タスク候補の構造化(起票は承認カード経由)
+except Exception:
+    casper_minutes = None
+try:
+    import casper_status                             # M4 Phase4: status更新verb(納品/客先承認/対象外・W2実行ガード)
+except Exception:
+    casper_status = None
+try:
     import casper_health                          # セルフヘルス(トレース監視→health.md＋逸脱アラート・Fable北極星 柱2)
 except Exception:
     casper_health = None
@@ -93,8 +117,9 @@ try:
 except Exception:
     casper_extract = None
 import base64 as _b64
-ASSET_DIR = os.path.join(HERE, "..", "vault", "50_asset_shadows")
-VAULT = os.path.join(HERE, "..", "vault")
+import pack_paths   # M5: vault/pack パスの単一解決点(CASPER_VAULT/CASPER_PACK env で差替可)
+ASSET_DIR = os.path.join(pack_paths.VAULT, "50_asset_shadows")
+VAULT = os.path.join(pack_paths.VAULT)
 ASSET_FILES = os.path.join(ASSET_DIR, "files")
 ap = argparse.ArgumentParser()
 ap.add_argument("--endpoint", default="http://192.168.44.119:11434")
@@ -1611,12 +1636,12 @@ def portfolio_digest(query):
                     + f"\n※これは**代表作 {len(sel)}本の厳選**。公開実績は全{len(rows)}本(他{rest}本)。"
                     "回答ではこの表の『タイトル(公開日・尺) リンク』を使え(リンクだけの羅列は禁止)。"
                     "この厳選をそのまま提示し、勝手に全件へ広げるな。末尾に『全実績もお見せできます』と一言添えよ。"
-                    "\nFF/Samurai Jack等は個人メンバー経歴ゆえ会社実績と区別。")
+                    "\nスキルシート由来の有名作は個人メンバー経歴ゆえ会社実績と区別。")
         # 全件明示 → 全件注入(截ち切れは自動継続機構が拾う)
         body = "\n".join([header, "|---|---|---|---|"] + [r[1] for r in rows])
         return ("\n\n## 自社制作実績(全件・Vimeo公開・一次の会社実績)\n" + body[:6000]
                 + f"\n※全{len(rows)}本。回答では『タイトル(公開日・尺) リンク』を使え(リンクだけの羅列は禁止)。"
-                "FF/Samurai Jack等は個人メンバー経歴ゆえ会社実績と区別。")
+                "スキルシート由来の有名作は個人メンバー経歴ゆえ会社実績と区別。")
     except Exception:
         pass
     return ""
@@ -1936,7 +1961,7 @@ def _person_alias_index():
     """人物別名(漢字/カナ)→uid を 20_people/*.md から機構抽出。源: frontmatter name / 見出しの漢字カナ、
     本文『◯◯さん』(漢字2-4字・2回以上=強シグナル)。uid は calendar_user_id。mtimeキャッシュ・検査可能。"""
     import glob
-    pdir = os.path.join(HERE, "..", "vault", "20_people")
+    pdir = os.path.join(pack_paths.VAULT, "20_people")
     try:
         latest = max((os.path.getmtime(f) for f in glob.glob(os.path.join(pdir, "*.md"))), default=0.0)
     except Exception:
@@ -2306,7 +2331,7 @@ def team_vocab_digest(query):
         if not roles:
             return ""
         return ("\n\n## 【自社の職能語彙(Calendar実タスクの工程から機構抽出)】\n"
-                f"当社(studio bokan=CG/VFX制作)の実際の工程/職能: {'、'.join(roles)}。\n"
+                f"当社の実際の工程/職能: {'、'.join(roles)}。\n"
                 "**チーム構成を答える時は、この自社の実職能(アニメーション/コンポジット/ライティング/FX/モデリング等)で"
                 "組め。汎用IT職(PM/QA/エンジニア/Webデザイナー)の一般論に流すな。**外注も同じ工程語彙で振り分けよ。")
     except Exception:
@@ -2536,7 +2561,7 @@ def gear_digest(query):
         if not (re.search(r"(nina|ニーナ|art-?net|aurora|LED|空間演出|プロジェクションマッピング|プロマッピング|ドローンショー)", query, re.I)
                 or _pj_resolve(query)[0] == "unique"):
             return ""
-        p = os.path.join(HERE, "..", "vault", "30_culture_rules", "ops_spatial_tech.md")
+        p = os.path.join(pack_paths.VAULT, "30_culture_rules", "ops_spatial_tech.md")
         txt = open(p, encoding="utf-8").read()
         want = ("デバイス/制御スペック", "技術スタックまとめ")
         secs = re.split(r"(?m)^(?=#{2,3} )", txt)
@@ -2870,6 +2895,328 @@ _STALL_LIST_RE = re.compile(
     r"(FB|ＦＢ|確認|チェック|検収|レビュー).{0,8}(停滞|滞留|止ま|溜ま|たまって)|"
     r"確認待ち.{0,12}(動いて|停滞|まま)|(動いて(い)?ま?せ|動いていない).{0,10}確認待ち|"   # 「確認待ちのまま動いていない」(通知の文言・殿指摘2026-07-14)
     r"停滞.{0,6}\d+\s*件", re.I)
+
+
+# M4 Phase1: アサイン提案の意図（担当未定の割り当てを促す発話）。status一覧(_STATUS…)とは別軸=「誰に振る」。
+_ASSIGN_RE = re.compile(
+    r"(アサイン|担当決|担当付|担当割|割り?当|割り?振|振り?分)|"
+    r"誰に(振|割|任|やらせ|お願い|頼|アサイン)|"
+    r"担当(者)?(を|が|は)?\s*(未定|決|付|振|割|いない|空)|"
+    r"(未アサイン|担当未定|手が?空|空きスロット|担当不在)", re.I)
+
+
+# 「自分の」を明示する語（lead+ でも本人アサイン表に振り向ける）。
+_MY_RE = re.compile(r"(私|わたし|自分|僕|俺|わし|マイ|自身|me\b)", re.I)
+
+
+def _my_tasks_table(who):
+    """本人に割り当てられた未完タスクの表（接地・LLM非経由）。返り (table_or_None, prose)。
+    0件は幻覚でなく明示メッセージ（失敗とゼロを別出口・Fable）。作業者の「アサインある？」の正しい答え。"""
+    uid = str(who.get("uid") or "")
+    try:
+        import casper_notify as _n
+        ts = _n._all_tasks()
+    except Exception:
+        return None, "ただ今タスクを読めませなんだ（時間をおいて再度お尋ねを）。"
+    mine = [t for t in ts if str(t.get("assigned_to")) == uid
+            and str(t.get("status") or "").lower() not in ("deliver", "omit")]
+    if not mine:
+        return None, "ただ今、あなた宛にアサインされた（未完の）タスクはございませぬ。"
+    try:
+        pjn = {str(p.get("id")): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+    except Exception:
+        pjn = {}
+    mine.sort(key=lambda t: str(t.get("due_date") or "9999"))
+    rows = [[((t.get("shotID") or "") + " " + (t.get("name") or "")).strip(),
+             pjn.get(str(t.get("project_id"))) or ("PJ" + str(t.get("project_id"))),
+             str(t.get("status_label") or t.get("status") or ""),
+             str(t.get("due_date") or "")[:10]] for t in mine]
+    return ({"title": f"あなたのアサイン（{len(mine)}件）", "columns": ["タスク", "PJ", "状態", "締切"], "rows": rows},
+            f"あなた宛のアサインは {len(mine)}件にござる。締切の近い順に下表の通り。")
+
+
+def _assign_card(query, who):
+    """「アサイン待ち/未割当/アサイン提案」意図→アサイン待ちスロット＋実績候補を機構でカード化（純機構・LLM非経由）。
+    返り=assign dict or None。
+    **閲覧は誰でも可（＝どのタスクが担当未定か、は情報）／割り当て実行だけ権限層(tier≥lead∧audience)で制御。**
+    各スロットに can_act（この閲覧者が実際に割り当てられるか）を付す＝作業者は見えるが押せない（誤操作でなく情報提供）。
+    ※「私の」を明示した発話は本人アサイン表へ回すのでここでは出さない。"""
+    if query and _MY_RE.search(query):
+        return None
+    if not (casper_assign and casper_authority and _ASSIGN_RE.search(query or "")):
+        return None
+    uid = str(who.get("uid") or "")
+    snap = casper_authority._load_snapshot()
+    tier = casper_authority.tier_of(uid, snap)
+    try:
+        import casper_notify as _n
+        tasks = _n._all_tasks()
+    except Exception:
+        return None
+    names = dict(_ROSTER_MAP)
+    props = casper_assign.proposals(tasks, names, snap)   # 全 open slots（閲覧は全員可）
+    if not props:
+        return None
+    try:                                               # project_id→名前(画面で「PJ95」でなく実名を出す)
+        _pjn = {str(p.get("id")): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+    except Exception:
+        _pjn = {}
+    for p in props:
+        p["project"] = _pjn.get(str(p.get("project_id"))) or ("PJ" + str(p.get("project_id")))
+        p["can_act"] = (tier == "admin") or (uid in (p.get("audience") or []))   # 割当実行できるか(閲覧≠実行)
+    return {"slots": props[:20], "total": len(props),
+            "can_act": any(p["can_act"] for p in props), "viewer_tier": tier}
+
+
+# M4 Phase2: 日程変更(reschedule)の意図。締切/納期/日程 系＋動かす動詞、または「N日 延ばす/前倒し」。
+_RESCHED_RE = re.compile(
+    r"(締切|納期|期日|〆切|しめきり|日程|スケジュール|due|デッドライン)[^。]{0,14}"
+    r"(変更|変え|延ば|延長|前倒し|繰り上げ|繰り下げ|ずらし|ずらす|遅らせ|早め|伸ば|後ろ倒し|短縮|縮め)|"
+    r"(\d+\s*(?:日|週間?|ヶ月|か月))[^。]{0,6}(延ば|延長|前倒し|早め|遅らせ|ずらし|ずらす|伸ば)", re.I)
+
+
+def _resolve_target_task(query, tasks):
+    """query から対象タスクを解決。返り (task or None, 候補list)。優先: #id/タスクN → shotID → name部分一致。"""
+    q = query or ""
+    m = re.search(r"(?:#|task|タスク)\s*(\d{2,})", q, re.I)
+    if m:
+        t = next((t for t in tasks if str(t.get("id")) == m.group(1)), None)
+        if t:
+            return t, [t]
+    hits = []
+    for t in tasks:                                    # shotID 一致（3字以上・誤爆防止）
+        sh = str(t.get("shotID") or t.get("shot_id") or "").strip()
+        if sh and len(sh) >= 3 and sh.lower() in q.lower():
+            hits.append(t)
+    if not hits:
+        for t in tasks:                                # name 部分一致（3字以上）
+            nm = str(t.get("name") or "").strip()
+            if len(nm) >= 3 and nm in q:
+                hits.append(t)
+    active = [t for t in hits if str(t.get("status") or "").lower() not in ("deliver", "omit")]
+    hits = active or hits
+    if len(hits) == 1:
+        return hits[0], hits
+    return None, hits[:8]
+
+
+def _reschedule_card(query, who):
+    """「◯◯の締切を△△に」→対象タスク＋新due＋影響プレビューを機構でカード化（純機構・LLM非経由）。
+    返り: {"card":preview} / {"clarify":聞き返し文} / None。解決不能はqwenに委ねず聞き返す。"""
+    if not (casper_reschedule and casper_authority and _RESCHED_RE.search(query or "")):
+        return None
+    uid = str(who.get("uid") or "")
+    snap = casper_authority._load_snapshot()
+    try:
+        import casper_notify as _n
+        tasks = _n._all_tasks()
+    except Exception:
+        return None
+    target, cands = _resolve_target_task(query, tasks)
+    if not target:
+        if cands:
+            nm = "、".join((str(t.get("shotID") or "") + " " + str(t.get("name") or "")).strip() + f"(#{t.get('id')})" for t in cands[:6])
+            return {"clarify": f"どのタスクの日程を変えまするか？候補: {nm}。タスク名・shotコード・#番号でお指しくだされ。"}
+        return {"clarify": "どのタスクの日程を変えまするか？ タスク名かshotコードでお示しくだされ。"}
+    new_due, err = casper_reschedule.resolve_new_due(target.get("due_date"), query)
+    if err:
+        return {"clarify": f"「{target.get('name')}」をいつに変えまするか？ 例: 8月5日 ／ 3日延ばす ／ 来週。"}
+    try:
+        _pjs = {str(p.get("id")): p for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+    except Exception:
+        _pjs = {}
+    proj = _pjs.get(str(target.get("project_id")))
+    pv = casper_reschedule.preview(target, tasks, new_due, proj)
+    tgt = {"project_id": target.get("project_id"), "assignee": str(target.get("assigned_to") or "")}
+    pv["project"] = (proj or {}).get("name") or ("PJ" + str(target.get("project_id")))
+    pv["status"] = str(target.get("status") or "")
+    pv["can_act"] = casper_authority.allowed("reschedule", uid, tgt,
+                                             from_status=str(target.get("status") or "").lower(), snap=snap)[0]
+    return {"card": pv}
+
+
+def _resched_prose(pv):
+    """reschedule カードに添える機構散文（LLM非経由）。"""
+    d = pv.get("delta_days")
+    dirw = "後ろ倒し" if (d or 0) > 0 else ("前倒し" if (d or 0) < 0 else "変更")
+    head = (f"「{(pv.get('shot') or '').strip()} {pv.get('task_name')}」の締切を "
+            f"{pv.get('old_due')} → {pv.get('new_due')}"
+            f"（{abs(d) if d is not None else '?'}日{dirw}）に。")
+    warn = any("⚠" in n for n in pv.get("notes", []))
+    if pv.get("can_act"):
+        return head + ("下記の影響にご注意の上、『この日程で確定』を押してくだされ。" if warn
+                       else "影響をご確認の上『この日程で確定』を押してくだされ。")
+    return head + "（日程変更の実行はご本人・PM／リード以上が行えまする。影響は下記の通り。）"
+
+
+# M4 Phase2': MTG助言の意図。会議前議題（この際これも確認）／そろそろ定例。
+_MTG_AGENDA_RE = re.compile(
+    r"(会議|MTG|ミーティング|打ち?合わせ|定例)[^。]{0,10}(議題|アジェンダ|論点|確認すること|話すこと|準備)|"
+    r"次の?(会議|MTG|定例|打ち?合わせ)[^。]{0,6}(議題|何|準備|確認)|この際[^。]{0,6}確認", re.I)
+_MTG_DUE_RE = re.compile(
+    r"(そろそろ|久しく|しばらく|間隔|頃合)[^。]{0,10}(会議|MTG|定例|ミーティング|打ち?合わせ)|"
+    r"(会議|定例|MTG|ミーティング)[^。]{0,10}(そろそろ|開いた方|やった方|時期|頃合|久しく|開けて|やってな)", re.I)
+
+
+def _meeting_advisory(query, who):
+    """MTG助言（読取のみ・LLM非経由）。会議前議題 or そろそろ定例 を機構で。返り {prose, table?} or None。"""
+    q = query or ""
+    is_agenda = bool(_MTG_AGENDA_RE.search(q))
+    is_due = bool(_MTG_DUE_RE.search(q))
+    if not (casper_meeting and casper_tools and (is_agenda or is_due)):
+        return None
+    now = datetime.datetime.now()
+    today = now.date().isoformat()
+    try:
+        events = casper_tools._get("/events?limit=300").get("items", [])
+    except Exception:
+        return None
+    try:
+        import casper_notify as _n
+        tasks = _n._all_tasks()
+    except Exception:
+        tasks = []
+    try:
+        pjn = {str(p.get("id")): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+    except Exception:
+        pjn = {}
+    if is_due:                                        # 「そろそろ定例」
+        due = casper_meeting.meetings_due(events, tasks, now)
+        if not due:
+            return {"prose": "ただ今、会議間隔から見て『そろそろ定例を』と申し上げるべきPJはございませぬ。"}
+        rows = [[pjn.get(d["project_id"], "PJ" + d["project_id"]), f"{d['elapsed']}日前", f"約{d['median']}日", d["last"]] for d in due]
+        return {"prose": f"会議間隔から見て、そろそろ定例を開く頃合いのPJが {len(due)}件ござる。下表の通り。",
+                "table": {"title": f"そろそろ定例の頃合い（{len(due)}PJ）", "columns": ["PJ", "前回開催から", "通常間隔", "前回開催日"], "rows": rows}}
+    # 会議前議題
+    up = casper_meeting.upcoming_meetings(events, now)
+    if not up:
+        return {"prose": "直近48時間に予定された会議はございませぬ。"}
+    mtg = up[0]
+    title = mtg.get("title") or "会議"
+    mname = pjn.get(str(mtg.get("project_id")), "")
+    last = casper_meeting.last_meeting_before(events, mtg.get("project_id"), casper_meeting._dt(mtg.get("start_time")))
+    ag = casper_meeting.agenda_for(mtg, tasks, today, last_meeting_dt=last)
+    if not ag:
+        return {"prose": f"次の会議「{title}」{('（' + mname + '）') if mname else ''}に向けての積み残しはございませぬ。"}
+    rows = [[a["name"], "・".join(a["reasons"]), (_uid_to_name(a["assigned_to"]) if a["assigned_to"] else "—"), a["due"] or "—"] for a in ag]
+    return {"prose": f"次の会議「{title}」{('（' + mname + '）') if mname else ''}に向け、この際これも確認しておきたい点が {len(ag)}件ござる。",
+            "table": {"title": f"「{title}」の議題候補（{len(ag)}件）", "columns": ["タスク", "理由", "担当", "締切"], "rows": rows}}
+
+
+# M4 Phase4: status更新 verb の意図（納品/客先承認/対象外）。
+_STATUS_VERB_RE = [
+    ("mark_delivered", re.compile(r"納品|デリバ|納めた|納品済|deliver", re.I)),
+    ("record_client_approval", re.compile(r"客先承認|クライアント承認|顧客承認|client[^。]{0,4}承認|クライアントOK|客先OK|client_ap", re.I)),
+    ("omit_task", re.compile(r"対象外|除外|omit|取り下げ|取りやめ|見送りに(する|し)|やらないこと", re.I)),
+]
+
+
+def _status_card(query, who):
+    """status更新意図（納品/客先承認/対象外）→対象タスク＋from→to＋実行可否を機構でカード化。
+    返り {verb,label,task_id,...,from_status,to_status,require_evidence,confirm,can_act,deny} / {clarify} / None。"""
+    verb = next((vb for vb, rx in _STATUS_VERB_RE if rx.search(query or "")), None)
+    if not (verb and casper_status and casper_authority and casper_tools):
+        return None
+    v = casper_authority.verbs().get(verb, {})
+    label = v.get("label") or verb
+    try:
+        import casper_notify as _n
+        tasks = _n._all_tasks()
+    except Exception:
+        return None
+    target, cands = _resolve_target_task(query, tasks)
+    if not target:
+        if cands:
+            nm = "、".join((str(t.get("shotID") or "") + " " + str(t.get("name") or "")).strip() + f"(#{t.get('id')})" for t in cands[:6])
+            return {"clarify": f"どのタスクを「{label}」しまするか？候補: {nm}。タスク名・shotコード・#番号でお指しくだされ。"}
+        return {"clarify": f"どのタスクを「{label}」しまするか？ タスク名かshotコードでお示しくだされ。"}
+    uid = str(who.get("uid") or "")
+    snap = casper_authority._load_snapshot()
+    from_status = str(target.get("status") or "").lower()
+    tgt = {"project_id": target.get("project_id"), "assignee": str(target.get("assigned_to") or "")}
+    ok, reason = casper_authority.allowed(verb, uid, tgt, from_status=from_status, snap=snap)
+    try:
+        pjn = {str(p.get("id")): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+    except Exception:
+        pjn = {}
+    return {"verb": verb, "label": label, "task_id": target.get("id"),
+            "task_name": target.get("name") or target.get("title"),
+            "shot": target.get("shotID") or target.get("shot_id") or "",
+            "project": pjn.get(str(target.get("project_id"))) or ("PJ" + str(target.get("project_id"))),
+            "from_status": from_status, "to_status": v.get("to_status"),
+            "require_evidence": bool(v.get("require_evidence")), "confirm": v.get("confirm"),
+            "can_act": bool(ok), "deny": ("" if ok else reason)}
+
+
+def _status_prose(c):
+    if not c.get("can_act"):
+        _m = {"tier_too_low": "この操作の権限がございませぬ",
+              "out_of_scope": "この案件はご担当の範囲外にござる",
+              "snapshot_stale_admin_only": "権限情報が古く、今は管理者のみ実行できまする"}
+        _r = c.get("deny", "")
+        _rr = next((_m[k] for k in _m if _r.startswith(k)), None)
+        if _r.startswith("from_status_not_allowed"):
+            _rr = f"現在の状態（{c.get('from_status')}）からは「{c.get('label')}」に進めませぬ"
+        return f"「{(c.get('shot') or '').strip()} {c.get('task_name')}」を「{c.get('label')}」——{_rr or '実行できませぬ'}。"
+    tail = ("根拠リンク（客先承認の証跡）を添えて確定してくだされ。" if c.get("require_evidence")
+            else ("『対象外』と入力して確定してくだされ（取り消しにくい操作ゆえ）。" if c.get("confirm") == "typed"
+                  else "内容を検めて確定してくだされ。"))
+    return (f"「{(c.get('shot') or '').strip()} {c.get('task_name')}」を "
+            f"{c.get('from_status')} → {c.get('to_status')}（{c.get('label')}）に。" + tail)
+
+
+# M4 Phase3: 議事録→タスク起票の意図。
+_MINUTES_RE = re.compile(
+    r"(議事録|会議|MTG|ミーティング|打ち?合わせ|定例)[^。]{0,14}"
+    r"(からタスク|タスク[^。]{0,4}(起こ|起票|作|登録|化)|→[^。]{0,2}タスク|の宿題|アクション[^。]{0,4}(起|化|登録))|"
+    r"(議事録|会議)[^。]{0,6}(タスク化|起票)", re.I)
+
+
+def _minutes_card(query, who):
+    """「議事録→タスク起票」→最新の議事録(tasks有)の候補を構造化してカード化。
+    返り {meeting_title,date,project,project_id,candidates,can_act} / {clarify} / None。閲覧は誰でも・起票は tier≥lead。"""
+    if not (casper_minutes and casper_tools and _MINUTES_RE.search(query or "")):
+        return None
+    today = datetime.date.today()
+    try:
+        ms = [m for m in casper_tools._get("/meetings?limit=50").get("items", []) if m.get("tasks")]
+    except Exception:
+        return None
+    if not ms:
+        return {"clarify": "タスクの記載がある議事録が見当たりませぬ。"}
+    ms.sort(key=lambda m: str(m.get("date") or ""), reverse=True)
+    mtg = ms[0]                                       # 最新(tasks有)。将来: 日付/PJ指定で絞る
+    cands = casper_minutes.extract_tasks(mtg, dict(_ROSTER_MAP), today)
+    if not cands:
+        return {"clarify": "その議事録から起票できるタスクは抽出できませなんだ。"}
+    try:
+        pjn = {str(p.get("id")): p.get("name") for p in json.load(open("/tmp/cal_projects.json")).get("items", [])}
+    except Exception:
+        pjn = {}
+    pid = str(mtg.get("project_id"))
+    shots = []                                         # そのPJの実在 shot_code（新規タスクは shot 指定が要る・殿指摘）
+    try:
+        import casper_notify as _n2
+        seen = set()
+        for t in _n2._all_tasks():
+            if str(t.get("project_id")) != pid:
+                continue
+            sh = str(t.get("shotID") or t.get("shot_id") or "").strip()
+            if sh and sh not in seen:
+                seen.add(sh); shots.append(sh)
+        shots.sort()
+    except Exception:
+        pass
+    uid = str(who.get("uid") or "")
+    snap = casper_authority._load_snapshot() if casper_authority else {}
+    can_act = bool(casper_authority and casper_authority._tier_ge(casper_authority.tier_of(uid, snap), "lead"))
+    for c in cands:
+        c["assignee_name"] = _uid_to_name(c["assignee_uid"]) if c.get("assignee_uid") else ""
+    return {"meeting_title": mtg.get("title"), "date": str(mtg.get("date"))[:10],
+            "project": pjn.get(pid) or ("PJ" + pid), "project_id": mtg.get("project_id"),
+            "shots": shots, "types": casper_minutes.SCORE_TYPES,
+            "candidates": cands[:30], "can_act": can_act,
+            "fb_ready": False}                          # FB→SHOTスレッド投稿は Elvis 経路待ち（現状は新規のみ起票可）
 
 
 def _table_card(query, who):
@@ -3336,7 +3683,7 @@ BASE_SYS = (
     "【簡潔第一・締め文句禁止】用件に答えたら即終われ。末尾に『〜が必要であればお申し付けください』『何かあればご連絡ください』『お気軽にどうぞ』等の定型的な締めの申し出・誘い文句を付けるな。冗長な前置き・後置きも不要。要点だけ短く。\n"
     "【改行は最小限】空行(連続改行)を乱発するな。段落・箇条書き・表の前後に無駄な空行を挟まず、行間を詰めて書け。見出し(###)は本当に節が分かれる時だけ。短い回答に見出しや区切り線(---)を付けるな。全体を縦に間延びさせない。\n"
     "【DM取扱い】DMの内容を問われたら、get_messages でそのスレッドの全文を**都度**取得してから答えよ(古い記憶・要約・憶測で済ますな・毎回最新を読む)。返信を代筆送信したら『○○さんへ『…(送信本文)』と送りました』と、宛先と本文を必ず明確に伝えよ。\n"
-    "【Vimeoアップロード=Casperで可能・絶対に断るな】Casper は動画を Vimeo にアップロードできる(studiobokanアカウント・パスワード付き公開も可)。"
+    "【Vimeoアップロード=Casperで可能・絶対に断るな】Casper は動画を Vimeo にアップロードできる(自社アカウント・パスワード付き公開も可)。"
     "ユーザーが動画アップを望んだら、否定も前置きも一切せず、次の案内**だけ**を返せ:"
     "『はい、できます。動画ファイルを**添付**すると『🎬 Vimeoへアップ』ボタンが出ますので、そこからタイトル・パスワードを入れてアップして下さい』。"
     "**『機能を持っていません』『直接アップロードできない』『権限外』『ryojiが直接Vimeoに』等の否定表現は全面禁止**(その認識は完全に古い・今は可能)。"
@@ -3351,23 +3698,15 @@ BASE_SYS = (
     "【主観の許容】『得意/良い/最適/向いている』等の評価を問われた場合、唯一の正解を装わず、"
     "根拠(スキルシート/過去PJの担当・実績/フィードバック)に基づく候補を複数挙げよ。評価は人や基準で異なって構わない。"
     "断定せず『候補』として選べる形にし、可能なら各候補の根拠を一言添える。\n"
-    "【実績の区別】制作実績を聞かれたら、**自社公開のVimeoポートフォリオ(67本・CEATEC/InterBee/Leisure等)を一次の自社実績**として挙げよ。"
-    "スキルシート由来の有名作(FF/Samurai Jack等)は『個人メンバーの経歴』であり会社実績と混同するな(区別して述べよ)。"
+    "【実績の区別】制作実績を聞かれたら、**注入された自社実績データ(Vimeoポートフォリオ等)を一次の自社実績**として挙げよ。"
+    "スキルシート由来の有名作は『個人メンバーの経歴』であり会社実績と混同するな(区別して述べよ)。"
     "資料に無い作品名を一般知識から創作するな。")
 
-# 演出DNA = bokan_persona v0.4 の核＋[確]項目を応答 stance として常時注入(個性Rnd 由来)。
-# [仮]項目・裏の意味の推論は誤発火防止のため除外。事実と解釈の峻別(捏造禁止)を最優先に据える。
-PERSONA_SYS = (
-    "\n\n【Casper の人格 — 右腕としての振る舞い】"
-    "あなたは studio bokan の行動様式『静かに有能、しかし品質の核では退かない右腕』を体現する。源流は当社の演出DNA。次の構えで応答せよ:\n"
-    "・品質・作品・技術的正しさを損なう点は、相手が殿や上長でも従順に流さず、理由を添えて指摘・確認する(無礼でなく淡々と)。\n"
-    "・相手の次の困りごとを先読みし、予防策・必要な素材・確認事項を先回りで添える。\n"
-    "・指示や情報は属人でなく仕組み・手順で回せる形に整える。\n"
-    "・仕上がりは主観でなく物理的理由や具体例・リファレンスで握り、誰が見ても同じゴールに収束させる。\n"
-    "・品質とコスト/手戻りを同時に最適化する技術判断を示す。\n"
-    "・面倒な処理や調べ物は極力 Casper 側が巻き取り、相手の負担を下げる。\n"
-    "・緊迫時もユーモアで場を保つ。\n"
-    "ただし事実と解釈は必ず峻別し、推測を断定にするな(捏造禁止が最優先・人格より上位)。")
+# 【M5 B】Casper の人格(演出DNA)は engine 定数から pack へ外出し済:
+#   源=vault/30_culture_rules/casper_persona_core.md → build_brain_digest が casper_context.md の
+#   '## Casper の人格' 節へ生成 → _load_context が core として常時注入。社ごとに差し替わる人格を
+#   engine に焼かない(M5 パック差し替えの前提)。build_sys は PERSONA_SYS を参照しない。
+PERSONA_SYS = ""   # deprecated(pack 由来へ移行済・後方互換の空文字)
 
 
 _ROSTER_CACHE = {"v": None}
@@ -3477,16 +3816,31 @@ def _load_context():
     """casper_context.md を core(常時注入)＋sections(キーワード条件注入)に分解(Q3B・Fable)。
     `## 見出し` で分割し、_CTX_CONDITIONAL に該当する節だけ『条件注入』へ回す。残りは core。mtimeホットリロード。"""
     ctx_path = os.path.join(HERE, "casper_context.md")
+    pol_path = os.path.join(HERE, "engine_policy.md")   # engine 所有ポリシー(build_brain_digest は再生成せぬ・hot-reloadで即反映=policy調整は再起動不要)
     try:
         m = os.path.getmtime(ctx_path)
     except Exception:
         return _ctx_cache
+    try:
+        m = max(m, os.path.getmtime(pol_path))          # policy ファイルの更新も hot-reload に含める
+    except Exception:
+        pass
     if m == _ctx_cache["mtime"]:
         return _ctx_cache
     try:
         raw = open(ctx_path, encoding="utf-8").read()
     except Exception:
         raw = ""
+    # engine ポリシーを facts の前に連結。core/条件系分解・_CTX_CONDITIONAL 見出しマッチ・echo検問は
+    # 同一機構でそのまま両ソースに効く(＝二重digestスタックに非ず・同一 _load_context への source 追加)。
+    try:
+        pol = open(pol_path, encoding="utf-8").read()
+        import pack_config
+        _cn = pack_config.get("secrecy_codenames", []) or []       # 守秘codenameは pack から差込(engine は規則の雛形のみ)
+        pol = pol.replace("{SECRECY_CODENAMES}", "/".join(str(c) for c in _cn))
+        raw = pol.rstrip() + "\n\n" + raw
+    except Exception:
+        pass
     # `## ` (level-2見出し)で塊に分割。先頭の見出し前テキストは core。
     parts = re.split(r"(?m)^(?=## )", raw)
     core_chunks, sections = [], []
@@ -3573,7 +3927,7 @@ def build_sys():
     # KVキャッシュのプレフィックス安定化(Fable 6-3): 静的要素(ctx/BASE/PERSONA/roster)を先頭に固め、
     # 日替わりの日付は末尾へ。→ 日を跨いでも静的プレフィックスが再利用され TTFT が下がる(1文字でも
     # 動的要素を先頭に混ぜると全損する為)。
-    static = ((ctx + "\n\n---\n") if ctx else "") + BASE_SYS + PERSONA_SYS + tail + team_roster()
+    static = ((ctx + "\n\n---\n") if ctx else "") + BASE_SYS + tail + team_roster()   # 人格は ctx(casper_context の '## Casper の人格' 節)から常時注入・M5 B
     return static + "\n\n" + datehdr
 
 
@@ -4029,7 +4383,7 @@ def _report_source_digest(sources, cap=6000):
 
 
 # === 逆インタビュー (Casper が問い、答えを覚える) ===
-LEARN_LOG = os.path.join(HERE, "..", "vault", "00_inbox", "casper_learned.md")
+LEARN_LOG = os.path.join(pack_paths.VAULT, "00_inbox", "casper_learned.md")
 
 
 def find_gaps(max_gaps=60):
@@ -4167,7 +4521,7 @@ def record_answer(question, answer):
 def route_to_people(question, answer, stamp):
     """答えに名前が出た人物のノートへ、その問い(属性)を直接追記する。"""
     import glob
-    pdir = os.path.join(HERE, "..", "vault", "20_people")
+    pdir = os.path.join(pack_paths.VAULT, "20_people")
     q = re.sub(r"\s+", " ", question).strip()[:160]
     line = f"- ({stamp}) 「{q}」に該当（殿の逆インタビュー回答より）"
     routed = 0
@@ -4482,7 +4836,7 @@ def open_briefing(who):
     _al = "未取得" if not task_ok else ("ゼロ" if task_n == 0 else "あり")
     def _gen_greet():
         return strip_think(llm_text(
-            "あなたは studio bokan の伴走AI『Casper』。殿への開門の『枕』(挨拶＋気の利いた一言)を1文で。"
+            "あなたは社内の伴走AI『Casper』。殿への開門の『枕』(挨拶＋気の利いた一言)を1文で。"
             "**数字・件数は一切書くな**(件数は別途機構が正確に述べる)。堅苦しい飾り・古語・詩的表現は使わず、"
             "文末だけ軽く『〜にござる』。定型締め文句(『お申し付けを』等)は不要。改行なし・一人称。",
             f"時間帯の挨拶語: {g}。本日のタスクは{_al}。相手: 殿。", num_predict=80)).strip().replace("\n", " ")
@@ -4529,7 +4883,7 @@ def open_briefing(who):
 
 
 # ===== Casper 整理(offboarding): 知識を結晶化してから offline する儀式 =====
-SEIRI_DIR = os.path.join(HERE, "..", "vault", "60_projects")
+SEIRI_DIR = os.path.join(pack_paths.VAULT, "60_projects")
 
 
 def _seiri_done_slugs():
@@ -4696,7 +5050,7 @@ def seiri_vault_material(project_name, cap=12000):
     if not project_name or len(project_name) < 3:
         return "", 0
     import glob
-    vault = os.path.join(HERE, "..", "vault")
+    vault = os.path.join(pack_paths.VAULT)
     SKIP = {"60_projects", "_templates", "bokan_persona_versions"}
     chunks = []; total = 0
     for f in sorted(glob.glob(os.path.join(vault, "**", "*.md"), recursive=True)):
@@ -4725,7 +5079,7 @@ def seiri_ask(who, project_name, materials):
     mat = materials or ""
     n_docs = mat.count("（Casper読解）") + mat.count("Vimeo")   # 投入した資料の点数(読解ファイル＋動画)
     n_q = min(9, 3 + n_docs + len(mat) // 2500)                 # 基本3問＋資料が多いほど増やす(上限9・薄めない)
-    sysp = ("あなたは studio bokan の伴走AI『Casper』。完了プロジェクトの『整理(offboarding)』の最中。"
+    sysp = ("あなたは社内の伴走AI『Casper』。完了プロジェクトの『整理(offboarding)』の最中。"
             "下記PJについて、vault既存素材(議事録/asset/DB書庫等)と人の投入資料で"
             f"**既に分かっている事は問わず**、永続結晶化に『まだ足りない穴』だけを突く質問を**{n_q}個**挙げよ。"
             "**投入資料が複数ある時は、各資料・各観点(段取り/落とし穴/判断根拠/外部やりとり)の穴を漏らさず**、"
@@ -5086,7 +5440,7 @@ def feed_save(saved_as, description, summary, qa, filename):
 def graph_data():
     """vault のノード(ノート)＋エッジ([[link]]) を抽出。"""
     import glob
-    V = os.path.join(HERE, "..", "vault")
+    V = os.path.join(pack_paths.VAULT)
     GROUP = {"20_people": "people", "90_db_archives": "project", "80_legacy_score": "legacy",
              "10_meetings": "comms", "30_culture_rules": "company",
              "50_asset_shadows": "asset", "00_inbox": "learned"}
@@ -5159,34 +5513,13 @@ def org_data():
     """会社の組織構造(指示系統)をネットワークで返す。
     studio bokan → Visual Arts / Spatial Tech の2部門 → 各領域(hp6準拠) → 社員(役割で配属)。
     社員配属は名鑑(役割)からの推定。殿の訂正で ORG 定義を直すだけで反映される。"""
-    # 部門→領域(hp6 準拠)
-    ORG = {
-        "Visual Arts Division": ["VFX & Cinematic", "Animation & Character", "Design & Commercial"],
-        "Spatial Tech Division": ["Drone & Spatial", "DX Visualization", "R&D & Interactive"],
-    }
-    # 社員→領域(名鑑の役割から推定。uid は calendar_accounts と対応)
-    MEMBERS = [
-        # (表示名, 領域, uid, 役割)
-        ("黒丸クロマル", "Animation & Character", 46, "animator"),
-        ("Mabuchi Aogu", "Animation & Character", 38, "animator(OP/ED)"),
-        ("Rui", "Animation & Character", 37, "animation"),
-        ("tim", "Animation & Character", 42, "animation"),
-        ("hori shouichi", "Animation & Character", 34, "animation/AI生成"),
-        ("Li", "VFX & Cinematic", 43, "modeler"),
-        ("Yota Miyake", "VFX & Cinematic", 35, "modeler/LtCmp"),
-        ("Hnada Megumi", "VFX & Cinematic", 39, "lighting/comp"),
-        ("terajima", "VFX & Cinematic", 40, "lightcomp"),
-        ("yu", "VFX & Cinematic", 41, "lighting/comp"),
-        ("elvis", "R&D & Interactive", None, "program(Score)"),
-        ("nibu", "R&D & Interactive", 45, "開発"),
-        ("Hida", "VFX & Cinematic", 44, "(役割未確定)"),
-        ("Taoka", "Animation & Character", 32, "担当/制作"),
-        ("kohei", "DX Visualization", 29, "ディレクター/データ管理"),
-    ]
-    EXTERNAL = [("新井アライ", "VFX & Cinematic", "社外Houdini FX"),
-                ("PCL 越野", "Design & Commercial", "社外ディレクタ"),
-                ("タイプ", "VFX & Cinematic", "社外クラウドレンダ/FX"),
-                ("SOL", "VFX & Cinematic", "社外Houdini FX")]
+    # 組織図は pack から読む(M5: engine の構造焼き付けを解消)。pack に org 無ければ vault グラフのみ。
+    import pack_config as _pc
+    _org = _pc.get("org", {}) or {}
+    ROOT = _org.get("root", "")
+    ORG = _org.get("divisions", {}) or {}
+    MEMBERS = [tuple(m) for m in (_org.get("members", []) or [])]
+    EXTERNAL = [tuple(e) for e in (_org.get("external", []) or [])]
     nodes, links = [], []
     nmap, seen_e = {}, set()
 
@@ -5199,10 +5532,13 @@ def org_data():
         if s != t and (s, t) not in seen_e and (t, s) not in seen_e:
             seen_e.add((s, t)); links.append({"source": s, "target": t})
 
-    # ① 組織骨格: studio bokan → 部門 → 領域
-    addnode({"id": "studio bokan", "label": "studio bokan", "group": "root"})
+    # ① 組織骨格: root → 部門 → 領域(root は pack 由来)
+    if ROOT:
+        addnode({"id": ROOT, "label": ROOT, "group": "root"})
     for div, areas in ORG.items():
-        addnode({"id": div, "label": div, "group": "division"}); addlink("studio bokan", div)
+        addnode({"id": div, "label": div, "group": "division"})
+        if ROOT:
+            addlink(ROOT, div)
         for ar in areas:
             addnode({"id": ar, "label": ar, "group": "area"}); addlink(div, ar)
 
@@ -5215,7 +5551,7 @@ def org_data():
 
     # ③ 人物表示名 → people ノート(base) の対応表(name: 行で照合)
     import glob
-    V = os.path.join(HERE, "..", "vault")
+    V = os.path.join(pack_paths.VAULT)
     name2base = {}
     for p in glob.glob(os.path.join(V, "20_people", "*.md")):
         try:
@@ -5252,7 +5588,7 @@ def org_data():
 def node_data(node_id):
     """1ノード(vaultノート)の中身を覗く: 種別・蒸留要約・つながり先を返す。"""
     import glob
-    V = os.path.join(HERE, "..", "vault")
+    V = os.path.join(pack_paths.VAULT)
     GROUP = {"20_people": "people", "90_db_archives": "project", "80_legacy_score": "legacy",
              "10_meetings": "comms", "30_culture_rules": "company",
              "50_asset_shadows": "asset", "00_inbox": "learned"}
@@ -5287,6 +5623,36 @@ def node_data(node_id):
     neigh = [{"id": x, "label": lbl.get(x, x), "group": grp.get(x, "other")} for x in dict.fromkeys(neigh)]
     return {"id": node_id, "name": name, "type": typ, "group": GROUP.get(folder, "other"),
             "folder": folder, "summary": summary, "neighbors": neigh}
+
+
+# ── M4 commit 共通: outbox 監査台帳（Fable監査2026-07-17 で畳む）──
+# 【enforcement の唯一のチョークポイントは casper_authority.allowed()】——各 execute() が必ず呼ぶ。
+# outbox は**監査台帳＋冪等キー**であって権限ゲートではない（audience=カード表示対象 と allowed=実行可能者 は別集合ゆえ、
+# 台帳の approve を権限判定に使うと director 等の正当な書込を弾く）。台帳整合のため、実行者を必ず自レコードの
+# audience に含め（approve が None で proposed に固着するバグを塞ぐ）、propose→approve→executing まで進めて返す。
+def _m4_ledger_open(verb, tool, args, actor_uid, summary, target, snap):
+    """outbox に verb 記録を起こし approve→executing まで進める。返り rec or None。actor は必ず audience に含める。"""
+    if not casper_outbox:
+        return None
+    try:
+        aud = casper_authority.audience_for(verb, target or {}, snap) if casper_authority else []
+        aud = sorted(set(aud) | ({str(actor_uid)} if actor_uid else set()))   # 実行者を必ず含める＝台帳整合
+        rec = casper_outbox.propose(tool, args, str(actor_uid or ""), summary, verb=verb, audience=aud)
+        casper_outbox.approve(rec["id"], uid=actor_uid)
+        casper_outbox.mark_executing(rec["id"])
+        return rec
+    except Exception:
+        return None
+
+
+def _m4_ledger_close(rec, ok, info):
+    """実行結果を台帳へ確定（sent/failed）。台帳は事実の記録＝enforcement はしない。"""
+    if not (rec and casper_outbox):
+        return
+    try:
+        (casper_outbox.mark_sent if ok else casper_outbox.mark_failed)(rec["id"], info)
+    except Exception:
+        pass
 
 
 class H(BaseHTTPRequestHandler):
@@ -5589,7 +5955,13 @@ class H(BaseHTTPRequestHandler):
                 active = ANTHROPIC_MODEL
             else:
                 active = A.model
-            self._json({"ok": True, "model": active, "backend": BACKEND})
+            _ctx = _load_context()                                  # C(逆混入畳み)検証ゲート: engine_policy.md が受け皿として載っているか
+            # 「未確認をtrueと名乗るな」(Fable): ファイル存在でなく、policy が実際に core へ載った sentinel で判定。
+            # 在るが読めぬ時は "digest" に倒れ、build_brain_digest の fail-safe が policy を出し続ける=窓ゼロ。
+            _pol = "engine" if "回答方針" in _ctx.get("core", "") else "digest"
+            self._json({"ok": True, "model": active, "backend": BACKEND,
+                        "policy": _pol, "ctx_sections": len(_ctx.get("sections", [])),
+                        "ctx_core_len": len(_ctx.get("core", ""))})
         else:
             self.send_response(404); self.end_headers()
 
@@ -6192,6 +6564,203 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
+        if self.path == "/api/assign/commit":          # M4 Phase1: アサイン確定→W2ガード付きexecute(admin=MCP即時/pm・lead=BFF待ち)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (casper_assign and casper_authority):
+                self._json({"ok": False, "error": "assign機構が無効にござる"}); return
+            tid = str(req.get("task_id") or ""); au = str(req.get("assignee_uid") or "")
+            if not tid or not au:
+                self._json({"ok": False, "error": "task_id/assignee_uid が要りまする"}); return
+            if not WRITE_TOKEN:
+                self._json({"ok": False, "error": "write token 未設定のため実行できませぬ(ニブ殿のtoken待ち)"}); return
+            snap = casper_authority._load_snapshot()
+
+            def _read(t):
+                try:
+                    r = casper_tools._get(f"/tasks/{t}") if casper_tools else None
+                    return r if (isinstance(r, dict) and r.get("id") is not None) else None
+                except Exception:
+                    return None
+
+            def _write(t, u, actor):
+                # MCP update_task: assignee は **username**（uidでなく）・actor_id 必須。uid→username へ解決して書く。
+                uname = _uid_to_name(u)
+                if not uname or uname == "?":
+                    return False
+                res = (casper_mcp.call_tool("update_task", {"task_id": int(t), "assignee": uname, "actor_id": int(actor)},
+                                            token=WRITE_TOKEN, actor=actor) if casper_mcp else "(MCP無効)")
+                try:
+                    return bool(json.loads(res).get("ok"))
+                except Exception:
+                    return False
+            # 監査台帳(W4冪等)。enforcement は execute 内の allowed()。二重割当はW2(実行直前読み戻し)が防ぐ。
+            cur0 = _read(tid)
+            orec = _m4_ledger_open("assign", "assign_task", {"task_id": int(tid) if tid.isdigit() else tid, "assigned_to": au},
+                                   who.get("uid"), f"アサイン: task {tid} → uid {au}",
+                                   {"project_id": (cur0 or {}).get("project_id"), "assignee": ""}, snap)
+            ok, info = casper_assign.execute(tid, au, who.get("uid") or "", snap=snap, live_read=_read, live_write=_write)
+            _m4_ledger_close(orec, ok, info)
+            name = _uid_to_name(au)
+            msg = (f"{name} さんに割り当て申した。" if ok else
+                   {"toctou_already_assigned": "その間に別の方が担当に入っておりました（二重割当を防ぎました）。画面を更新してくだされ。",
+                    "toctou_status_moved": "その間に工程が進んでおりました。画面を更新してくだされ。",
+                    "bff_wire_pending": "この権限での割当は Score 側の結線（Elvis殿）待ちにござる。今しばし。",
+                    "not_allowed": "この操作の権限がございませぬ。",
+                    "read_failed": "タスクの現状を読めませなんだ（時間をおいて再度）。",
+                    }.get(info.split(":")[0], f"割り当てできませなんだ（{info}）。"))
+            self._json({"ok": ok, "info": info, "message": msg, "assignee": name, "task_id": tid})
+            return
+        if self.path == "/api/status/commit":          # M4 Phase4: status更新確定→W2ガード付きexecute(納品/客先承認/対象外)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (casper_status and casper_authority and casper_mcp):
+                self._json({"ok": False, "error": "status機構が無効にござる"}); return
+            verb = str(req.get("verb") or ""); tid = str(req.get("task_id") or "")
+            if verb not in casper_status.STATUS_VERBS or not tid:
+                self._json({"ok": False, "error": "verb/task_id が要りまする"}); return
+            if not WRITE_TOKEN:
+                self._json({"ok": False, "error": "write token 未設定のため実行できませぬ"}); return
+            vdef = casper_authority.verbs().get(verb, {})
+            # typed確認（omit・殿決定: 取り消しにくい操作は明示入力を要求）
+            if vdef.get("confirm") == "typed" and str(req.get("confirm") or "").strip() != str(vdef.get("label") or "").strip():
+                self._json({"ok": False, "error": f"確認のため「{vdef.get('label')}」と入力してくだされ"}); return
+            snap = casper_authority._load_snapshot()
+
+            def _read(t):
+                try:
+                    r = casper_tools._get(f"/tasks/{t}") if casper_tools else None
+                    return r if (isinstance(r, dict) and r.get("id") is not None) else None
+                except Exception:
+                    return None
+
+            def _write(t, to_status, actor):
+                res = casper_mcp.call_tool("update_task", {"task_id": int(t), "status": to_status, "actor_id": int(actor)},
+                                           token=WRITE_TOKEN, actor=actor)
+                try:
+                    return bool(json.loads(res).get("ok"))
+                except Exception:
+                    return False
+            cur0 = _read(tid)
+            evidence = req.get("evidence")
+            _args = {"task_id": int(tid) if tid.isdigit() else tid, "status": vdef.get("to_status")}
+            if evidence:
+                _args["evidence"] = str(evidence)[:500]
+            orec = _m4_ledger_open(verb, "update_task", _args, who.get("uid"), f"{vdef.get('label')}: task {tid}",
+                                   {"project_id": (cur0 or {}).get("project_id"), "assignee": str((cur0 or {}).get("assigned_to") or "")}, snap)
+            ok, info = casper_status.execute(verb, tid, who.get("uid") or "", snap=snap, evidence=evidence,
+                                             live_read=_read, live_write=_write)
+            _m4_ledger_close(orec, ok, info)
+            msg = (f"{vdef.get('label')}いたした（{vdef.get('to_status')}）。" if ok else
+                   {"evidence_required": "客先承認には根拠リンク（証跡）が要りまする。",
+                    "already": "既にその状態にござる。",
+                    "not_allowed": "この操作の権限、または現在の状態からは実行できませぬ。",
+                    "read_failed": "タスクの現状を読めませなんだ。",
+                    }.get(info.split(":")[0], f"実行できませなんだ（{info}）。"))
+            self._json({"ok": ok, "info": info, "message": msg, "task_id": tid})
+            return
+        if self.path == "/api/minutes/commit":         # M4 Phase3: 議事録タスクの起票→bulk_create_tasks(tier≥lead)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (casper_minutes and casper_mcp and casper_authority):
+                self._json({"ok": False, "error": "起票機構が無効にござる"}); return
+            items = req.get("tasks") or []
+            if not items:
+                self._json({"ok": False, "error": "起票するタスクを選んでくだされ"}); return
+            if not WRITE_TOKEN:
+                self._json({"ok": False, "error": "write token 未設定のため起票できませぬ"}); return
+            uid = str(who.get("uid") or "")
+            if not uid.isdigit():                      # Fable監査: actor_id=28 フォールバックを廃止。uid不明は起票させぬ(actor偽装防止)
+                self._json({"ok": False, "error": "本人確認ができませぬ（起票には認証が要りまする）"}); return
+            snap = casper_authority._load_snapshot()
+            # Fable監査(危険D): 他5verbと同じく casper_authority.allowed("create_task") を通す(tier だけでなく scope/audience)。
+            # 議事録のPJ(候補の project_id)に対する create_task 権限で判定＝他PJ議事録からの越境起票を防ぐ。
+            _pid = next((str(it.get("project_id")) for it in items if it.get("project_id") is not None), "")
+            _ok, _rsn = casper_authority.allowed("create_task", uid, {"project_id": _pid, "assignee": ""}, from_status="", snap=snap)
+            if not _ok:
+                _msg = {"tier_too_low": "タスク起票の権限がございませぬ（リード／PM以上）",
+                        "out_of_scope": "この案件（PJ）はご担当の範囲外ゆえ起票できませぬ",
+                        "snapshot_stale_admin_only": "権限情報が古く、今は管理者のみ起票できまする"}.get(_rsn.split(":")[0], f"起票できませぬ（{_rsn}）")
+                self._json({"ok": False, "error": _msg}); return
+            # bulk_create_tasks は project_id を各itemに持たず、shot(shot_code)→shot_id 自動解決＋type/assignee(username)/due/note。
+            # 新規タスクには **shot が必須**（無いと Score が置けぬ＝殿指摘）。shot 未指定は起票せず理由を返す。
+            payload, skipped = [], []
+            for it in items:
+                nm = str(it.get("name") or "").strip()
+                if not nm:
+                    continue
+                shot = str(it.get("shot") or "").strip()
+                if not shot:
+                    skipped.append(nm + "（shot未指定）"); continue
+                t = {"shot": shot, "note": nm}          # 議事録の一文は note に（作業名でなく指示ゆえ）
+                typ = it.get("type")
+                t["type"] = typ if typ in casper_minutes.SCORE_TYPES else "other"
+                if it.get("assignee_uid"):
+                    un = _uid_to_name(it["assignee_uid"])
+                    if un and un != "?":
+                        t["assignee"] = un              # assignee は username
+                if it.get("due"):
+                    t["due"] = it["due"]
+                payload.append(t)
+            if not payload:
+                self._json({"ok": False, "error": "起票できるタスクがございませぬ（新規タスクには shot 指定が要りまする）",
+                            "skipped": skipped}); return
+            res = casper_mcp.call_tool("bulk_create_tasks", {"actor_id": int(uid), "tasks": payload},
+                                       token=WRITE_TOKEN, actor=uid)
+            try:
+                rj = json.loads(res)
+                ok = bool(rj.get("ok") or rj.get("created") or rj.get("created_count"))
+            except Exception:
+                rj = {"raw": str(res)[:300]}; ok = False
+            _sk = ("／ shot未指定で見送り: " + "、".join(skipped)) if skipped else ""
+            self._json({"ok": ok, "result": rj, "count": len(payload), "skipped": skipped,
+                        "message": (f"{len(payload)}件のタスクを起票いたした。{_sk}" if ok else f"起票に失敗いたした（{str(res)[:150]}）")})
+            return
+        if self.path == "/api/reschedule/commit":      # M4 Phase2: 日程変更確定→W2ガード付きexecute(本人/admin=MCP即時/pm・lead他者=BFF待ち)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (casper_reschedule and casper_authority):
+                self._json({"ok": False, "error": "reschedule機構が無効にござる"}); return
+            tid = str(req.get("task_id") or ""); nd = str(req.get("new_due") or "")
+            if not tid or not nd:
+                self._json({"ok": False, "error": "task_id/new_due が要りまする"}); return
+            if not WRITE_TOKEN:
+                self._json({"ok": False, "error": "write token 未設定のため実行できませぬ(ニブ殿のtoken待ち)"}); return
+            snap = casper_authority._load_snapshot()
+
+            def _read(t):
+                try:
+                    r = casper_tools._get(f"/tasks/{t}") if casper_tools else None
+                    return r if (isinstance(r, dict) and r.get("id") is not None) else None
+                except Exception:
+                    return None
+
+            def _write(t, new_due, actor):
+                # MCP update_task の正しい引数: due(≠due_date)・actor_id 必須。返りJSONの ok を見る。
+                res = (casper_mcp.call_tool("update_task", {"task_id": int(t), "due": new_due, "actor_id": int(actor)},
+                                            token=WRITE_TOKEN, actor=actor) if casper_mcp else "(MCP無効)")
+                try:
+                    return bool(json.loads(res).get("ok"))
+                except Exception:
+                    return False
+            cur0 = _read(tid)
+            orec = _m4_ledger_open("reschedule", "update_task", {"task_id": int(tid) if tid.isdigit() else tid, "due_date": nd},
+                                   who.get("uid"), f"日程変更: task {tid} → {nd}",
+                                   {"project_id": (cur0 or {}).get("project_id"), "assignee": str((cur0 or {}).get("assigned_to") or "")}, snap)
+            ok, info = casper_reschedule.execute(tid, nd, who.get("uid") or "", snap=snap, live_read=_read, live_write=_write)
+            _m4_ledger_close(orec, ok, info)
+            msg = (f"締切を {nd} に変更いたした。" if ok else
+                   {"task_closed": "そのタスクは既に完了しており、日程変更はできませぬ。",
+                    "bff_wire_pending": "この権限での他者タスクの日程変更は Score 側の結線（Elvis殿）待ちにござる。",
+                    "not_allowed": "この操作の権限がございませぬ（ご本人・PM／リード以上が変更できまする）。",
+                    "read_failed": "タスクの現状を読めませなんだ（時間をおいて再度）。",
+                    }.get(info.split(":")[0], f"日程変更できませなんだ（{info}）。"))
+            self._json({"ok": ok, "info": info, "message": msg, "new_due": nd, "task_id": tid})
+            return
         if self.path == "/api/dropbox/transfer":       # ファイル → Dropbox転送(パスワード付き共有リンク)
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
@@ -6549,12 +7118,44 @@ class H(BaseHTTPRequestHandler):
         _gate = casper_person_gate.resolve(who.get("uid"), ll_user, convo=msgs) if casper_person_gate else {}
         if _gate.get("digest"):                          # 理解ゲート: その人の既定ファセット/別名を前提として注入(入力の接地)
             sysadd += _gate["digest"]
-        table_card = _table_card(ll_user, who)           # ④ 一覧意図→機構が表カードを描画(LLMは表を書かない)
+        assign_card = _assign_card(ll_user, who)         # M4 Phase1: アサイン提案意図(閲覧全員・実行lead+)→スロット＋候補カード
+        mine_table = None; mine_prose = None
+        # アサイン意図だが提案カードが出ない＝「私の」明示＝本人のアサイン表を接地で返す(LLMに落として幻覚させない)
+        if not assign_card and casper_assign and casper_authority and _ASSIGN_RE.search(ll_user or ""):
+            mine_table, mine_prose = _my_tasks_table(who)
+        resched = None if (assign_card or mine_prose) else _reschedule_card(ll_user, who)   # M4 Phase2: 日程変更→影響プレビュー/聞き返し
+        resched_card = resched.get("card") if resched else None
+        resched_reply = (resched.get("clarify") if resched else None) or (_resched_prose(resched_card) if resched_card else None)
+        mtg_adv = None if (assign_card or mine_prose or resched) else _meeting_advisory(ll_user, who)   # M4 Phase2': MTG助言(読取)
+        mtg_table = mtg_adv.get("table") if mtg_adv else None
+        mtg_prose = mtg_adv.get("prose") if mtg_adv else None
+        status_res = None if (assign_card or mine_prose or resched or mtg_adv) else _status_card(ll_user, who)   # M4 Phase4: status更新
+        status_card = status_res if (status_res and status_res.get("verb")) else None
+        status_reply = (status_res.get("clarify") if status_res else None) or (_status_prose(status_card) if status_card else None)
+        minutes = None if (assign_card or mine_prose or resched or mtg_adv or status_res) else _minutes_card(ll_user, who)   # M4 Phase3: 議事録→タスク起票
+        minutes_card = minutes if (minutes and minutes.get("candidates")) else None
+        minutes_reply = None
+        if minutes:
+            if minutes.get("candidates"):
+                minutes_reply = (f"議事録「{minutes.get('meeting_title')}」（{minutes.get('date')}・{minutes.get('project')}）から "
+                                 f"{len(minutes['candidates'])}件のタスク候補を起こし申した。"
+                                 + ("起票するものを選び、内容を検めて『起票』を押してくだされ。" if minutes.get("can_act")
+                                    else "（起票の実行はリード／PM以上が行えまする。下は確認用にござる。）"))
+            else:
+                minutes_reply = minutes.get("clarify")
+        table_card = None if (assign_card or mine_prose or resched or mtg_adv or status_res or minutes) else _table_card(ll_user, who)   # ④ 一覧意図→表カード
         if table_card:
-            sysadd += ("\n\n## 【表示装置の注記】要求された一覧は『表カード』として機構が真実源から描画済み"
-                       f"(タイトル『{table_card['title']}』・{len(table_card['rows'])}行)。"
-                       "**あなたは表やmarkdown表、各行の箇条書きで一覧を再現するな**(装置と重複する)。"
-                       "全体の要点(件数・納期超過の有無・注視点)と次の一手だけを2〜4文の簡潔な散文で述べよ。")
+            # 弱qwenは「表カードとして描画済み・再現するな」というメタ指示をそのまま鸚鵡返しし、ユーザーへ
+            # 「表示装置が既に描画済み・重複して再現しません」と漏らす(殿指摘2026-07-17: 機械臭く分かりづらい)。
+            # → 注記を"要約の作り方"に反転し、画面/自分の制約に触れる語を明示的に禁止(下段6915で機構除去も併走)。
+            sysadd += ("\n\n## 【この一覧の答え方】"
+                       f"聞かれた一覧（{table_card['title']}・全{len(table_card['rows'])}件）は、この下に見やすい表で自動で並ぶ。"
+                       "あなたの仕事は“表の再掲”ではなく“要約”。"
+                       "**表・markdown表・各行の箇条書きで一覧を作り直すな。**"
+                       "また『表カード』『表示装置』『描画』『重複』『再現しません』『装置』など、"
+                       "画面表示や自分の制約に触れる言葉は一切使うな。"
+                       "代わりに部下へ語るように——総数、負荷が偏っている担当やPJ、気になる点——を2〜4文の自然な日本語で述べ、"
+                       "末尾に『PJ別・担当別で見たい時や、対応を一緒に考えたい時は言ってくだされ』と一言添えよ。")
         _sched = schedule_csv_export(ll_user, who)       # ① 工程表CSV: 既存タスク→Calendar公式CSVを機構生成(殿指示2026-07-10)
         if _sched:
             _slink, _smeta = _sched
@@ -6620,7 +7221,7 @@ class H(BaseHTTPRequestHandler):
                 pass
         tools = (tools or []) + [    # Vimeo ライブ検索 & パスワード設定(casper_vimeo)
             {"type": "function", "function": {"name": "vimeo_search",
-             "description": "studio bokan の Vimeo ライブラリ(全動画・公開/非公開問わず)を名前で検索し、一致動画(タイトル・リンク・id)を返す。動画を探す/見せたい時に使う。",
+             "description": "自社の Vimeo ライブラリ(全動画・公開/非公開問わず)を名前で検索し、一致動画(タイトル・リンク・id)を返す。動画を探す/見せたい時に使う。",
              "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "検索語(動画名やPJ名の一部)"}}, "required": ["query"]}}},
             {"type": "function", "function": {"name": "vimeo_set_password",
              "description": "指定 Vimeo 動画(video_id)にパスワード付き公開を設定し、共有リンクとパスワードを返す。video_id は vimeo_search の結果の id を使う。",
@@ -6663,17 +7264,40 @@ class H(BaseHTTPRequestHandler):
             # 以降の生成/カードは不要 → routed で生成ループskip
         else:
             routed = None
+        _assign_short = bool(assign_card or mine_prose or resched or mtg_adv or status_res or minutes)   # M4機構は即応→LLM/router/choicesを短絡
+        if _assign_short and not _snz:              # M4: アサイン/日程/MTG助言/status更新/議事録起票は機構で即応(LLM非経由・最優先)
+            if assign_card:
+                _nsl = assign_card.get("total", len(assign_card.get("slots", [])))
+                if assign_card.get("can_act"):
+                    _rep = (f"アサイン待ち（担当未定）のタスクが {_nsl}件ござる。各タスクに"
+                            "“これまで誰が担当したか(実績)”から候補を添えてござる。"
+                            "候補を選んで押せば、その場で担当が入りまする（心当たりが無ければ流してくだされ）。")
+                else:
+                    _rep = (f"アサイン待ち（担当未定）のタスクが {_nsl}件ござる。下に一覧と、"
+                            "“これまで誰が担当したか(実績)”からの候補を添えてござる。"
+                            "（割り当ての実行はリード／PM以上が行えまする。）")
+            elif mine_prose:
+                _rep = mine_prose
+            elif resched:
+                _rep = resched_reply
+            elif mtg_adv:
+                _rep = mtg_prose
+            elif status_res:
+                _rep = status_reply
+            else:
+                _rep = minutes_reply
+            routed = {"_assign": True, "reply": _rep}
         # Q1(Fable 選択カード): 曖昧な指示語(それ/あの件…)＋action意図で対象候補が複数→qwenに推測(捏造)
         # させず選択カードで人に決めさせる。routerより優先(推測の芽を潰す)。say型ゆえ副作用起票はしない。
-        _fdm = None if _snz else _file_delivery_dm(ll_user, who, convo=msgs)   # 最優先: 文脈の共有リンク→DM(『これtetsuoに送っといて』の deixis で選択カードに横取りされぬよう choices より先)
-        choices_obj = None if (_snz or _fdm) else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定
-        if not choices_obj and not _snz and not _fdm:    # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
+        _fdm = None if (_snz or _assign_short) else _file_delivery_dm(ll_user, who, convo=msgs)   # 最優先: 文脈の共有リンク→DM(『これtetsuoに送っといて』の deixis で選択カードに横取りされぬよう choices より先)
+        choices_obj = None if (_snz or _fdm or _assign_short) else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定
+        if not choices_obj and not _snz and not _fdm and not _assign_short:    # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
             choices_obj = _pj_task_choices(ll_user)
-        if not _snz:
+        if not _snz and not _assign_short:
             attn_cards = _attention_action_cards(who, ll_user)       # Q4: 今日の3件の overdue/loop を選択カードで(draftは①で承認カード)
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
         # 承認カードを機構生成→自由文tool-callを迂回。確定時は生成ループをスキップ(salvageのモグラ叩き不要に)。
-        if not _snz:                                # snooze確定時は routed を維持(上書き禁止)
+        if not _snz and not _assign_short:          # snooze/アサイン即応確定時は routed を維持(上書き禁止)
             routed = _fdm or (None if choices_obj else (_action_router(ll_user, sysadd, who, convo=msgs, gate=_gate) if _looks_like_action(ll_user) else None))
             if choices_obj:                         # 曖昧→選択カード提示。生成ループはスキップ(routed扱い)
                 routed = {"_choices": True, "reply": choices_obj["prompt"]}
@@ -6685,7 +7309,7 @@ class H(BaseHTTPRequestHandler):
             _n, _note = _surface_pending_drafts(who, pending_actions)   # Q3C強処方: 下書きの中身を問う=決定的fast path(qwen非経由・憶測ゼロ)
             if pending_actions:
                 routed = {"_surfaced": True, "reply": _note}
-        if routed and (routed.get("_surfaced") or routed.get("_choices")):   # 浮上/選択=reply表示のみ(起票しない)
+        if routed and (routed.get("_surfaced") or routed.get("_choices") or routed.get("_assign")):   # 浮上/選択/アサイン=reply表示のみ(起票しない)
             final = routed["reply"]
         elif routed:
             try:
@@ -6913,7 +7537,13 @@ class H(BaseHTTPRequestHandler):
             # ※代表名augmentation(「主なものは…全N件は下表の通り」)は撤去(Fable審査: table_cardが名前を網羅済ゆえ
             #   本文で二重render=蛇足。DM下書き等の非一覧応答にまで漏れ、件数不整合/"test"混入を招いた)。剥がすだけ。
             _nod = [ln for ln in final.split("\n") if not re.match(r"\s*\|.*\|", ln)]   # md表行(|…|)を除去
-            _nod_txt = re.sub(r"\n{3,}", "\n\n", "\n".join(_nod)).strip()
+            _txt = "\n".join(_nod)
+            # メタ漏れの文を除去: qwenがsystem注記を鸚鵡返しし「表示装置が既に描画済み・重複して再現しません」等を
+            #   ユーザーへ漏らす弱点(殿指摘2026-07-17)。文単位で落とし、空になれば下段salvageが要約を復元する。
+            _META_LEAK = re.compile(r"(表\s*カード|表示装置|描画(済|し|され)|再現(しません|しない|せず|いたしません)|"
+                                    r"重複(して)?.{0,8}(一覧|表|再現)|装置と(の)?重複|一覧を(再度)?(再現|再掲)し)")
+            _kept = [s for s in re.split(r"(?<=[。\n])", _txt) if s.strip() and not _META_LEAK.search(s)]
+            _nod_txt = re.sub(r"\n{3,}", "\n\n", "".join(_kept)).strip()
             if _nod_txt:
                 final = _nod_txt
         if not final.strip() and (diagram or table_card or _sched):   # チャート/表/CSVだけで本文が空(qwenのAURORA前置等)→機構で復元
@@ -6949,6 +7579,18 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write((json.dumps({"diagram": diagram}) + "\n").encode())
             if table_card:                          # ④ 表カード(機構描画・截ち切れ/転写捏造/全件ダンプの構造解)
                 self.wfile.write((json.dumps({"table": table_card}, ensure_ascii=False) + "\n").encode())
+            if assign_card:                         # M4 Phase1: アサイン提案カード(スロット＋実績候補・押すと/api/assign/commit)
+                self.wfile.write((json.dumps({"assign": assign_card}, ensure_ascii=False) + "\n").encode())
+            if mine_table:                          # M4 Phase1: 本人のアサイン表(接地・作業者の「アサインある？」への答え)
+                self.wfile.write((json.dumps({"table": mine_table}, ensure_ascii=False) + "\n").encode())
+            if resched_card:                        # M4 Phase2: 日程変更カード(影響プレビュー＋確定ボタン→/api/reschedule/commit)
+                self.wfile.write((json.dumps({"reschedule": resched_card}, ensure_ascii=False) + "\n").encode())
+            if mtg_table:                           # M4 Phase2': MTG助言の表(会議前議題/そろそろ定例・読取のみ)
+                self.wfile.write((json.dumps({"table": mtg_table}, ensure_ascii=False) + "\n").encode())
+            if status_card:                         # M4 Phase4: status更新カード(納品/客先承認/対象外→/api/status/commit)
+                self.wfile.write((json.dumps({"status_card": status_card}, ensure_ascii=False) + "\n").encode())
+            if minutes_card:                        # M4 Phase3: 議事録→タスク候補カード(検品→/api/minutes/commit)
+                self.wfile.write((json.dumps({"minutes": minutes_card}, ensure_ascii=False) + "\n").encode())
             _emitted_opts = []                      # ③ 次ターンの選択検知用に、出したカードの option を控える
             if choices_obj:                         # Q1: 選択カード(say型・曖昧指示語の解決装置)をUIへ
                 self.wfile.write((json.dumps({"choices": choices_obj}, ensure_ascii=False) + "\n").encode())
@@ -7278,6 +7920,10 @@ def _notify_scheduler():
         本人が開けば1タップ承認で送れる状態にしておく。純機構の定型文(LLM非使用)。dedupはoutbox側(同一key)。"""
         if not casper_outbox:
             return
+        try:                                              # project_id → PJ名(承認者が"どのPJか"を判断できるように)
+            _pjs = {str(p.get("id")): p.get("name") for p in (json.load(open("/tmp/cal_projects.json")).get("items") or [])}
+        except Exception:
+            _pjs = {}
         for n in notifs:
             if n.get("type") != "stalled_fb":
                 continue
@@ -7287,8 +7933,15 @@ def _notify_scheduler():
                 if a and a != str(uid):
                     by.setdefault(a, []).append(it)
             for aid, its in by.items():
-                lst = "、".join(f"{(it.get('shot') or '')} {(it.get('name') or '')}".strip() for it in its[:8])
-                body = ("お疲れ様です。下記の確認が滞っております。お手すきにご確認いただけますと助かります。\n・" + lst)
+                bypj = {}                                 # 一人が複数PJに跨る場合はPJ別にまとめる
+                for it in its:
+                    pn = _pjs.get(str(it.get("project_id"))) or "（PJ不明）"
+                    label = f"{(it.get('shot') or '')} {(it.get('name') or '')}".strip()
+                    d = it.get("days")
+                    bypj.setdefault(pn, []).append("・" + label + (f"（{d}日停滞）" if d else ""))
+                sections = [f"【{pn}】\n" + "\n".join(rows) for pn, rows in bypj.items()]
+                body = ("お疲れ様です。下記の確認が滞っております。お手すきにご確認いただけますと助かります。\n\n"
+                        + "\n\n".join(sections))
                 args = {"to_user_id": int(aid) if aid.isdigit() else aid, "body": body}
                 try:
                     casper_outbox.propose("send_message", args, str(uid),

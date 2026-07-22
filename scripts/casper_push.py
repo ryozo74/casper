@@ -23,7 +23,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 HERE = os.path.dirname(os.path.abspath(__file__))
 VAPID_FILE = os.path.join(os.path.expanduser("~"), ".config", "casper", "vapid.json")
 SUBS_FILE = os.path.join(HERE, "push_subs.json")
-VAPID_SUB = os.environ.get("CASPER_VAPID_SUB", "mailto:ryoji@studiobokan.com")  # Apple push は .local 等を弾く→実ドメインmailto
+try:                                                    # VAPID subject(連絡先)は配備固有ゆえ env→pack/config から。
+    import pack_config as _pc
+    VAPID_SUB = os.environ.get("CASPER_VAPID_SUB") or _pc.get("vapid_sub", "mailto:casper@example.com")
+except Exception:
+    VAPID_SUB = os.environ.get("CASPER_VAPID_SUB", "mailto:casper@example.com")  # Apple push は .local 等を弾く→実ドメインmailto
 
 
 def _b64u(b):

@@ -1,0 +1,28 @@
+# M4 権限層の宣言表（Fable設計・2026-07-17）。ハードコード禁止＝ここが tier 定義の真実源。
+# 実際の「誰がどの役職か」は authority_snapshot.json（Score role を写した snapshot）が上位ソース。
+# 本ファイルは role→tier の対応・tier順序・scope 定義・degrade 閾値 だけを持つ（小さく保つ）。
+
+# Score の役職 → Casper の tier（基本は同名で写す。独自の組織モデルは作らない）
+roles_to_tier:
+  admin: admin
+  director: director
+  pm: pm
+  lead: lead
+  user: user
+
+# tier の強さの順（後ろほど権限大）。allowed() の min_tier 判定に使う単一ソース。
+tier_order: [user, lead, pm, director, admin]
+
+# scope の意味（allowed() が参照）
+scopes:
+  own: 自分が assignee のタスク
+  project: 自分が pm/lead の project のタスク
+  cross: 全 project
+
+# snapshot がこれより古い（時間）と「権限不明」＝admin のみに縮退（失敗とゼロを別出口・Fable掟）
+snapshot_max_age_hours: 48
+
+# Ground-truth admins（不変の identity・殿=28）。snapshot が空/古くても常に admin として扱う"床"。
+# snapshot(Score role)が来れば roles で上書き・拡張される。これにより populate 前でも殿には承認カードが届き、
+# 殿(admin)承認のアサインは MCP(actor=admin)で今すぐ実行できる（pm/lead 委任のみ BFF=Elvis Q③ 待ち）。
+ground_truth_admins: ["28"]

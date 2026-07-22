@@ -158,7 +158,9 @@ def compute(uid, now=None):
                        "action": {"tool": "send_message", "hint": "催促DM下書き(まとめ)",
                                   "subjects": [f"{s['shot']} {s['name']}".strip() for s in new_stall],
                                   "items": [{"name": s.get("name"), "shot": s.get("shot"),
-                                             "assigned_to": s.get("assigned_to")} for s in new_stall]}})
+                                             "assigned_to": s.get("assigned_to"),
+                                             "project_id": s.get("project_id"),
+                                             "type": s.get("type"), "days": s.get("days")} for s in new_stall]}})
     ust["seen_stall"] = cur_stall
 
     st[ukey] = ust

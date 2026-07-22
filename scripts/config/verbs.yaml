@@ -1,0 +1,74 @@
+# M4 動詞レジストリ（Fable設計・2026-07-17）。Casper が提案できる"意図（動詞）"の宣言表＝唯一の真実源。
+# ここに無い操作は提案できない（set_status のような自由 verb は永久に作らない）。
+# 各 verb: changes/to_status/creates=何を変えるか, from_status=許す遷移元(any可), min_tier/scope=権限,
+#          audience=承認カードの表示対象規則, confirm=one_tap|typed, その他フラグ。
+#
+# ★Score が自動/専用で担う遷移は重複ゆえ載せない（A-6）:
+#    submit_for_qc(→qc: asset提出でScoreが自動) / approve_internal(→ap: Score /qc/approve が担う) / retake(→qc_fb)
+# ★from_status の暫定値は Elvis transitions.json 受領で確定する（現状は妥当な既定・W2 は default-deny）。
+
+verbs:
+  assign:                       # ② アサイン提案
+    label: アサイン提案
+    changes: assignee
+    from_status: [wt, mk]       # 検出条件: assignee 空 かつ この状態
+    min_tier: lead
+    scope: project
+    audience: pm_lead           # 承認カードは PJ の pm/lead に
+    confirm: one_tap
+
+  reschedule:                   # ③ 日程変更（＋影響プレビュー）
+    label: 日程変更
+    changes: due
+    from_status: any
+    min_tier: user
+    scope: own                  # 既定 own（上位 tier が project/cross へ拡大）
+    audience: scope
+    confirm: one_tap
+    preview: impact
+
+  record_client_approval:       # ① 客先承認の記録
+    label: 客先承認の記録
+    to_status: client_ap
+    from_status: [ap, qc]            # deliver除外(Fable監査: deliver→client_ap後退＝納品済巻き戻しの無意味遷移を塞ぐ)
+    min_tier: pm
+    scope: project
+    audience: pm_director
+    confirm: one_tap
+    require_evidence: true       # 殿裁可: 根拠リンク必須
+
+  mark_delivered:               # ① 納品
+    label: 納品
+    to_status: deliver
+    from_status: [ap, client_ap]     # 暫定
+    min_tier: pm
+    scope: project
+    audience: pm_director
+    confirm: one_tap
+
+  omit_task:                    # ① 対象外化（準破壊的）
+    label: 対象外
+    to_status: omit
+    from_status: any            # omit は任意状態から手動遷移可
+    min_tier: director
+    scope: cross
+    audience: director_admin
+    confirm: typed              # 殿裁可: タスク名の入力確認つき
+
+  create_meeting:              # ④B 会議作成
+    label: 会議作成
+    creates: event
+    event_type: MEETING
+    min_tier: pm
+    scope: project
+    audience: organizer_only    # 殿裁可: 主催者本人のみ
+    confirm: one_tap
+
+  create_task:                 # ④A 議事録→タスク起票（Fable監査: minutes を権限層へ畳む）
+    label: タスク起票
+    creates: task
+    from_status: any            # 新規作成ゆえ from は無い
+    min_tier: lead
+    scope: project              # そのPJの pm/lead 以上（他PJ議事録からの越境起票を防ぐ）
+    audience: pm_lead
+    confirm: one_tap

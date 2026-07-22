@@ -234,7 +234,7 @@
 <header>
   <button id="menubtn" title="スレッド一覧">☰</button>
   <div><h1 onclick="location.reload()" style="cursor:pointer" title="クリックで再読込">Casper</h1></div>
-  <nav class="nav"><a href="/learn">🧠 Casperに教える</a><a href="/play">🎲 Casperと遊ぶ</a><a href="/seiri">🧹 Casperで整理</a><a href="/peek">🔮 Casperをのぞく</a><a href="#" id="pushbtn" title="この端末に先回り通知(納期超過・FB停滞・朝ブリーフ)を届ける">🔔 通知</a></nav>
+  <nav class="nav"><a href="/seiri">🧹 整理</a><a href="/peek">🔮 のぞく</a><a href="#" id="pushbtn" title="この端末に先回り通知(納期超過・FB停滞・朝ブリーフ)を届ける">🔔 通知</a></nav>
   <span id="today" style="color:var(--mut);font-size:12px;margin-left:auto"></span>
   <div class="dot" id="who" title="ログイン"><span id="whoav">👤</span> <span id="whoname">ゲスト</span></div>
   <div class="dot" id="status"><b></b><span>接続確認中…</span></div>
@@ -490,7 +490,7 @@ async function ask(){
   const _disp=_nextDisplay; _nextDisplay=null;    // 選択肢クリック時は内部sayを隠し、押した項目名を吹き出しに出す
   const _ub=el('user'); _ub.textContent=(_disp||text); attachEdit(_ub.parentElement, history.length, text); history.push({role:'user',content:umsg});
   const b=el('bot'); b.classList.add('cursor'); b.textContent='';
-  let acc='',diagramUrl=null,pendingConfirms=[],pendingChoices=[],pendingTables=[]; const t0=performance.now();
+  let acc='',diagramUrl=null,pendingConfirms=[],pendingChoices=[],pendingTables=[],pendingAssign=[],pendingResched=[],pendingMinutes=[],pendingStatus=[]; const t0=performance.now();
   try{
     const r=await fetch('/api/chat',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:history, thread:curThread})});
@@ -508,6 +508,10 @@ async function ask(){
         else if(j.message&&j.message.content){ acc+=j.message.content; }
         else if(j.diagram){ diagramUrl=j.diagram; }
         else if(j.table){ pendingTables.push(j.table); }        // ④ 表カード(機構描画・並べ替えチップ付)
+        else if(j.assign){ pendingAssign.push(j.assign); }      // M4 Phase1: アサイン提案カード(スロット＋実績候補)
+        else if(j.reschedule){ pendingResched.push(j.reschedule); }  // M4 Phase2: 日程変更カード(影響プレビュー＋確定)
+        else if(j.minutes){ pendingMinutes.push(j.minutes); }        // M4 Phase3: 議事録→タスク起票カード(検品チェックリスト)
+        else if(j.status_card){ pendingStatus.push(j.status_card); } // M4 Phase4: status更新カード(納品/客先承認/対象外)
         else if(j.choices){ pendingChoices.push(j.choices); }   // Q1: 選択カード(say型・曖昧指示語の解決装置)
         else if(j.confirm){ pendingConfirms.push(j.confirm); }
         render(b,acc); log.scrollTop=log.scrollHeight;
@@ -521,6 +525,10 @@ async function ask(){
   if(diagramUrl){const da=document.createElement('a');da.href=diagramUrl;da.target='_blank';
     da.className='diagbtn';da.textContent='📊 図解を表示';b.appendChild(da);}
   pendingTables.forEach(t=>renderTable(b,t));         // ④ 表カード(機構描画・截ち切れ無し)
+  pendingAssign.forEach(a=>renderAssign(b,a));        // M4 Phase1: アサイン提案カード
+  pendingResched.forEach(p=>renderReschedule(b,p));   // M4 Phase2: 日程変更カード
+  pendingMinutes.forEach(m=>renderMinutes(b,m));      // M4 Phase3: 議事録→タスク起票カード
+  pendingStatus.forEach(s=>renderStatus(b,s));        // M4 Phase4: status更新カード
   pendingChoices.forEach(c=>renderChoices(b,c));      // Q1: 選択カード(先に=まず絞ってから承認)
   pendingConfirms.forEach(pa=>renderConfirm(b,pa));   // Stage2: 承認待ち操作のカード
   history.push({role:'assistant',content:acc});
@@ -606,7 +614,9 @@ function renderConfirm(b, pa){
   if(editable){
     talb=document.createElement('div'); talb.textContent='本文（送信前に編集できます）:'; talb.style.cssText='font-size:12px;color:#94a3b8;margin-bottom:4px';
     ta=document.createElement('textarea'); ta.value=pa.args.body||'';
-    ta.style.cssText='width:100%;box-sizing:border-box;min-height:84px;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;white-space:pre-wrap';
+    ta.style.cssText='width:100%;box-sizing:border-box;min-height:160px;max-height:360px;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;line-height:1.6;white-space:pre-wrap;overflow:auto';
+    // 内容に合わせて高さを自動フィット(長いリストも一望・上限で内部スクロール)
+    setTimeout(()=>{ try{ ta.style.height='auto'; ta.style.height=Math.min(360,Math.max(160,ta.scrollHeight+4))+'px'; }catch(_){} }, 0);
   }
   const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px';
   const ok=document.createElement('button'); ok.textContent='✅ 承認して実行';
@@ -641,6 +651,248 @@ function renderConfirm(b, pa){
   b.appendChild(c);
 }
 // ④ 表カード(Fable設計): 機構が真実源から描画した表。截ち切れ・転写捏造・全件ダンプが構造的に無い。
+// M4 Phase1: アサイン提案カード。スロット(担当未定タスク)＋実績候補ボタン→押すと /api/assign/commit で即割当。
+const _BASIS_JP={same_project_type:'同PJ・同種の実績',same_project:'同PJの実績',same_type:'同種の実績'};
+function renderAssign(b, a){
+  const slots=(a&&a.slots)||[]; if(!slots.length) return;
+  const wrap=document.createElement('div');
+  wrap.style.cssText='margin:10px 0;border:1px solid #2b3a55;border-radius:12px;overflow:hidden;background:#0e1626';
+  const h=document.createElement('div'); h.textContent='🧭 アサイン待ち '+(a.total||slots.length)+'件 — 候補は「これまで誰が担当したか（実績）」から';
+  h.style.cssText='padding:9px 14px;font-weight:700;color:#cfe0f5;background:#111a2b;border-bottom:1px solid #22304a;font-size:14px';
+  wrap.appendChild(h);
+  slots.forEach(s=>{
+    const row=document.createElement('div');
+    row.style.cssText='padding:11px 14px;border-bottom:1px solid #1a2740';
+    const pj=s.project||('PJ'+(s.project_id!=null?s.project_id:'?'));
+    const head=document.createElement('div'); head.style.cssText='margin-bottom:7px;font-size:13.5px;color:#e5edf7';
+    head.innerHTML='<b>'+esc(s.shot?s.shot+' ':'')+esc(s.task_name||('#'+s.task_id))+'</b>'
+      +' <span style="color:#8aa0bd;font-size:12px">— '+esc(pj)+' / '+esc(s.type||'-')+' / '+esc(s.status||'')+'</span>';
+    row.appendChild(head);
+    const st=document.createElement('div'); st.style.cssText='margin-top:7px;font-size:12.5px;color:#9fb3c8';
+    const cands=s.candidates||[];
+    const canAct=(s.can_act!==false);      // 割り当て実行できる閲覧者のみボタン(それ以外は候補を情報として表示)
+    if(!cands.length){
+      const none=document.createElement('div'); none.style.cssText='font-size:12.5px;color:#c7a86a';
+      none.textContent='候補なし（このPJ・種別の担当実績が無いタスク）'+(canAct?' — 手動でご判断くだされ':'');
+      row.appendChild(none);
+    } else if(canAct){
+      const bwrap=document.createElement('div'); bwrap.style.cssText='display:flex;flex-wrap:wrap;gap:7px';
+      cands.forEach(c=>{
+        const btn=document.createElement('button');
+        btn.innerHTML=esc(c.name||c.uid)+' <span style="opacity:.7;font-size:11px">'+(c.count||0)+'回·'+(_BASIS_JP[c.basis]||c.basis||'')+'</span>';
+        btn.style.cssText='padding:6px 12px;border-radius:8px;border:1px solid #2f6b4f;background:#132a20;color:#d7f0e2;cursor:pointer;font:inherit;font-size:12.5px';
+        btn.onclick=async()=>{
+          bwrap.querySelectorAll('button').forEach(x=>x.disabled=true);
+          st.textContent='「'+(c.name||c.uid)+'」に割り当て中…';
+          try{
+            const r=await jpost('/api/assign/commit',{task_id:s.task_id,assignee_uid:c.uid});
+            st.textContent=(r.ok?'✅ ':'⚠️ ')+(r.message||r.error||'');
+            if(r.ok){ head.style.opacity='.6'; bwrap.style.display='none'; }
+            else { bwrap.querySelectorAll('button').forEach(x=>x.disabled=false); }   // 失敗(toctou以外)は再挑戦可
+          }catch(e){ st.textContent='⚠️ 通信失敗: '+(e.message||e); bwrap.querySelectorAll('button').forEach(x=>x.disabled=false); }
+        };
+        bwrap.appendChild(btn);
+      });
+      row.appendChild(bwrap);
+    } else {
+      // 閲覧のみ(作業者): 候補を情報チップで表示(押せない・割当はリード/PM以上)
+      const iw=document.createElement('div'); iw.style.cssText='display:flex;flex-wrap:wrap;gap:6px;font-size:12px';
+      iw.innerHTML='<span style="color:#8aa0bd">候補（実績）:</span> '+cands.map(c=>
+        '<span style="padding:3px 9px;border-radius:7px;border:1px solid #2b3a55;background:#111a2b;color:#cfe0f5">'
+        +esc(c.name||c.uid)+' <span style="opacity:.6;font-size:11px">'+(c.count||0)+'回</span></span>').join(' ');
+      row.appendChild(iw);
+    }
+    row.appendChild(st);
+    wrap.appendChild(row);
+  });
+  b.appendChild(wrap); log.scrollTop=log.scrollHeight;
+}
+// M4 Phase4: status更新カード。from→to＋(客先承認=根拠リンク必須／対象外=typed確認)→/api/status/commit。
+function renderStatus(b, c){
+  if(!c||!c.task_id) return;
+  const wrap=document.createElement('div');
+  wrap.style.cssText='margin:10px 0;border:1px solid #6b5a3b;border-radius:12px;overflow:hidden;background:#0e1626';
+  const h=document.createElement('div'); h.textContent='🏁 '+esc(c.label||'status更新');
+  h.style.cssText='padding:9px 14px;font-weight:700;color:#f5e6c8;background:#29231a;border-bottom:1px solid #403422;font-size:13.5px';
+  wrap.appendChild(h);
+  const body=document.createElement('div'); body.style.cssText='padding:12px 14px';
+  const head=document.createElement('div'); head.style.cssText='font-size:13.5px;color:#e5edf7;margin-bottom:8px';
+  head.innerHTML='<b>'+esc((c.shot?c.shot+' ':'')+(c.task_name||('#'+c.task_id)))+'</b>'
+    +' <span style="color:#8aa0bd;font-size:12px">— '+esc(c.project||'')+'</span><br>'
+    +'<span style="font-size:13px">状態 <b>'+esc(c.from_status||'—')+'</b> → <b style="color:#fbbf24">'+esc(c.to_status||'')+'</b></span>';
+  body.appendChild(head);
+  const st=document.createElement('div'); st.style.cssText='margin-top:9px;font-size:12.5px;color:#9fb3c8';
+  if(c.can_act===false){
+    const note=document.createElement('div'); note.style.cssText='margin-top:6px;font-size:12.5px;color:#fca5a5';
+    note.textContent='この操作は実行できませぬ（権限、または現在の状態からは進めませぬ）。';
+    body.appendChild(note); body.appendChild(st); wrap.appendChild(body); b.appendChild(wrap); log.scrollTop=log.scrollHeight; return;
+  }
+  let eviInp=null, confInp=null;
+  if(c.require_evidence){
+    const lb=document.createElement('div'); lb.textContent='根拠リンク（客先承認の証跡・必須）:'; lb.style.cssText='font-size:12px;color:#94a3b8;margin:6px 0 3px';
+    eviInp=document.createElement('input'); eviInp.type='text'; eviInp.placeholder='https://… メール/承認書/スレッド等';
+    eviInp.style.cssText='width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;font-size:12.5px';
+    body.appendChild(lb); body.appendChild(eviInp);
+  }
+  if(c.confirm==='typed'){
+    const lb=document.createElement('div'); lb.textContent='確認のため「'+esc(c.label)+'」と入力（取り消しにくい操作ゆえ）:'; lb.style.cssText='font-size:12px;color:#94a3b8;margin:6px 0 3px';
+    confInp=document.createElement('input'); confInp.type='text'; confInp.placeholder=c.label;
+    confInp.style.cssText='width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;font-size:12.5px';
+    body.appendChild(lb); body.appendChild(confInp);
+  }
+  const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px;margin-top:10px';
+  const ok=document.createElement('button'); ok.textContent='🏁 '+esc(c.label)+'を確定';
+  const ng=document.createElement('button'); ng.textContent='やめる';
+  [ok,ng].forEach(x=>x.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit');
+  ok.style.borderColor='#d97706';
+  ng.onclick=()=>{ bs.style.display='none'; st.textContent='見送りました。'; };
+  ok.onclick=async()=>{
+    if(c.require_evidence && !(eviInp&&eviInp.value.trim())){ st.textContent='根拠リンクをご入力くだされ。'; return; }
+    if(c.confirm==='typed' && (!confInp||confInp.value.trim()!==c.label)){ st.textContent='「'+c.label+'」と入力してくだされ。'; return; }
+    ok.disabled=ng.disabled=true; st.textContent='実行中…';
+    try{
+      const r=await jpost('/api/status/commit',{verb:c.verb,task_id:c.task_id,evidence:eviInp?eviInp.value.trim():undefined,confirm:confInp?confInp.value.trim():undefined});
+      st.textContent=(r.ok?'✅ ':'⚠️ ')+(r.message||r.error||'');
+      if(r.ok){ bs.style.display='none'; head.style.opacity='.7'; }
+      else { ok.disabled=ng.disabled=false; }
+    }catch(e){ st.textContent='⚠️ 通信失敗: '+(e.message||e); ok.disabled=ng.disabled=false; }
+  };
+  bs.appendChild(ok); bs.appendChild(ng); body.appendChild(bs); body.appendChild(st);
+  wrap.appendChild(body); b.appendChild(wrap); log.scrollTop=log.scrollHeight;
+}
+// M4 Phase3: 議事録→タスク起票カード。項目ごとに「新規/FB」を切替、新規は shot+type を指定して起票。
+// FB(既存SHOTスレッドへ投稿)は Elvis 経路が開くまで保留(fb_ready=false)。shot 未指定の新規は起票しない(Score認識不可)。
+function renderMinutes(b, m){
+  const cands=(m&&m.candidates)||[]; if(!cands.length) return;
+  const canAct=(m.can_act!==false);
+  const shots=m.shots||[], types=m.types||[], fbReady=(m.fb_ready===true);
+  const wrap=document.createElement('div');
+  wrap.style.cssText='margin:10px 0;border:1px solid #3b5a4a;border-radius:12px;overflow:hidden;background:#0e1626';
+  const h=document.createElement('div'); h.textContent='📝 議事録からタスク起票 — '+esc(m.meeting_title||'')+'（'+esc(m.date||'')+'・'+esc(m.project||'')+'）';
+  h.style.cssText='padding:9px 14px;font-weight:700;color:#d0f5e0;background:#11291f;border-bottom:1px solid #234;font-size:13.5px';
+  wrap.appendChild(h);
+  const body=document.createElement('div'); body.style.cssText='padding:10px 14px';
+  const sES='padding:4px 6px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;font-size:11.5px';
+  const rows=[];
+  cands.forEach((c)=>{
+    const row=document.createElement('div'); row.style.cssText='padding:8px 0;border-bottom:1px solid #16202f';
+    const l1=document.createElement('div'); l1.style.cssText='display:flex;align-items:center;gap:7px;flex-wrap:wrap';
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=true; cb.disabled=!canAct;
+    const nm=document.createElement('input'); nm.type='text'; nm.value=c.name||''; nm.disabled=!canAct;
+    nm.style.cssText='flex:1;min-width:140px;padding:5px 8px;border-radius:7px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;font-size:12.5px';
+    // 新規/FB 切替（既定は分類ヒント。unknownはfb寄り＝作らず保留が安全）
+    const kind=document.createElement('select'); kind.style.cssText=sES;
+    kind.innerHTML='<option value="fb">FB(既存へ)</option><option value="new">新規タスク</option>';
+    kind.value=(c.kind==='new'?'new':'fb'); kind.disabled=!canAct;
+    l1.appendChild(cb); l1.appendChild(nm); l1.appendChild(kind);
+    row.appendChild(l1);
+    // 2段目: 新規時=shot+type、FB時=注記
+    const l2=document.createElement('div'); l2.style.cssText='display:flex;align-items:center;gap:7px;margin-top:5px;flex-wrap:wrap;font-size:11.5px;color:#8aa0bd';
+    const shotSel=document.createElement('select'); shotSel.style.cssText=sES;
+    shotSel.innerHTML='<option value="">shot選択…</option>'+shots.map(s=>'<option>'+esc(s)+'</option>').join('');
+    const typeSel=document.createElement('select'); typeSel.style.cssText=sES;
+    typeSel.innerHTML=types.map(t=>'<option'+(t===(c.type_norm||'other')?' selected':'')+'>'+esc(t)+'</option>').join('');
+    const fbNote=document.createElement('span');
+    function drawL2(){
+      l2.innerHTML='';
+      if(kind.value==='new'){
+        l2.appendChild(Object.assign(document.createElement('span'),{textContent:'shot:'}));
+        l2.appendChild(shotSel); l2.appendChild(Object.assign(document.createElement('span'),{textContent:'type:'})); l2.appendChild(typeSel);
+        if(c.assignee_name||c.due) l2.appendChild(Object.assign(document.createElement('span'),{textContent:' '+(c.assignee_name||'')+' '+(c.due||'')}));
+      } else {
+        fbNote.textContent=fbReady?'→ 選んだ shot のスレッドへFB投稿':'→ FBはSHOTスレッドへ（Elvis殿の投稿口が開き次第・現在は保留）';
+        fbNote.style.color='#c7a86a'; l2.appendChild(fbNote);
+      }
+    }
+    kind.onchange=drawL2; drawL2();
+    row.appendChild(l2); body.appendChild(row);
+    rows.push({cb,nm,kind,shotSel,typeSel,c});
+  });
+  const st=document.createElement('div'); st.style.cssText='margin-top:9px;font-size:12.5px;color:#9fb3c8';
+  if(canAct){
+    const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px;margin-top:10px';
+    const ok=document.createElement('button'); ok.textContent='📝 新規タスクを起票';
+    ok.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid #22c55e;background:#132a20;color:#d7f0e2;cursor:pointer;font:inherit';
+    ok.onclick=async()=>{
+      const chosen=rows.filter(r=>r.cb.checked);
+      const fbCnt=chosen.filter(r=>r.kind.value==='fb').length;
+      const sel=chosen.filter(r=>r.kind.value==='new').map(r=>({name:r.nm.value.trim(),type:r.typeSel.value,shot:r.shotSel.value,assignee_uid:r.c.assignee_uid,due:r.c.due})).filter(x=>x.name);
+      const noShot=sel.filter(x=>!x.shot).length;
+      if(!sel.length){ st.textContent='起票する『新規タスク』を選び、shot をご指定くだされ。'+(fbCnt?('（FB '+fbCnt+'件はスレッド投稿口の開通待ち）'):''); return; }
+      if(noShot){ st.textContent='新規タスクには shot 指定が要りまする（'+noShot+'件が未指定）。Score が置けませぬ。'; return; }
+      ok.disabled=true; st.textContent=sel.length+'件を起票中…';
+      try{
+        const r=await jpost('/api/minutes/commit',{tasks:sel});
+        st.textContent=(r.ok?'✅ ':'⚠️ ')+(r.message||r.error||'')+(fbCnt?('／ FB '+fbCnt+'件は保留（スレッド投稿口待ち）'):'');
+        if(r.ok){ ok.disabled=true; h.style.opacity='.7'; }
+        else { ok.disabled=false; }
+      }catch(e){ st.textContent='⚠️ 通信失敗: '+(e.message||e); ok.disabled=false; }
+    };
+    bs.appendChild(ok); body.appendChild(bs);
+  } else {
+    const note=document.createElement('div'); note.style.cssText='margin-top:8px;font-size:12px;color:#c7a86a';
+    note.textContent='※ 起票の実行はリード／PM以上が行えまする（これは確認用）。';
+    body.appendChild(note);
+  }
+  body.appendChild(st); wrap.appendChild(body); b.appendChild(wrap); log.scrollTop=log.scrollHeight;
+}
+// M4 Phase2: 日程変更カード。締切の old→new ＋影響プレビュー(下流衝突/PJ超過)＋確定ボタン→/api/reschedule/commit。
+function renderReschedule(b, p){
+  if(!p||!p.task_id) return;
+  const wrap=document.createElement('div');
+  wrap.style.cssText='margin:10px 0;border:1px solid #4a3b6b;border-radius:12px;overflow:hidden;background:#0e1626';
+  const h=document.createElement('div'); h.textContent='📅 日程変更';
+  h.style.cssText='padding:9px 14px;font-weight:700;color:#dcd0f5;background:#181129;border-bottom:1px solid #2b2340;font-size:14px';
+  wrap.appendChild(h);
+  const body=document.createElement('div'); body.style.cssText='padding:12px 14px';
+  const d=p.delta_days, dirw=(d>0?'後ろ倒し':(d<0?'前倒し':'変更'));
+  const head=document.createElement('div'); head.style.cssText='font-size:13.5px;color:#e5edf7;margin-bottom:8px';
+  head.innerHTML='<b>'+esc((p.shot?p.shot+' ':'')+ (p.task_name||('#'+p.task_id)))+'</b>'
+    +' <span style="color:#8aa0bd;font-size:12px">— '+esc(p.project||'')+' / '+esc(p.status||'')+'</span><br>'
+    +'<span style="font-size:13px">締切 <b>'+esc(p.old_due||'—')+'</b> → <b style="color:#c4b5fd">'+esc(p.new_due||'')+'</b>'
+    +(d!=null?' <span style="color:#8aa0bd">（'+Math.abs(d)+'日'+dirw+'）</span>':'')+'</span>';
+  body.appendChild(head);
+  // 影響プレビュー注記
+  (p.notes||[]).forEach(n=>{
+    const nn=document.createElement('div');
+    const warn=/⚠/.test(n);
+    nn.style.cssText='font-size:12.5px;margin:3px 0;color:'+(warn?'#fca5a5':'#9fb3c8');
+    nn.textContent=(warn?'':'• ')+n;
+    body.appendChild(nn);
+  });
+  // 下流タスク一覧(衝突を強調)
+  if((p.downstream||[]).length){
+    const dl=document.createElement('div'); dl.style.cssText='margin-top:6px;font-size:12px;color:#8aa0bd';
+    dl.innerHTML='後続: '+p.downstream.map(x=>
+      '<span style="color:'+(x.collides?'#fca5a5':'#9fb3c8')+'">'+esc(x.name||('#'+x.id))+(x.collides?'⚠':'')+'</span>').join(' / ');
+    body.appendChild(dl);
+  }
+  const st=document.createElement('div'); st.style.cssText='margin-top:9px;font-size:12.5px;color:#9fb3c8';
+  if(p.can_act!==false){
+    const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px;margin-top:10px';
+    const ok=document.createElement('button'); ok.textContent='📅 この日程で確定';
+    const ng=document.createElement('button'); ng.textContent='やめる';
+    [ok,ng].forEach(x=>x.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit');
+    ok.style.borderColor='#8b5cf6';
+    ng.onclick=()=>{ bs.style.display='none'; st.textContent='見送りました。'; };
+    ok.onclick=async()=>{
+      ok.disabled=ng.disabled=true; st.textContent='変更中…';
+      try{
+        const r=await jpost('/api/reschedule/commit',{task_id:p.task_id,new_due:p.new_due});
+        st.textContent=(r.ok?'✅ ':'⚠️ ')+(r.message||r.error||'');
+        if(r.ok){ bs.style.display='none'; head.style.opacity='.7'; }
+        else { ok.disabled=ng.disabled=false; }
+      }catch(e){ st.textContent='⚠️ 通信失敗: '+(e.message||e); ok.disabled=ng.disabled=false; }
+    };
+    bs.appendChild(ok); bs.appendChild(ng); body.appendChild(bs);
+  } else {
+    const note=document.createElement('div'); note.style.cssText='margin-top:8px;font-size:12px;color:#c7a86a';
+    note.textContent='※ 日程変更の実行はご本人・PM／リード以上が行えまする（これは影響の確認用）。';
+    body.appendChild(note);
+  }
+  body.appendChild(st);
+  wrap.appendChild(body); b.appendChild(wrap); log.scrollTop=log.scrollHeight;
+}
 // 列見出しクリックで並べ替え(同データの再ソート=LLM再呼出不要)。
 function renderTable(b, t){
   const wrap=document.createElement('div');
@@ -955,13 +1207,31 @@ function fileKind(f){
 }
 function onFilesDropped(fs){
   const btS='padding:6px 13px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font:inherit;font-size:12.5px;margin:3px 5px 0 0';
-  [...fs].forEach(f=>{
+  const arr=[...fs];
+  if(arr.length>=2){        // 複数ドロップ=まず「まとめて1リンク」を提示(殿要望2026-07-17: 2ファイル→1リンク+1パスワード)
+    const bb=el('bot');
+    bb.innerHTML='<div style="border:1px solid #38bdf8;border-radius:12px;padding:13px;background:rgba(56,189,248,.07)">'
+      +'<div style="margin-bottom:9px">📎 <b>'+arr.length+'件</b>ドロップ — まとめて扱いますか？（1つのリンク＋パスワードで共有）</div>'
+      +'<div style="font-size:11.5px;color:#9fb3c8;margin-bottom:9px">'+arr.map(f=>esc(f.name)).join(' / ')+'</div>'
+      +'<div><button data-a="dropboxall" style="'+btS+'border-color:#38bdf8">📦 まとめてDropboxで送る（1リンク）</button>'
+      +'<button data-a="each" style="'+btS+'">↓ 1件ずつ選ぶ</button></div></div>';
+    bb.querySelectorAll('button[data-a]').forEach(bt=>{ bt.onclick=()=>{
+      const a=bt.dataset.a;
+      if(a==='dropboxall'){ bb.innerHTML='<span style="color:var(--mut)">📎 '+arr.length+'件 → 📦 まとめてDropbox（1リンク）</span>'; dropboxTransferFiles(arr); }
+      else { bb.innerHTML='<span style="color:var(--mut)">📎 '+arr.length+'件 → 1件ずつ選択</span>'; _perFileChoices(arr,btS); }
+    }; });
+    log.scrollTop=log.scrollHeight; return;
+  }
+  _perFileChoices(arr,btS);
+}
+function _perFileChoices(arr,btS){
+  arr.forEach(f=>{
     const k=fileKind(f), b=el('bot');
     let btns='';
     if(k==='image') btns='<button data-a="attach">🖼 チャットに添付</button>';
     else if(k==='video') btns='<button data-a="vimeo">🎬 Vimeoへアップ</button>';
     else if(k==='html') btns='<button data-a="aurora">📚 Auroraへアップ</button>';
-    else if(k==='doc') btns='<button data-a="aurora">📚 Auroraへアップ</button><button data-a="learn">🧹 整理で知識化</button>';
+    else if(k==='doc') btns='<button data-a="aurora">📚 Auroraへアップ</button><button data-a="play">🎮 遊ぶ（知識化）</button>';
     btns+='<button data-a="dropbox">📦 Dropboxで送る</button>';
     b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:13px;background:rgba(255,255,255,.03)">'
       +'<div style="margin-bottom:9px">📎 <b>'+esc(f.name)+'</b> — どのツールで扱いますか？</div>'
@@ -972,7 +1242,7 @@ function onFilesDropped(fs){
       if(a==='attach') takeFile(f);
       else if(a==='vimeo'){ pendingFile={name:f.name,isImage:false,file:f}; vimeoUpload(); }
       else if(a==='aurora') auroraUpload(f);
-      else if(a==='learn') location.href='/seiri';
+      else if(a==='play') location.href='/play';
       else if(a==='dropbox') dropboxTransferFiles([f]);
     }; });
   });
@@ -1302,7 +1572,7 @@ function repWireDrop(root){
   function b64ToU8(s){ var p='='.repeat((4-s.length%4)%4); var b=(s+p).replace(/-/g,'+').replace(/_/g,'/'); var r=atob(b); var a=new Uint8Array(r.length); for(var i=0;i<r.length;i++)a[i]=r.charCodeAt(i); return a; }
   function setLabel(){
     if(!('Notification' in window)){ btn.textContent='🔔 通知(非対応)'; return; }
-    if(Notification.permission==='granted') btn.textContent='🔔 通知ON';
+    if(Notification.permission==='granted') btn.textContent='🔔 ON';
     else if(Notification.permission==='denied') btn.textContent='🔔 通知(ブロック中)';
     else btn.textContent='🔔 通知';
   }
@@ -1320,7 +1590,7 @@ function repWireDrop(root){
       if(!sub){ sub=await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToU8(kr.key)}); }
       var res=await (await fetch('/api/push/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({subscription:sub})})).json();
       setLabel();
-      if(res.ok){ btn.textContent='🔔 通知ON ✓'; }
+      if(res.ok){ btn.textContent='🔔 ON ✓'; }
       else if((res.reason||'').indexOf('unauth')>=0){ alert('通知の登録にはログインが必要です。\nこの端末（'+location.host+'）で先にログインしてから、もう一度🔔を押してください。'); btn.textContent='🔔 要ログイン'; }
       else { alert('通知の登録に失敗: '+(res.reason||res.error||'不明')); }
     }catch(e){ console.error('push enable failed',e); alert('通知の有効化に失敗: '+(e&&e.message||e)); }

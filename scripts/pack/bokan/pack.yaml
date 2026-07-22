@@ -1,0 +1,77 @@
+# Casper オントロジーパック — マニフェスト（パック第1号＝bokan）
+# M5「横展開の証明」の中核データ。エンジン(*.py)は本ファイルを読むだけで、
+# bokan 固有の語彙・事実・辞書・工程はすべてこのパック側に置く。
+# 移植は「再著述」でなく「このディレクトリの差し替え」で成る、を目標とする。
+name: bokan
+label: studio bokan
+version: 0
+
+# --- 語彙検問(pack_lint.py)が使う「パック語彙」リスト ---
+# ここに載る語が engine *.py に直書きされていたら seam 違反＝検問が赤にする。
+# 抽出(語彙をパック側へ移す)が進むほど violation が減り、ゼロで第一手完了。
+# 注: 誤検知を避け、bokan に強く固有な語だけを載せる(一般ビジネス語は載せない)。
+vocab:
+  - studio bokan
+  - studiobokan
+  - スタジオボカン
+  - marukome
+  - マルコメ
+  - CEATEC
+  - InterBee
+  - NINA
+  - Samurai Jack
+
+# --- 固有名リスト(engine は規則の雛形、bokan 固有名はここから差込む・Fable処方) ---
+aliases:              # PJ/資産の別名展開(bokan 固有分のみ。汎用ドメイン語=コンテ/動画等は engine 残置)
+  tkp: [nina]
+  nina: [tkp]
+vapid_sub: "mailto:ryoji@studiobokan.com"   # Web Push VAPID subject(連絡先・配備固有)
+secrecy_codenames: [AGL, V, EVA, E122, Number_i]   # 守秘=対外非開示の版権コードネーム。engineは規則の雛形のみ持ち、この固有名リストを注入時に差込む(Fable処方)
+
+# --- 組織図(指示系統・org_data が読む・M5: engine の構造焼き付けを pack へ) ---
+org:
+  root: "studio bokan"
+  divisions:
+    "Visual Arts Division": ["VFX & Cinematic", "Animation & Character", "Design & Commercial"]
+    "Spatial Tech Division": ["Drone & Spatial", "DX Visualization", "R&D & Interactive"]
+  members:
+    - ["黒丸クロマル", "Animation & Character", 46, "animator"]
+    - ["Mabuchi Aogu", "Animation & Character", 38, "animator(OP/ED)"]
+    - ["Rui", "Animation & Character", 37, "animation"]
+    - ["tim", "Animation & Character", 42, "animation"]
+    - ["hori shouichi", "Animation & Character", 34, "animation/AI生成"]
+    - ["Li", "VFX & Cinematic", 43, "modeler"]
+    - ["Yota Miyake", "VFX & Cinematic", 35, "modeler/LtCmp"]
+    - ["Hnada Megumi", "VFX & Cinematic", 39, "lighting/comp"]
+    - ["terajima", "VFX & Cinematic", 40, "lightcomp"]
+    - ["yu", "VFX & Cinematic", 41, "lighting/comp"]
+    - ["elvis", "R&D & Interactive", null, "program(Score)"]
+    - ["nibu", "R&D & Interactive", 45, "開発"]
+    - ["Hida", "VFX & Cinematic", 44, "(役割未確定)"]
+    - ["Taoka", "Animation & Character", 32, "担当/制作"]
+    - ["kohei", "DX Visualization", 29, "ディレクター/データ管理"]
+  external:
+    - ["新井アライ", "VFX & Cinematic", "社外Houdini FX"]
+    - ["PCL 越野", "Design & Commercial", "社外ディレクタ"]
+    - ["タイプ", "VFX & Cinematic", "社外クラウドレンダ/FX"]
+    - ["SOL", "VFX & Cinematic", "社外Houdini FX"]
+
+# --- パックが束ねる構成要素(宣言。既に外出し済みのものを含む) ---
+# 名前解決・工程オントロジーは既にデータ駆動ゆえ、ここでは「所在の宣言」のみ。
+components:
+  facts:        casper_context.md        # 会社事実 digest(build_brain_digest 再生成)
+  process:      [transitions.json, config/verbs.yaml, config/authority.yaml]
+  name_resolve: [roster_cache.json, person_traits.json, person_gate/]
+  knowledge:    vault/
+  golden:       cases.jsonl              # bokan データ依存 E2E golden(パック同梱)
+
+# --- エンジン(横展開で不変・パックに含めない)を検問対象とする ---
+# 下記は「bokan 語彙が居てはならぬ」ファイル群。pack_lint がスキャンする。
+engine_scan:
+  include_glob: ["*.py"]
+  # パック側/データ側/外部ツールは検問から除外(bokan 語があって当然)
+  exclude:
+    - pack_lint.py            # 検問自身(語彙リストを読むため語が現れる)
+    - dump_users.py
+    - benchmark.py
+    - test_llm_db_understanding.py

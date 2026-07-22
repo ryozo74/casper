@@ -1,0 +1,22 @@
+# Casper オントロジーパック — トイスタジオ(第2パック・M5 差替証明用の架空スタジオ)
+# これを CASPER_PACK=toystudio + CASPER_VAULT=このvault で差し込めば、engine 無改変のまま
+# 別スタジオの Casper になる=「再著述でなくパック差替」の反証(第2パック)。
+name: toystudio
+label: Pixel Forge Studio
+version: 0
+
+vocab:
+  - Pixel Forge
+  - pixelforge
+
+aliases:
+  pf: [pixelforge]
+  pixelforge: [pf]
+
+vapid_sub: "mailto:admin@pixelforge.example"
+secrecy_codenames: [PHOENIX, ZERO]
+
+components:
+  facts:        vault/30_culture_rules/company.md
+  knowledge:    vault/
+  name_resolve: []

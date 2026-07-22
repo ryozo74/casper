@@ -277,7 +277,7 @@ def generate_draft(rtype, structure, answers, context="", llm=None):
     plan = "\n".join(f"- {k}（{sched[k]['title']}）: {sched[k]['hint']}" for k in sec_keys)
     ans = "\n".join(f"- {k}: {v}" for k, v in (answers or {}).items() if v)
     schema = ('{"sections":{' + ",".join(f'"{k}":[]' for k in sec_keys) + '}}')
-    sysp = ("あなたは studio bokan の伴走AI Casper。報告書の第一稿を書く。**鉄則: 結論ファースト・冗長禁止・"
+    sysp = ("あなたは社内の伴走AI Casper。報告書の第一稿を書く。**鉄則: 結論ファースト・冗長禁止・"
             "1章は要点のみ・箇条書きを活用・水増し文を書かない**。各章を以下ブロックの配列で出力。"
             "block種: {\"t\":\"p\",\"text\":\"...\"}(段落) / {\"t\":\"ul\",\"items\":[\"..\"]}(箇条書き) / {\"t\":\"h3\",\"text\":\"小見出し\"}。"
             "厳密なJSONのみ(説明・コードフェンス禁止)。未確定は推測せず『(要確認)』と置く。スキーマ:\n" + schema)

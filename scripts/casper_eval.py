@@ -211,6 +211,16 @@ def a_no_full_table_dump(text, cards):
     return True, ""
 
 
+def a_no_meta_leak(text, cards):
+    """本文に画面表示/自分の制約に触れるメタ語(表カード/表示装置/描画済/再現しません/重複…)が漏れていない。
+    弱qwenがsystem注記(『表カードとして描画済み・再現するな』)を鸚鵡返しする弱点の回帰ゲート(殿指摘2026-07-17)。"""
+    m = re.search(r"(表\s*カード|表示装置|描画(済|し|され)|再現(しません|しない|せず|いたしません)|"
+                  r"重複(して)?.{0,8}(一覧|表|再現)|装置と(の)?重複)", text or "")
+    if m:
+        return False, f"メタ語が本文に漏れている: 「{m.group(0)}」"
+    return True, ""
+
+
 def a_has_choices(minopt=2):
     """【Q1 選択カード】曖昧指示語の解決装置として choices カードが出て、選択肢が minopt 件以上あること。
     preview(内容)が全optに付くことも検査(内容が見える=不変条件②)。"""
@@ -405,6 +415,7 @@ ASSERT_REGISTRY = {
     "vimeo_count":         lambda a: a_vimeo_count(a[0] if a else 0, a[1] if len(a) > 1 else 999),
     "has_table":           lambda a: a_has_table(a[0] if a else 1),
     "no_full_table_dump":  lambda a: a_no_full_table_dump,
+    "no_meta_leak":        lambda a: a_no_meta_leak,
     "has_choices":         lambda a: a_has_choices(a[0] if a else 2),
     "choices_option":      lambda a: a_choices_option(a[0] if a else ""),
     "has_confirm_card":    lambda a: a_has_confirm_card(a[0] if a else None),
@@ -423,6 +434,7 @@ _ASSERT_DESC = {"no_tool_leak": "ツール漏れ無し", "no_work_narration": "�
                 "no_false_send_claim": "既成事実化しない", "no_naked_choice": "裸の選択要求なし",
                 "claims_grounded": "クレームが真実源に接地(捏造なし)",
                 "has_table": "表カードが描画される", "no_full_table_dump": "本文で表を丸ごと再現しない",
+                "no_meta_leak": "画面/制約メタ語が本文に漏れない",
                 "has_choices": "選択カードが出る", "choices_option": "選択肢に指定語あり",
                 "has_confirm_card": "承認カードが出る",
                 "mentions_online_pjs": "online PJを列挙", "absent": "禁止文字列なし", "present": "期待文字列あり",

@@ -1,0 +1,141 @@
+{
+  "$schema_note": "See docs/transitions.md for full explanation, derivation methodology, and mandatory caveats. Do not consume this file without reading that document first.",
+  "version": "1.0",
+  "generated_date": "2026-07-17",
+  "generated_for": "Casper request #1",
+  "source_repo": "score_be (/mnt/e/score)",
+  "statuses": ["wt", "mk", "wip", "qc", "qc_fb", "ap", "client_ap", "deliver", "omit"],
+  "statuses_source": "app/helpers/task_status.py:16-18 (NEW_TASK_STATUSES)",
+
+  "CRITICAL_CAVEAT": "This file describes UI-INTENDED transitions only (what buttons/pages exist and who can see them). It is NOT a server-enforced contract. The single generic write endpoint PATCH /api/bff/tasks/{task_id} (app/routers/bff_write.py:1077-1112) is used to actually perform every status change in this file, and it performs ZERO role/authorization checks and ZERO from-state validation -- it only checks that the target 'status' value is a member of the 9 known values or a recognized legacy alias (app/routers/bff_write.py:1090-1095, using app/helpers/task_status.py:16-32). Therefore ANY authenticated actor (any role) can, by calling the API directly (bypassing the UI), set ANY task to ANY of the 9 statuses regardless of the 'allowed_roles' listed below. This mirrors the structural gap already reported in cmd_118 finding #3 (score_be app/routers/bff_write.py:1456-1486 POST /api/bff/qc/approve has no get_actor_role()/is_qc_delegated() call) -- that gap in fact extends to every write endpoint listed in this file (post_asset_upload, post_qc_notify_existing, post_retakes, post_qc_approve_bff, patch_task all share the same pattern: Depends(get_actor_id) only, never Depends(get_actor_role) or is_qc_delegated()).",
+
+  "transitions": [
+    {
+      "from": "mk",
+      "to": "wip",
+      "trigger": "'→ WIP' button on isolated task page (/task/{task_id})",
+      "ui_allowed_roles": ["any_authenticated"],
+      "ui_note": "Button rendered unconditionally when task.status=='mk'; no {% if role ... %} wrapper. The page route itself (/task/{task_id}) also has no role/assignee restriction -- any authenticated user can view any task and click it.",
+      "ui_source": [
+        "app/templates/shot_detail.html:83-84 (button, only condition is task.status=='mk')",
+        "app/templates/shot_detail.html:854-865 (window.changeTaskStatus -> PATCH /api/bff/tasks/{id})",
+        "app/routers/pages_shot.py:150-154 (GET /task/{task_id} route: Depends(get_actor_id) only, no role/assignee gate)"
+      ],
+      "api": "PATCH /api/bff/tasks/{task_id}",
+      "server_source": "app/routers/bff_write.py:1077-1112",
+      "server_role_check": false,
+      "server_note": "patch_task() validates only status-value membership (bff_write.py:1090-1095); no get_actor_role/is_qc_delegated call anywhere in the function."
+    },
+    {
+      "from": ["mk", "wip", "qc_fb"],
+      "to": "qc",
+      "trigger": "New asset upload with submission_type='qc' (artist submits work for QC)",
+      "ui_allowed_roles": ["any_authenticated"],
+      "ui_note": "Upload form (isolated task page) is not wrapped in any {% if role ... %} check; visible to whoever can view /task/{task_id}, i.e. effectively unrestricted.",
+      "ui_source": [
+        "app/templates/shot_detail.html:120-155 (upload form, submission_type radio incl. 'qc' value at :143)"
+      ],
+      "api": "POST /api/bff/assets (multipart)",
+      "server_source": "app/routers/bff_write.py:530-676 (post_asset_upload); status patch at :662-672 (only when submission_type in ('qc','review') -- see note)",
+      "server_role_check": false,
+      "server_note": "patch_task({'status':'qc'}) called for BOTH submission_type='qc' and submission_type='review' (bff_write.py:665,670-672) -- 'review' also flips status to 'qc', which is a UI/server naming mismatch worth flagging separately (not a role issue, but affects the from/to accuracy of this entry)."
+    },
+    {
+      "from": "any",
+      "to": "qc",
+      "trigger": "'Request QC on existing asset' (re-request without re-uploading) -- notify_existing flow",
+      "ui_allowed_roles": ["admin", "director", "pm", "lead", "lighting_lead", "kato"],
+      "ui_note": "Gated explicitly in the SHOT-level asset list ({% if role in (...) %}) -- notably 'user' (plain artist) is EXCLUDED from this specific button, unlike the upload-based qc transition above which has no role gate at all.",
+      "ui_source": [
+        "app/templates/shot_detail.html:360-364 (button gate + openQCNotifyModal call)",
+        "app/templates/shot_detail.html:1017-1034 (submitQCNotify -> fetch /api/bff/qc/notify_existing)",
+        "app/templates/qc_viewer.html:590-620ish ('QC上申' modal for role in ('lead','lighting_lead','kato'), separate lead-upsubmit flow -> same endpoint)"
+      ],
+      "api": "POST /api/bff/qc/notify_existing",
+      "server_source": "app/routers/bff_write.py:1212-1256; status patch at :1251-1253",
+      "server_role_check": false,
+      "server_note": "Depends(get_actor_id) only (bff_write.py:1213); no role check."
+    },
+    {
+      "from": "qc",
+      "to": "qc_fb",
+      "trigger": "Retake issuance by Director/PM/Admin (or delegated QC reviewer)",
+      "ui_allowed_roles": ["director", "pm", "admin", "delegated_user (QcDelegation)"],
+      "ui_note": "Double-gated at UI: (1) the Retake link is only rendered when role in ('director','pm','admin') or can_qc==True (qc_viewer.html:486); (2) the destination page /director_retake_input independently redirects away (303 to /qc/{shot_id}) if role not in ('director','pm','admin') and not is_qc_delegated() (pages_director.py:30-36).",
+      "ui_source": [
+        "app/templates/qc_viewer.html:486 (visibility gate)",
+        "app/templates/qc_viewer.html:518-521 (Retake link -> /director_retake_input)",
+        "app/routers/pages_director.py:17-36 (GET /director_retake_input page-level role gate)",
+        "app/qc_delegation.py:11-32 (is_qc_delegated() -- delegation check used by both gates)"
+      ],
+      "api": "POST /api/bff/retakes",
+      "server_source": "app/routers/bff_write.py:75-306; status patch at :207-210",
+      "server_role_check": false,
+      "server_note": "post_retakes() depends on get_actor_id only (bff_write.py:76); no get_actor_role/is_qc_delegated call in the function body -- the two UI-level gates above are NOT re-checked server-side, so the double UI gate is purely cosmetic against a direct API call."
+    },
+    {
+      "from": "qc",
+      "to": "ap",
+      "trigger": "Approve action by Director/PM/Admin (or delegated QC reviewer)",
+      "ui_allowed_roles": ["director", "pm", "admin", "delegated_user (QcDelegation)"],
+      "ui_note": "Same visibility gate as Retake (shared {% if %} block).",
+      "ui_source": [
+        "app/templates/qc_viewer.html:486 (visibility gate)",
+        "app/templates/qc_viewer.html:513-517 (Approve button -> doApprove())",
+        "app/templates/qc_viewer.html:523-551 (doApprove -> fetch /api/bff/qc/approve)"
+      ],
+      "api": "POST /api/bff/qc/approve",
+      "server_source": "app/routers/bff_write.py:1456-1488; status patch at :1484-1486",
+      "server_role_check": false,
+      "server_note": "CONFIRMED in cmd_118 finding #3: post_qc_approve_bff() depends on get_actor_id only (bff_write.py:1457); zero get_actor_role()/is_qc_delegated() calls in the entire function (grep-verified, 0 hits). Any authenticated actor's X-Actor-User-Id can approve, regardless of role."
+    },
+    {
+      "from": "any",
+      "to": "deliver",
+      "trigger": "UNKNOWN -- no button, link, or form in any app/templates/*.html sets status to 'deliver'",
+      "ui_allowed_roles": null,
+      "ui_note": "No UI trigger found in score_be for this transition (grep-verified across app/templates/*.html). The only place 'deliver' appears as a write target is a raw PATCH call exercised by an ad-hoc test script during cmd_106d verification (FastAPI TestClient, not a real UI flow), plus the server-side deliver_notify side effect. Whether this is set from the Calendar UI (separate repository, out of scope for this audit) or via some other external trigger is UNCONFIRMED -- reported as-is per no-fabrication instruction, not asserted.",
+      "ui_source": [],
+      "api": "PATCH /api/bff/tasks/{task_id} (same generic endpoint as mk->wip; 'deliver' is simply one of the 9 accepted values)",
+      "server_source": "app/routers/bff_write.py:1077-1112; on success, triggers _notify_next_artist_on_deliver() at :1108-1110 (function body :1012-1074)",
+      "server_role_check": false,
+      "server_note": "Same generic patch_task() as mk->wip -- no role check, no from-state check."
+    },
+    {
+      "from": "any",
+      "to": "client_ap",
+      "trigger": "UNKNOWN -- no write path found anywhere in score_be",
+      "ui_allowed_roles": null,
+      "ui_note": "Zero occurrences outside status enumeration/categorization (task_status.py:16-18,31,39,43,59,68; mock_calendar_client.py:539). No template, no BFF endpoint, no JS function references or sets this value. Only reachable structurally via the generic PATCH endpoint since 'client_ap' is a member of NEW_TASK_STATUSES.",
+      "ui_source": [],
+      "api": "PATCH /api/bff/tasks/{task_id} (structural reachability only -- no evidence of an intended trigger in score_be)",
+      "server_source": "app/routers/bff_write.py:1077-1112",
+      "server_role_check": false,
+      "server_note": "Same as above."
+    },
+    {
+      "from": "any",
+      "to": "wt",
+      "trigger": "UNKNOWN -- no write path found anywhere in score_be",
+      "ui_allowed_roles": null,
+      "ui_note": "'wt' appears only in read/derivation logic (task_status.py:16,40,44,58,71; bff_write.py:1042 reads status=='wt' to find next-in-line assignee for deliver notifications). No score_be code ever writes this value.",
+      "ui_source": [],
+      "api": "PATCH /api/bff/tasks/{task_id} (structural reachability only)",
+      "server_source": "app/routers/bff_write.py:1077-1112",
+      "server_role_check": false,
+      "server_note": "Same as above. Likely set exclusively from the Calendar side (out of scope)."
+    },
+    {
+      "from": "any",
+      "to": "omit",
+      "trigger": "UNKNOWN -- no write path found anywhere in score_be",
+      "ui_allowed_roles": null,
+      "ui_note": "'omit' appears only in read/display logic (task_status.py:16,40,44,59,71; app/templates/dashboard.html:221 label display). No score_be code ever writes this value.",
+      "ui_source": [],
+      "api": "PATCH /api/bff/tasks/{task_id} (structural reachability only)",
+      "server_source": "app/routers/bff_write.py:1077-1112",
+      "server_role_check": false,
+      "server_note": "Same as above. Likely set exclusively from the Calendar side (out of scope)."
+    }
+  ]
+}

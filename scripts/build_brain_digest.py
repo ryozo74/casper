@@ -7,10 +7,11 @@
 出力: projects/casper/scripts/casper_context.md
 """
 import glob, json, os, re
+import pack_paths   # M5: vault/pack パスの単一解決点(CASPER_VAULT/CASPER_PACK env で差替可)
 
 HERE = os.path.dirname(__file__)
-PEOPLE = os.path.join(HERE, "..", "vault", "20_people")
-OUT = os.path.join(HERE, "casper_context.md")
+PEOPLE = pack_paths.vault("20_people")
+OUT = os.environ.get("CASPER_CONTEXT", os.path.join(HERE, "casper_context.md"))   # 差替検証時は別出力へ(live を汚さぬ)
 
 
 def section(text, head):
@@ -53,7 +54,7 @@ for p in sorted(glob.glob(os.path.join(PEOPLE, "*.md"))):
 # --- 左脳: projects ---
 projects = []
 try:
-    projects = json.load(open("/tmp/cal_projects.json"))["items"]
+    projects = json.load(open(os.environ.get("CASPER_PROJECTS", "/tmp/cal_projects.json")))["items"]
 except Exception:
     pass
 by = {"completed": [], "in-progress": [], "cancelled": []}
@@ -63,7 +64,7 @@ def plist(st):
     return ", ".join(f"{p['name']}({str(p.get('end_date'))[:7]})" for p in by.get(st, []))
 
 # --- 右脳: 旧スコア legacy (暗黙知・要約のみ) ---
-LEGACY = os.path.join(HERE, "..", "vault", "80_legacy_score")
+LEGACY = pack_paths.vault("80_legacy_score")
 legacy = []
 for lp in sorted(glob.glob(os.path.join(LEGACY, "*.md"))):
     t = open(lp, encoding="utf-8").read()
@@ -76,12 +77,32 @@ legacy.sort(key=lambda x: -x[1])
 
 # --- 会社概要 (自社の文脈) ---
 company = ""
-cpath = os.path.join(HERE, "..", "vault", "30_culture_rules", "studio_bokan_company.md")
+cpath = pack_paths.vault("30_culture_rules", "company.md")   # 会社概要は pack ごと: 汎用 company.md 優先
+if not os.path.exists(cpath):                                 # 無ければ bokan 互換名へ fallback
+    cpath = pack_paths.vault("30_culture_rules", "studio_bokan_company.md")
 if os.path.exists(cpath):
     ct = open(cpath, encoding="utf-8").read()
     # frontmatter 除去し本文先頭を要約として使う
     body = re.sub(r"^---.*?---\s*", "", ct, flags=re.S)
     company = re.sub(r"\n{3,}", "\n", body).strip()[:900]
+
+# --- Casper の人格 (pack/vault 由来・M5 B: engine 定数から外出し。社ごとに差し替わる筆頭) ---
+persona = ""
+ppath = pack_paths.vault("30_culture_rules", "casper_persona_core.md")
+if os.path.exists(ppath):
+    persona = open(ppath, encoding="utf-8").read().strip()
+
+def _engine_owns_policy():
+    """engine(engine_policy.md)が policy を注入しているか /health で確認。True なら本 digest は
+    policy を省く(逆混入の畳み・M5 C)。不通/未所有(旧コード稼働・ロールバック)は False に倒し
+    policy を出力し続ける=守秘/moat の欠落窓ゼロを機構で保証(Fable /health fail-safe)。"""
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:8770/health", timeout=2)
+        return json.loads(r.read().decode("utf-8")).get("policy") == "engine"
+    except Exception:
+        return False
+
 
 doc = [
     "# Casper 社内ナレッジ (左脳=Calendar / 右脳=Obsidian vault)",
@@ -89,6 +110,8 @@ doc = [
     "",
     "## 会社 (自社)",
     company or "株式会社 studio bokan (CG・映像制作)。",
+    "",
+    persona,
     "",
     f"## プロジェクト (Calendar・全{len(projects)})",
     f"- 完了({len(by.get('completed',[]))}): {plist('completed')}",
@@ -103,50 +126,25 @@ doc = [
     "過去PJの監督フィードバック等の暗黙知を蒸留保全。具体の指摘文・品質基準は各ノート参照(RAG化は今後)。",
     "フィードバック数: " + ", ".join(f"{n}({c})" for n, c in legacy),
     "",
-    "## Aurora(共有ノート図書館・稼働中)",
-    "Aurora=社員紐づきの会社の共有図書館(議事録/レポート/分析等のHTML資料を集約・共有・検索)。Casperはその司書として全ノートを検索・理解し、会話中に関連ノートをサジェストする。**稼働中**(Elvis殿MCP・8ツール結線済)。",
-    "- ツール: aurora_search(検索→サジェスト)/aurora_get(本文取得)/aurora_create(新規作成・書込はユーザー承認制)。追記・削除・復元・版履歴も backend に在り。",
-    "- 棚=Elvis殿のHTML Archive Server(検索/保存/版履歴) / 筆=note整形。接続=.casper_aurora(write token・別endpoint)。anti-spoof=Calendar同型。",
-    "",
-    "## データ源の権威・鮮度マップ(先読み注入の信頼判断)",
-    "注入材料は源ごとに性質が異なる。質問の時制に応じ正しい源を選び、食い違いは下の規則で解決せよ。",
-    "- **左脳 Calendar(ライブ・updated_at付)** = PJの現状status/締切/優先・今日のタスク/担当 の一次(現在の正)。",
-    "- **右脳 vault(過去・蒸留)** = 制作詳細/経緯(90_db_archives)・人物スキル(20_people)・決定(10_meetings議事録)・運営知識/文化(30)・過去FB(80)。",
-    "- **学習プロファイル** = ユーザー個性(時制なし背景・最新会話で上書き)。 **Aurora** = 全社共有ノート(準備中)。",
-    "【衝突規則】①現在の事実(status/進捗/担当)は左脳(最新)を正。②経緯・理由・スキル・決定の記録は右脳。"
-    "③同一PJでも左脳=working名(Ramps/marukome)・右脳=codename(AGL/BVG等)で名が異なり得る→別レイヤーとして補完。"
-    "④右脳archiveの版権案件(AGL/V/E122/Number_i等)は守秘=対外非開示。",
-    "",
-    "## Casper にできること（機能カタログ — 聞かれたら手順を教える）",
-    "ユーザーに『何ができる?』『どうやって〜する?』『〜できる?』と聞かれたら、下記から該当機能を**具体的な手順つき**で案内せよ。"
-    "否定・前置き・古い認識(『できません』等)は禁止。全て今 実装済・稼働中。手順は番号つきで簡潔に。",
-    "- **会話で社内を調べる**: PJ・タスク・担当・進捗・人物スキル・過去の経緯/議事録/決定を質問するだけ。Calendar(左脳)とvault(右脳)を自動で引いて答える。",
-    "- **議事録の確認**: 『○○の議事録』と聞けば Calendar の会議・決定事項を読んで要点を整理(例『20260629marukomeの議事録を整理して』)。",
-    "- **動画を Vimeo にアップ**: ①動画ファイルを添付 → ②出てくる『🎬 Vimeoへアップ』ボタン → ③タイトル・説明・パスワード(任意)を入力 → ④アップロード。大容量GB級OK・パスワード付き共有リンクも発行。**説明を書いておくと後でCasperが『あの動画』と検索できる**。",
-    "- **動画を探す/見せる**: 『○○の動画ある?』で社のVimeoライブラリ(全動画)を検索しプレイヤー埋め込みで返す。",
-    "- **資料(PPT/Excel/Word/PDF/画像)を読み取る**: ファイルを添付すると中身を抽出・要約。図/画像はvisionで理解。",
-    "- **報告書を作る**: チャットの『📝 報告書を作る』入口。①種別選択 → ②目的/対象 → ③Casperが整理術(空雨傘/PREP/MECE/起承転結)を判断 → ④穴を質問 → ⑤第一稿生成 → ⑥Aurora保存・プレビュー編集。添付資料(PPT/Excel/図)をデータ源にできる。",
-    "- **Aurora(共有図書館)を検索/起票**: 全社の議事録・レポート・分析を全文検索し閲覧リンクを渡す。新規ノート作成・追記も可(書込は承認制)。",
-    "- **DM秘書**: 起動時に未読DMを一覧表示。本人名義での返信代筆(承認制)、相手への質問、既読化。",
-    "- **画像・カットの一覧表示**: 『○○のカット画像を見せて』でvault登録済みの静止画を表形式で表示(クリックで拡大)。",
-    "- **タスク操作**: Calendar のタスク状態更新等(承認制)。",
-    "※ 送信・書込・アップ等の実行系は、ユーザーの操作(添付/ボタン)や承認カードを介する。Casperが代わりに案内・下書きし、最終実行はユーザー。",
-    "",
-    "## 画像・動画の貼付ルール(ノート/Aurora 作成時)",
-    "- **画像**: <img>で貼る(sandbox iframeでも表示可)。小図解は base64 data URI 可(~200KB以内)、大画像は安定URL参照。必ず max-width:100% で responsive・alt付与。守秘案件のビジュアルは社内ホストのみ・外部CDN/対外公開 禁止。",
-    "- **動画**: 原則 Vimeo 埋め込み(社ライブラリ・player iframe or 共有リンク)。生<video>大容量直貼り禁止。非公開はハッシュリンク(vimeo.com/ID/HASH)。Aurora ビューで動画iframeは sandbox allow-scripts/popups 要。",
-    "- **共通**: 自己完結を旨とし(/raw・iframe 両方で描画)、巨大資産は埋込でなくリンク。守秘案件は対外非開示。",
-    "",
-    "## 回答方針",
-    "- 上記の事実に基づき具体的に。不明なら『その情報は未取得』と正直に言う。創作しない。",
-    "- 人物の得意/担当を問われたらスキルと(分かれば)担当PJを結びつけて答える。",
-    "- **存在確認の鉄則**: ライブ照会(get_projects/calendar_lookup)に失敗・未取得なら『存在しない』と断定するな。『今 確認できぬ/最新を取得できておらぬ』と正直に言え。\"見つからない\"≠\"存在しない\"。この digest は要約スナップショットゆえ最新でない場合がある。",
-    "- **ユーザーの直接申告を信じよ**: ユーザーが『Calendarに在る』等 自分のシステムの事実を断言したら、それを正として再確認せよ。否定で食い下がるな(本人の方が現況を知る)。在ると言われたものの新規作成を提案するな(重複事故)。",
-    "- **足りなければ選択制で聞き返してよい**: 不足・曖昧・特定できぬ時は推測で答えず、選択肢を提示して確認(例『次のどれ? ① marukome ② voxel ③ コンバトラーV ④ その他(お知らせ下され)』)。開いた質問より選べる形で。憶測より確認を優先。",
-    "- **推測で守秘コードネーム(AGL/V/EVA/E122/Number_i 等)を持ち出すな**。憶測の対応付けは禁止。",
-    "- **DM/送信/書込は必ず該当ツールを『呼び出す』(function call)**。send_message(引数 to_user_id, body)/upload/aurora_create 等。**会話文やコードブロックに宛先・本文を書くだけでは実際には送られず、承認カードも出ぬ**(=ユーザーは送れない)。ツールを呼べば自動で承認カードが出る。",
-    "- **呼ぶ前に完了/下書き報告するな**: ツールを実際に呼ぶまで『送信しました/下書きしました/作成しました』と言うな(嘘になる)。ツールを呼んだ後、結果が『承認待ち』の時だけ『承認ボタンを押すと送信されます』と案内せよ。",
 ]
+# 逆混入の畳み(M5 C): engine ポリシーは engine_policy.md が唯一の真実源。engine が受け皿を持つ時
+# (=/health policy:engine)は省き casper_context.md を純・事実に。持たぬ時(旧コード/ロールバック/不通)のみ
+# engine_policy.md を読んで fallback 供給=全文重複を排し drift を根絶(単一ソース・Fable処方)。
+if not _engine_owns_policy():
+    try:
+        _pol = open(os.path.join(HERE, "engine_policy.md"), encoding="utf-8").read()
+        try:
+            import pack_config as _pc
+            _cn = _pc.get("secrecy_codenames", []) or []       # CASPER_PACK env 駆動(差替追従)
+            _pol = _pol.replace("{SECRECY_CODENAMES}", "/".join(str(c) for c in _cn))
+        except Exception:
+            pass
+        doc += ["", _pol.rstrip()]
+    except Exception as _e:
+        # fail-loud: policy 欠落の digest を黙って書くのが唯一の負け筋。前世代を温存し中断。
+        import sys as _sys
+        print("[digest] engine未所有かつ engine_policy.md 読取不可(%s) -> casper_context.md 上書き中断(policy欠落回避)" % _e, file=_sys.stderr)
+        _sys.exit(2)
 open(OUT, "w", encoding="utf-8").write("\n".join(doc))
 print(f"digest -> {OUT}  ({len(plines)}人 / {len(projects)}PJ / {os.path.getsize(OUT)} bytes)")
 print(f"matched uids: {sum(1 for l in plines if 'uid ' in l)}/{len(plines)}")

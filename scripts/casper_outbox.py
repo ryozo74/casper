@@ -58,14 +58,24 @@ def _key(tool, args, uid):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def propose(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None):
+def _audience(rec):
+    """承認カードを見せる/承認できる uid 集合。audience 欠落(旧レコード)は所有者[uid]とみなす(後方互換)。"""
+    aud = rec.get("audience")
+    return [str(u) for u in aud] if aud else [str(rec.get("uid") or "")]
+
+
+def propose(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None,
+            verb=None, audience=None):
     """アクションを台帳に proposed で起票。返り=レコード(id を含む)。
     origin: user(利用者の依頼)|casper(先回り提案) / query: 発端の発話 / trace_id: 対応トレース。
+    verb: M4動詞名(assign/reschedule/...・任意) / audience: 承認カードを見せる uid 集合(M4権限層・
+    casper_authority.audience_for で算出)。未指定は所有者[uid]のみ(後方互換)。
     query+trace_id は教師信号の三つ組(文脈,モデル案,人の完成形)の"文脈"を後で復元する為に必須(Fable5指摘)。"""
     rec = {"id": uuid.uuid4().hex[:12], "key": _key(tool, args, uid), "ts": _now(),
            "tool": tool, "args": args, "uid": str(uid or ""), "summary": summary,
            "thread": thread, "state": "proposed", "result": None, "updated": _now(),
-           "origin": origin, "query": query, "trace_id": trace_id}
+           "origin": origin, "query": query, "trace_id": trace_id,
+           "verb": verb, "audience": [str(u) for u in audience] if audience else [str(uid or "")]}
     with _LOCK:
         with open(STORE, "a", encoding="utf-8") as f:      # O_APPEND(transition の再load-merge と直列化)
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -84,8 +94,8 @@ def _transition(pid, to_state, expect=None, result=None, uid=None, patch=None):
         rec = next((r for r in recs if r.get("id") == pid), None)
         if not rec:
             return None
-        if uid is not None and rec.get("uid") and str(uid) != str(rec["uid"]):
-            return None                                    # 本人以外
+        if uid is not None and str(uid) not in _audience(rec):
+            return None                                    # audience 外(=承認権限なし)。M4権限層の approve側チェック
         if expect is not None and rec.get("state") != expect:
             return None                                    # 状態不一致=既処理/多重クリック→冪等に弾く
         if patch:
@@ -136,9 +146,9 @@ def expire(pid):                                       # proposed>7日を自動�
 
 
 def pending(uid=None):
-    """まだ proposed(承認待ち)のレコード。uid 指定でその人の分だけ。"""
+    """まだ proposed(承認待ち)のレコード。uid 指定で「その人が見てよい分」だけ(audience に含まれる分・M4権限層)。"""
     return [r for r in _load() if r.get("state") == "proposed"
-            and (uid is None or str(r.get("uid")) == str(uid))]
+            and (uid is None or str(uid) in _audience(r))]
 
 
 def recently_sent(uid=None, hours=24):
