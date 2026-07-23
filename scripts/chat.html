@@ -773,7 +773,7 @@ function renderMinutes(b, m){
   wrap.appendChild(h);
   const body=document.createElement('div'); body.style.cssText='padding:10px 14px';
   const sES='padding:4px 6px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit;font-size:11.5px';
-  const rows=[];
+  const rows=[], taskSels=[];
   cands.forEach((c)=>{
     const row=document.createElement('div'); row.style.cssText='padding:8px 0;border-bottom:1px solid #16202f';
     const l1=document.createElement('div'); l1.style.cssText='display:flex;align-items:center;gap:7px;flex-wrap:wrap';
@@ -792,6 +792,9 @@ function renderMinutes(b, m){
     shotSel.innerHTML='<option value="">shot選択…</option>'+shots.map(s=>'<option>'+esc(s)+'</option>').join('');
     const typeSel=document.createElement('select'); typeSel.style.cssText=sES;
     typeSel.innerHTML=types.map(t=>'<option'+(t===(c.type_norm||'other')?' selected':'')+'>'+esc(t)+'</option>').join('');
+    const taskSel=document.createElement('select'); taskSel.style.cssText=sES; taskSel.style.minWidth='210px';
+    taskSel.innerHTML='<option value="">FB宛先タスク読込中…</option>';
+    taskSels.push(taskSel);
     const fbNote=document.createElement('span');
     function drawL2(){
       l2.innerHTML='';
@@ -799,33 +802,58 @@ function renderMinutes(b, m){
         l2.appendChild(Object.assign(document.createElement('span'),{textContent:'shot:'}));
         l2.appendChild(shotSel); l2.appendChild(Object.assign(document.createElement('span'),{textContent:'type:'})); l2.appendChild(typeSel);
         if(c.assignee_name||c.due) l2.appendChild(Object.assign(document.createElement('span'),{textContent:' '+(c.assignee_name||'')+' '+(c.due||'')}));
+      } else if(fbReady){
+        l2.appendChild(Object.assign(document.createElement('span'),{textContent:'FB宛先:'}));
+        l2.appendChild(taskSel);
       } else {
-        fbNote.textContent=fbReady?'→ 選んだ shot のスレッドへFB投稿':'→ FBはSHOTスレッドへ（Elvis殿の投稿口が開き次第・現在は保留）';
+        fbNote.textContent='→ FBはSHOTスレッドへ（投稿口が開き次第・現在は保留）';
         fbNote.style.color='#c7a86a'; l2.appendChild(fbNote);
       }
     }
     kind.onchange=drawL2; drawL2();
     row.appendChild(l2); body.appendChild(row);
-    rows.push({cb,nm,kind,shotSel,typeSel,c});
+    rows.push({cb,nm,kind,shotSel,typeSel,taskSel,c});
   });
+  // 末端①: FB宛先タスク一覧を1回引いて全FB行のセレクタへ（get_project_tasks→thread_id同梱・都度get_task_thread不要）
+  if(fbReady && m.project_id!=null){
+    jpost('/api/tasks/list',{project_id:m.project_id}).then(res=>{
+      const its=(res&&res.items)||[];
+      if(!its.length){ taskSels.forEach(sel=>{ sel.innerHTML='<option value="">（このPJに既存タスク無し）</option>'; }); return; }
+      const opts='<option value="">タスクを選択…</option>'+its.map(t=>'<option value="'+t.task_id+'">'+esc((t.shot_code?t.shot_code+' ':'')+(t.name||('#'+t.task_id))+(t.status?' ['+t.status+']':''))+'</option>').join('');
+      taskSels.forEach(sel=>{ sel.innerHTML=opts; });
+    }).catch(()=>{ taskSels.forEach(sel=>{ sel.innerHTML='<option value="">（一覧取得失敗）</option>'; }); });
+  }
   const st=document.createElement('div'); st.style.cssText='margin-top:9px;font-size:12.5px;color:#9fb3c8';
   if(canAct){
     const bs=document.createElement('div'); bs.style.cssText='display:flex;gap:8px;margin-top:10px';
-    const ok=document.createElement('button'); ok.textContent='📝 新規タスクを起票';
+    const ok=document.createElement('button'); ok.textContent='📝 実行（新規起票／FB投稿）';
     ok.style.cssText='padding:7px 14px;border-radius:8px;border:1px solid #22c55e;background:#132a20;color:#d7f0e2;cursor:pointer;font:inherit';
     ok.onclick=async()=>{
       const chosen=rows.filter(r=>r.cb.checked);
-      const fbCnt=chosen.filter(r=>r.kind.value==='fb').length;
       const sel=chosen.filter(r=>r.kind.value==='new').map(r=>({name:r.nm.value.trim(),type:r.typeSel.value,shot:r.shotSel.value,assignee_uid:r.c.assignee_uid,due:r.c.due})).filter(x=>x.name);
+      const fbRows=chosen.filter(r=>r.kind.value==='fb' && r.nm.value.trim());
       const noShot=sel.filter(x=>!x.shot).length;
-      if(!sel.length){ st.textContent='起票する『新規タスク』を選び、shot をご指定くだされ。'+(fbCnt?('（FB '+fbCnt+'件はスレッド投稿口の開通待ち）'):''); return; }
+      const fbNoTgt=fbRows.filter(r=>!(r.taskSel.value||'').trim()).length;
+      if(!sel.length && !fbRows.length){ st.textContent='実行する項目を選んでくだされ。'; return; }
       if(noShot){ st.textContent='新規タスクには shot 指定が要りまする（'+noShot+'件が未指定）。Score が置けませぬ。'; return; }
-      ok.disabled=true; st.textContent=sel.length+'件を起票中…';
+      if(fbNoTgt){ st.textContent='FB は宛先タスクの選択が要りまする（'+fbNoTgt+'件が未選択）。'; return; }
+      ok.disabled=true; st.textContent='実行中…';
+      const msgs=[]; let fbNg=0;
       try{
-        const r=await jpost('/api/minutes/commit',{tasks:sel});
-        st.textContent=(r.ok?'✅ ':'⚠️ ')+(r.message||r.error||'')+(fbCnt?('／ FB '+fbCnt+'件は保留（スレッド投稿口待ち）'):'');
-        if(r.ok){ ok.disabled=true; h.style.opacity='.7'; }
-        else { ok.disabled=false; }
+        if(sel.length){
+          const r=await jpost('/api/minutes/commit',{tasks:sel});
+          msgs.push((r.ok?'✅ ':'⚠️ ')+(r.message||r.error||'')); if(!r.ok) fbNg++;
+        }
+        let fbOk=0;
+        for(const r of fbRows){
+          try{
+            const pr=await jpost('/api/thread/post',{task_id:r.taskSel.value,body:r.nm.value.trim()});
+            if(pr.ok){ fbOk++; } else { fbNg++; msgs.push('⚠️ FB「'+r.nm.value.trim().slice(0,20)+'」: '+(pr.error||'失敗')); }
+          }catch(e){ fbNg++; msgs.push('⚠️ FB通信失敗: '+(e.message||e)); }
+        }
+        if(fbOk) msgs.push('✅ FB '+fbOk+'件をSHOTスレッドへ投稿いたした。');
+        st.innerHTML=msgs.map(esc).join('<br>');
+        if(!fbNg){ ok.disabled=true; h.style.opacity='.7'; } else { ok.disabled=false; }
       }catch(e){ st.textContent='⚠️ 通信失敗: '+(e.message||e); ok.disabled=false; }
     };
     bs.appendChild(ok); body.appendChild(bs);

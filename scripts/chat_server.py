@@ -3216,7 +3216,7 @@ def _minutes_card(query, who):
             "project": pjn.get(pid) or ("PJ" + pid), "project_id": mtg.get("project_id"),
             "shots": shots, "types": casper_minutes.SCORE_TYPES,
             "candidates": cands[:30], "can_act": can_act,
-            "fb_ready": False}                          # FB→SHOTスレッド投稿は Elvis 経路待ち（現状は新規のみ起票可）
+            "fb_ready": True}                           # 末端①開通(2026-07-23): FB→SHOTスレッド投稿はCalendar経路(get_project_tasks→thread_id→/api/thread/post)で稼働
 
 
 def _table_card(query, who):
@@ -6794,6 +6794,31 @@ class H(BaseHTTPRequestHandler):
             self._json({"ok": ok, "thread_id": thread_id, "actor": actor, "result": rj,
                         "message": (f"SHOTスレッド(thread {thread_id})へ投稿いたした。" if ok else f"投稿に失敗いたした（{str(r)[:150]}）")})
             return
+        if self.path == "/api/tasks/list":             # 末端① UI: FB宛先タスク一覧(get_project_tasks/get_shot_tasks proxy・readonly)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (casper_mcp and WRITE_TOKEN):
+                self._json({"ok": False, "error": "一覧機構が無効にござる", "items": []}); return
+            uid = str(who.get("uid") or "")
+            actor = uid if uid.isdigit() else "101"    # 読取のみゆえ本人不明でも system actor(101)で可
+            sid = str(req.get("shot_id") or "").strip(); pid = str(req.get("project_id") or "").strip()
+            if sid.isdigit():
+                tool, targs = "get_shot_tasks", {"shot_id": int(sid), "limit": 500, "offset": 0, "actor_id": int(actor)}
+            elif pid.isdigit():
+                tool, targs = "get_project_tasks", {"project_id": int(pid), "limit": 500, "offset": 0, "actor_id": int(actor)}
+            else:
+                self._json({"ok": False, "error": "project_id か shot_id が要りまする", "items": []}); return
+            r = casper_mcp.call_tool(tool, targs, token=WRITE_TOKEN, actor=actor)
+            try:
+                rj = json.loads(r) if isinstance(r, str) else r
+                raw = rj.get("items") or []
+            except Exception:
+                self._json({"ok": False, "error": f"一覧取得失敗（{str(r)[:120]}）", "items": []}); return
+            items = [{"task_id": t.get("id") or t.get("task_id"), "name": t.get("name") or "",
+                      "shot_code": t.get("shot_code") or "", "status": t.get("status_label") or t.get("status") or "",
+                      "thread_id": t.get("thread_id")} for t in raw if (t.get("id") or t.get("task_id"))]
+            self._json({"ok": True, "count": len(items), "items": items}); return
         if self.path == "/api/reschedule/commit":      # M4 Phase2: 日程変更確定→W2ガード付きexecute(本人/admin=MCP即時/pm・lead他者=BFF待ち)
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
