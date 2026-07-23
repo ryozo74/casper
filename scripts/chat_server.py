@@ -6719,6 +6719,44 @@ class H(BaseHTTPRequestHandler):
             self._json({"ok": ok, "result": rj, "count": len(payload), "skipped": skipped,
                         "message": (f"{len(payload)}件のタスクを起票いたした。{_sk}" if ok else f"起票に失敗いたした（{str(res)[:150]}）")})
             return
+        if self.path == "/api/thread/post":            # M4 末端①: 議事録FB等を task の SHOT スレッドへ投稿(get_task_thread→send_message thread_id)
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            if not (casper_mcp and WRITE_TOKEN):
+                self._json({"ok": False, "error": "投稿機構が無効にござる"}); return
+            task_id = str(req.get("task_id") or "").strip()
+            body = str(req.get("body") or "").strip()
+            if not task_id.isdigit() or not body:
+                self._json({"ok": False, "error": "task_id(数値)と本文が要りまする"}); return
+            autonomous = bool(req.get("autonomous"))   # True=Casper自律投稿(uid=101名義)/既定=承認者本人名義(二値actor・仕様準拠)
+            uid = str(who.get("uid") or "")
+            if not autonomous and not uid.isdigit():   # Fable監査と同旨: 本人不明は投稿させぬ(actor偽装防止)
+                self._json({"ok": False, "error": "本人確認ができませぬ（投稿には認証が要りまする）"}); return
+            actor = "101" if autonomous else uid
+            # ① task の thread_id を引く(Nibu殿 get_task_thread)。未開設/task無しは投稿せず報告(推測でスレ新設せぬ安全弁)
+            tr = casper_mcp.call_tool("get_task_thread", {"task_id": int(task_id), "actor_id": int(actor)}, token=WRITE_TOKEN, actor=actor)
+            try:
+                tj = json.loads(tr)
+            except Exception:
+                tj = {"error": str(tr)[:200]}
+            thread_id = tj.get("thread_id")
+            unopened = (thread_id is None and not tj.get("error"))
+            if tj.get("error") or thread_id is None:
+                self._json({"ok": False, "unopened": unopened,
+                            "error": ("スレッド未開設ゆえ投稿いたしませぬ（推測でのスレッド新設はせぬ）" if unopened
+                                      else f"thread取得失敗（{tj.get('error') or str(tr)[:120]}）")}); return
+            # ② thread_id 指定で投稿。to_user_id は thread_id 指定時は無視されるゆえ actor 自身を置く
+            r = casper_mcp.call_tool("send_message",
+                                     {"actor_id": int(actor), "to_user_id": int(actor), "body": body, "thread_id": int(thread_id)},
+                                     token=WRITE_TOKEN, actor=actor)
+            try:
+                rj = json.loads(r); ok = bool(rj.get("id"))
+            except Exception:
+                rj = {"raw": str(r)[:200]}; ok = False
+            self._json({"ok": ok, "thread_id": thread_id, "actor": actor, "result": rj,
+                        "message": (f"SHOTスレッド(thread {thread_id})へ投稿いたした。" if ok else f"投稿に失敗いたした（{str(r)[:150]}）")})
+            return
         if self.path == "/api/reschedule/commit":      # M4 Phase2: 日程変更確定→W2ガード付きexecute(本人/admin=MCP即時/pm・lead他者=BFF待ち)
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
