@@ -72,3 +72,10 @@ verbs:
     scope: project              # そのPJの pm/lead 以上（他PJ議事録からの越境起票を防ぐ）
     audience: pm_lead
     confirm: one_tap
+
+  post_thread:                 # 末端① 議事録FB等を task の SHOT スレッドへ投稿（状態は変えぬ・communication）
+    label: スレッド投稿
+    from_status: any           # 投稿はタスク状態に依存せぬ
+    min_tier: user             # 関係者なら誰でも（実質の絞りは scope が担う）
+    scope: own                 # 担当本人＋そのPJの pm/lead＋director/admin（無関係な他PJスレへの投稿を防ぐ・Fable監査2026-07-23）
+    audience: scope

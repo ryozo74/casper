@@ -6729,11 +6729,42 @@ class H(BaseHTTPRequestHandler):
             body = str(req.get("body") or "").strip()
             if not task_id.isdigit() or not body:
                 self._json({"ok": False, "error": "task_id(数値)と本文が要りまする"}); return
-            autonomous = bool(req.get("autonomous"))   # True=Casper自律投稿(uid=101名義)/既定=承認者本人名義(二値actor・仕様準拠)
+            if len(body) > 4000:                       # 本文長ガード(Fable監査2026-07-23)
+                self._json({"ok": False, "error": "本文が長すぎまする（4000字まで）"}); return
+            # 【Fable監査2026-07-23 認可穴①の是正】autonomous(uid=101名義の自律投稿)は「なりすまし機構」ゆえ、
+            # identify と同じく **loopback発 or host-secret一致** の内部機構からのみ許す。これが無いと bind=0.0.0.0
+            # (LAN公開)上の第三者が autonomous:true を付けて uid101 名義で任意スレへ投稿できる(M2秘匿の再導入)。
+            _cip = self.client_address[0] if getattr(self, "client_address", None) else ""
+            _hsec = os.environ.get("CASPER_HOST_SECRET", "")
+            _trusted = (_cip in ("127.0.0.1", "::1", "localhost")) or (bool(_hsec) and self.headers.get("X-Casper-Host-Secret", "") == _hsec)
+            autonomous = bool(req.get("autonomous"))   # True=Casper自律投稿(uid=101名義・内部機構のみ)/既定=承認者本人名義(二値actor)
+            if autonomous and not _trusted:
+                self._json({"ok": False, "error": "自律投稿は内部機構からのみ許されまする（本人名義でお試しくだされ）"}); return
             uid = str(who.get("uid") or "")
             if not autonomous and not uid.isdigit():   # Fable監査と同旨: 本人不明は投稿させぬ(actor偽装防止)
                 self._json({"ok": False, "error": "本人確認ができませぬ（投稿には認証が要りまする）"}); return
             actor = "101" if autonomous else uid
+            # 【Fable監査2026-07-23 認可穴②の是正】人間名義(非autonomous)は兄弟endpoint同様 authority を通す。
+            # task の project_id/assignee を読み、post_thread(scope=own: 担当本人＋PJのpm/lead＋director/admin)で判定
+            # ＝認証はあるが認可なし=他PJスレへ無関係な者が投稿する穴 を塞ぐ。autonomousは trusted 内部機構ゆえ scope 判定を要さぬ。
+            snap = casper_authority._load_snapshot() if casper_authority else None
+            _task = None
+            if casper_tools:
+                try:
+                    _t = casper_tools._get(f"/tasks/{task_id}")
+                    _task = _t if (isinstance(_t, dict) and _t.get("id") is not None) else None
+                except Exception:
+                    _task = None
+            if not autonomous:
+                if casper_authority is None or _task is None:
+                    self._json({"ok": False, "error": "タスクの現状を読めず、権限を確かめられませぬ"}); return
+                _tgt = {"project_id": _task.get("project_id"), "assignee": str(_task.get("assigned_to") or "")}
+                _ok, _rsn = casper_authority.allowed("post_thread", uid, _tgt, from_status="", snap=snap)
+                if not _ok:
+                    _msg = {"tier_too_low": "投稿の権限がございませぬ",
+                            "out_of_scope": "この案件（PJ）はご担当の範囲外ゆえ投稿できませぬ",
+                            "snapshot_stale_admin_only": "権限情報が古く、今は管理者のみ投稿できまする"}.get(_rsn.split(":")[0], f"投稿できませぬ（{_rsn}）")
+                    self._json({"ok": False, "error": _msg}); return
             # ① task の thread_id を引く(Nibu殿 get_task_thread)。未開設/task無しは投稿せず報告(推測でスレ新設せぬ安全弁)
             tr = casper_mcp.call_tool("get_task_thread", {"task_id": int(task_id), "actor_id": int(actor)}, token=WRITE_TOKEN, actor=actor)
             try:
@@ -6746,7 +6777,12 @@ class H(BaseHTTPRequestHandler):
                 self._json({"ok": False, "unopened": unopened,
                             "error": ("スレッド未開設ゆえ投稿いたしませぬ（推測でのスレッド新設はせぬ）" if unopened
                                       else f"thread取得失敗（{tj.get('error') or str(tr)[:120]}）")}); return
-            # ② thread_id 指定で投稿。to_user_id は thread_id 指定時は無視されるゆえ actor 自身を置く
+            # ② thread_id 指定で投稿。監査台帳(_m4_ledger)を兄弟endpoint同様に通す(Fable監査2026-07-23 穴③)。
+            #    to_user_id は thread_id 指定時は無視されるゆえ actor 自身を置く。
+            orec = _m4_ledger_open("post_thread", "send_message",
+                                   {"task_id": int(task_id), "thread_id": int(thread_id), "autonomous": autonomous, "body_len": len(body)},
+                                   actor, f"議事録FB→SHOTスレッド投稿: task {task_id}",
+                                   {"project_id": (_task or {}).get("project_id"), "assignee": str((_task or {}).get("assigned_to") or "")}, snap)
             r = casper_mcp.call_tool("send_message",
                                      {"actor_id": int(actor), "to_user_id": int(actor), "body": body, "thread_id": int(thread_id)},
                                      token=WRITE_TOKEN, actor=actor)
@@ -6754,6 +6790,7 @@ class H(BaseHTTPRequestHandler):
                 rj = json.loads(r); ok = bool(rj.get("id"))
             except Exception:
                 rj = {"raw": str(r)[:200]}; ok = False
+            _m4_ledger_close(orec, ok, ("ok" if ok else str(r)[:120]))
             self._json({"ok": ok, "thread_id": thread_id, "actor": actor, "result": rj,
                         "message": (f"SHOTスレッド(thread {thread_id})へ投稿いたした。" if ok else f"投稿に失敗いたした（{str(r)[:150]}）")})
             return
