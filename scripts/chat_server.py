@@ -866,6 +866,10 @@ def _file_delivery_dm(user_msg, who, convo=None):
     q = user_msg or ""
     if not _DM_INTENT_RE.search(q):
         return None
+    if _looks_declarative(q):
+        # 資料URLを添えた定義/合意の共有は「これを誰かへ送れ」ではない。実測2026-07-27 19:05:
+        # 19値の定義表を貼られて『共有リンクは受け取りました。どなた宛にDMしましょう？』と返した。
+        return None
     if _NOT_DELIVERY_RE.search(q):
         # 「担当でない/誤送/間違い」=URLを配信するのでなく"その旨を伝える"文面が要る→配信fast-pathを退き、
         # 通常のDM作成(LLMが文脈のQC情報から丁寧な誤送連絡を起こす+承認カード)に委ねる(殿指摘2026-07-13)。
@@ -3221,10 +3225,29 @@ _STATUS_VERB_RE = [
     ("omit_task", re.compile(r"対象外|除外|omit|取り下げ|取りやめ|見送りに(する|し)|やらないこと", re.I)),
 ]
 
+# 【宣言・定義・引用は命令ではない】status語彙が複数並ぶ本文は「定義表/合意事項の共有」であって
+# 「このタスクを納品せよ」ではない。実測2026-07-27 19:05: 殿が9値の定義表を示されたのを
+# 'DELIVER' の一語で拾い『どのタスクを「納品」しまするか？候補: …』と問い返した(殿御指摘の一件)。
+# 殿は2026-07-23 にも同じ誤読を指摘済(corrections 9b31db89)。語一つで動詞を起こすのを機構で止める。
+_STATUS_VOCAB_RE = re.compile(r"\b(wt|mk|wip|qc|qc_fb|ap|client_ap|deliver|omit)\b", re.I)
+_DECLARATIVE_RE = re.compile(r"確定(した|しました|事項)|以下に(確定|定義|決定)|定義(は|を|する)|"
+                             r"ルール|規定|仕様|に変更します|の資料|資料を確認|会議を行い|議事録", re.I)
+
+
+def _looks_declarative(query):
+    """命令ではなく宣言/定義/引用に見えるか。①status語彙が3種以上並ぶ(=定義表の列挙)
+    ②宣言の標識語＋URL/複数行。どちらかで動詞ルータを起こさぬ。"""
+    q = query or ""
+    if len({m.group(0).lower() for m in _STATUS_VOCAB_RE.finditer(q)}) >= 3:
+        return True
+    return bool(_DECLARATIVE_RE.search(q)) and (bool(_AURORA_URL_RE.search(q)) or q.count("\n") >= 2)
+
 
 def _status_card(query, who):
     """status更新意図（納品/客先承認/対象外）→対象タスク＋from→to＋実行可否を機構でカード化。
     返り {verb,label,task_id,...,from_status,to_status,require_evidence,confirm,can_act,deny} / {clarify} / None。"""
+    if _looks_declarative(query):
+        return None                                   # 定義表/資料の共有を「実行せよ」と読み違えぬ
     verb = next((vb for vb, rx in _STATUS_VERB_RE if rx.search(query or "")), None)
     if not (verb and casper_status and casper_authority and casper_tools):
         return None
@@ -3384,8 +3407,12 @@ def _table_card(query, who):
     #    殿ログ2026-07-27 16:33 の実害: roster に tim=uid42 が在るのに人物ファセットの経路が無く、RAGへ流れて
     #    出口で全消し→「うまくお答えできませなんだ」。集合判断(誰が何を持つか)はLLMでなく機構の仕事(Fable)。
     #    問いが PJ に unique 解決する時は PJ 側を優先(『marukomeのタスク』を人と読み違えぬ)。
-    if _PERSON_WORK_RE.search(q) and _pj_resolve(q)[0] != "unique":
-        _puid, _pname = _resolve_person(q, exclude=who.get("uid"))
+    # URLは人物解決の毒(実測2026-07-27: 資料URL '/doc/casper/…' の 'casper' を人物と解いて
+    # 「Casper の手持ち」表を出した)。既存の作法どおり URL を除いてから人を解く。
+    # 定義/資料の共有は問いではないゆえ、宣言に見える本文では表を出さぬ。
+    _qp = _URL_RE.sub(" ", q)
+    if _PERSON_WORK_RE.search(_qp) and _pj_resolve(q)[0] != "unique" and not _looks_declarative(q):
+        _puid, _pname = _resolve_person(_qp, exclude=who.get("uid"))
         if _puid:
             try:
                 _mine = [t for t in _all_tasks() if t.get("assigned_to") == _puid]
@@ -5195,6 +5222,43 @@ def seiri_aurora_fetch(url):
                 "img_bytes": img_bytes, "image_dominant": image_dominant,
                 "insufficient": bool(image_dominant and n_cap == 0)}
     return {"ok": True, "title": title, "url": u, "material": material, "coverage": coverage}
+
+
+# 貼られた Aurora 資料URL(base/doc/{slug})。host は殿の環境で揺れるゆえ host は問わず /doc/ の形で見る。
+_AURORA_URL_RE = re.compile(r"https?://[^\s、。]+?/doc/[^\s、。]+", re.I)
+_AURORA_URL_MEMO = {}                                     # url -> material(取得成功のみ記憶・失敗は都度やり直す)
+
+
+def aurora_url_digest(query):
+    """【貼られた資料は機構が取りに行く】殿が Aurora の資料URLを貼ったなら、その本文を注入する。
+    qwen の tool 選択(aurora_get)に委ねると、URLを渡されても読まずに周辺を作文する——実測
+    2026-07-27 19:04: 19ステータス定義の資料URLを渡されたのに Score のタスク一覧を並べ、次には
+    『確定事項をお知らせください』と、既に示されたものを問い返した(殿御指摘「理解していない」)。
+    掟: 識別子は生成でなく決定的機構で選ぶ。"""
+    m = _AURORA_URL_RE.search(query or "")
+    if not m:
+        return ""
+    u = m.group(0).rstrip("　 ")
+    if u in _AURORA_URL_MEMO:
+        return _AURORA_URL_MEMO[u]
+    try:
+        r = seiri_aurora_fetch(u)
+    except Exception as e:
+        r = {"ok": False, "error": str(e)[:120]}
+    if not r.get("ok"):
+        # 取得できぬことを黙らず告げる(読んだ顔で作文させぬ・失敗とゼロを別の出口へ)。
+        return ("\n\n## 【貼られたAurora資料: 取得できず】\n"
+                f"URL: {u}\n理由: {r.get('error')}\n"
+                "**この資料を読めていない。読んだ前提で内容を語るな。**"
+                "取得できなかった旨を述べ、本文の貼付か別URLを願え。")
+    out = ("\n\n## 【貼られたAurora資料(機構が取得・これが一次資料)】\n"
+           f"URL: {u}\n{r.get('material')}\n"
+           "**この資料を読んだ上で答えよ。既に示された内容を『お知らせください』と問い返すな。**"
+           "資料に書かれていないことは、書かれていないと述べよ(補完で埋めるな)。")
+    if r.get("coverage", {}).get("insufficient"):
+        out += "\n※図が読めていない(画像主体)。読めた範囲を明示し、足りぬ点は正直に申せ。"
+    _AURORA_URL_MEMO[u] = out
+    return out
 
 
 def seiri_vault_material(project_name, cap=12000):
@@ -7371,6 +7435,20 @@ class H(BaseHTTPRequestHandler):
         _gate = casper_person_gate.resolve(who.get("uid"), ll_user, convo=msgs) if casper_person_gate else {}
         if _gate.get("digest"):                          # 理解ゲート: その人の既定ファセット/別名を前提として注入(入力の接地)
             sysadd += _gate["digest"]
+        _au_note = aurora_url_digest(ll_user)            # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
+        sysadd += _au_note
+        if _looks_declarative(ll_user) or len({m.group(0).lower() for m in _STATUS_VOCAB_RE.finditer(ll_user or "")}) >= 3:
+            # ステータス語彙を論ずる時は、実装されている対応表を機構から渡す。渡さねば自らの機構と
+            # 食い違う説明をする(実測2026-07-27: wt を『超過対象』と述べた——実装では wt=held=非超過)。
+            sysadd += ("\n\n## 【機構が実装しているステータス対応(単一ソース casper_status_rules)】\n"
+                       "canonical 9値 → status_category(Calendar API が正): "
+                       "mk=todo / wip=in_progress / qc・qc_fb=review / ap・client_ap・deliver=completed / "
+                       "wt・omit=held。\n"
+                       "納期超過の判定: category が completed または held のものは**超過に数えぬ**"
+                       "(ゆえ ap/client_ap/deliver/**wt**/omit は非超過。超過対象は mk/wip/qc/qc_fb のみ)。\n"
+                       "**この対応を、実装の事実として述べよ。推測で別の割り振りを語るな。**"
+                       "合法遷移グラフ(from→to×役職)は Calendar 側に未実装ゆえ、"
+                       "『遷移が強制されている』とは言うな(定義と強制は別)。")
         assign_card = _assign_card(ll_user, who)         # M4 Phase1: アサイン提案意図(閲覧全員・実行lead+)→スロット＋候補カード
         mine_table = None; mine_prose = None
         # アサイン意図だが提案カードが出ない＝「私の」明示＝本人のアサイン表を接地で返す(LLMに落として幻覚させない)

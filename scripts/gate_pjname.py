@@ -20,7 +20,8 @@ SRC = os.path.join(HERE, "chat_server.py")
 WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_canonical", "_PJ_ALIAS", "_pj_index", "_pj_name_hit", "_pj_resolve",
         "_PERSON_WORK_RE", "_PERSON_COLS", "_NAME_STOP", "_name_tokens", "_PJ_TASK_RE",
-        "_NEG_EXIST_RE", "_NEG_SCOPE_RE"]
+        "_NEG_EXIST_RE", "_NEG_SCOPE_RE",
+        "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -137,6 +138,28 @@ chk("限定つきは撃たぬ: 未完了", _bare("未完了のタスクはござ
 chk("限定つきは撃たぬ: 本日締切", _bare("本日締切のタスクはありません。"), False)
 chk("限定つきは撃たぬ: 納期超過", _bare("納期超過のタスクは存在しません。"), False)
 chk("否定でない文は撃たぬ", _bare("全49件のタスクが登録されています。"), False)
+
+# ── ⑩ 宣言/定義/引用は命令ではない ────────────────────────────────────
+#    実測2026-07-27 19:05: 9値の定義表を貼られ 'DELIVER' の一語で動詞ルータが起き
+#    『どのタスクを「納品」しまするか？』と問い返した(殿は7/23にも同じ誤読を指摘済)。
+_LD = M["_looks_declarative"]
+_DEF_TABLE = ("http://nina_notepc_02:8100/doc/casper/2026-07-24/tasuku-19 の資料を確認した。"
+              "会議を行い以下に確定した\nWT オート\nMK 制作\nWIP アーティスト\nQC アーティスト\n"
+              "QC_FB ディレクター\nAP ディレクター\nCLIENT_AP 制作\nDELIVER アーティスト\nOMIT 制作")
+chk("定義表は宣言(命令に非ず)", _LD(_DEF_TABLE), True)
+chk("status語彙3種以上=列挙と見る", _LD("WIP と QC と AP の話"), True)
+chk("実際の命令は宣言でない: 納品にして", _LD("ac3102を納品済にして"), False)
+chk("実際の命令は宣言でない: omit", _LD("このタスクをomitにして"), False)
+chk("普通の問いは宣言でない", _LD("Timは今なにしてるの？"), False)
+chk("資料URLのみ(宣言標識なし)は宣言でない", _LD("http://x/doc/a/b/c"), False)
+
+# Aurora資料URLの検出(貼られたら機構が取りに行く前提そのもの)
+_AU = M["_AURORA_URL_RE"]
+chk("Aurora資料URLを拾う",
+    bool(_AU.search("http://nina_notepc_02:8100/doc/casper/2026-07-24/tasuku-19　の資料を確認した")), True)
+chk("URL末尾の全角空白を含めぬ",
+    _AU.search("http://h:8100/doc/a/b　の資料").group(0), "http://h:8100/doc/a/b")
+chk("/doc/ を持たぬURLは対象外", bool(_AU.search("https://example.com/foo/bar")), False)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")
