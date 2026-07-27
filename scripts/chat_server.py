@@ -2837,6 +2837,15 @@ def _match_online_pj(query):
 _PJ_TASK_RE = re.compile(r"タスク.{0,8}(見せ|教え|一覧|リスト|出し|表示|見たい|ある|状況|ください|くれ|どうなって|進捗)|"
                          r"(見せ|教え|一覧|表示|出し).{0,6}タスク|どんな.{0,4}タスク", re.I)
 
+# 人物の手持ちを問う意図(『Timは今なにしてる？』『鈴木の担当タスク』『ouは忙しい？』)。
+# 実際に人物が解決できた時のみ表を描くゆえ、ここは意図の検出に徹する(人の同定は _resolve_person が正)。
+_PERSON_WORK_RE = re.compile(
+    r"(何|なに|なん)(を)?(して|やって)(る|いる|ます|んの|の)|"                  # 今なにしてる/何やってますか
+    r"(手持ち|抱えて|持って(る|いる)|担当(して(る|いる))?)|"                     # 手持ち/抱えている/担当
+    r"(稼働|忙し|空いて(る|いる)|余裕|暇)|"                                      # 稼働状況/忙しい/空いている
+    r"の(タスク|案件|仕事|予定|スケジュール|状況|進捗)", re.I)
+_PERSON_COLS = ["カット", "タスク", "プロジェクト", "工程", "状態", "期限", "納期"]   # 0件時と一覧時で同一(列の食い違いを断つ)
+
 
 def _pj_near_candidates(query, k=4):
     """名前解決0件だが名前らしきトークンがある時の近傍候補。候補生成のみ・自動解決に使わない(Fable)。
@@ -3278,6 +3287,46 @@ def _table_card(query, who):
                 "rows": rows, "sortable": True, "numeric_cols": [],
                 "footer": "Calendar 確定データ（qc_fb/dir_wt/qc等の確認待ちで3日以上更新なし）。"
                           "過去のレガシー記録(2022 DBM2/legacy_score)は進捗に含めません。"}
+
+    # ⓪-b 人物の手持ち(『Timは今なにしてる？』『鈴木の担当タスク』) — 人が解ければ assignee×未完了 を機構で描く。
+    #    殿ログ2026-07-27 16:33 の実害: roster に tim=uid42 が在るのに人物ファセットの経路が無く、RAGへ流れて
+    #    出口で全消し→「うまくお答えできませなんだ」。集合判断(誰が何を持つか)はLLMでなく機構の仕事(Fable)。
+    #    問いが PJ に unique 解決する時は PJ 側を優先(『marukomeのタスク』を人と読み違えぬ)。
+    if _PERSON_WORK_RE.search(q) and _pj_resolve(q)[0] != "unique":
+        _puid, _pname = _resolve_person(q, exclude=who.get("uid"))
+        if _puid:
+            try:
+                _mine = [t for t in _all_tasks() if t.get("assigned_to") == _puid]
+            except Exception:
+                _mine = None                  # 取得失敗とゼロは別の出口(掟: 失敗を「0件」と名乗らぬ)→通常経路へ落とす
+            if _mine is not None:
+                pmn = {p.get("id"): p.get("name") for p in items}
+                _mv = [t for t in _mine if _task_is_moving(t)]      # 「今なにしてる」=動作中
+                _op = [t for t in _mine if _task_open(t)]           # 手持ち全体=残務
+                _shown = sorted(_mv or _op, key=lambda t: str(t.get("due_date") or "9999"))
+                rows = []
+                for t in _shown[:60]:
+                    due = str(t.get("due_date") or "")[:10]
+                    # カットを先頭に置く: 工程名(Compositing 等)は同PJ内で重複し、行が見分けられぬ(停滞FB表と同形)。
+                    rows.append([t.get("shot_code") or t.get("shotID") or "—",
+                                 t.get("name") or t.get("title") or "?",
+                                 pmn.get(t.get("project_id"), "—"), t.get("type") or "",
+                                 t.get("status_label") or t.get("status") or "", due,
+                                 _due_note(due, t.get("status"), "task", t.get("status_category"))])
+                if not rows:                  # 母集合は確かに見た上での0件=正直に「手が空いている」と言える
+                    return {"title": f"{_pname} の手持ち", "columns": _PERSON_COLS,
+                            "rows": [], "sortable": True, "numeric_cols": [],
+                            "footer": f"Calendar 上、{_pname} に割り当てられた未完了タスクはありません"
+                                      f"（担当タスク全{len(_mine)}件はいずれも完了/対象外）。"}
+                _foot = f"Calendar 確定データ。{_pname} の担当分のみ。列見出しクリックで並べ替え。"
+                if _mv and len(_op) > len(_mv):
+                    _foot += f" 着手前/確認待ちを含む残務は {len(_op)}件。"
+                if len(_shown) > 60:
+                    _foot += "（多いため上位60件）"
+                return {"title": (f"{_pname} が動かしているタスク（{len(_mv)}件 / 残務{len(_op)}件）" if _mv
+                                  else f"{_pname} の残務（{len(_op)}件・現在動作中のものは無し）"),
+                        "columns": _PERSON_COLS,
+                        "rows": rows, "sortable": True, "numeric_cols": [], "footer": _foot}
 
     # ⓪ 特定PJのタスク一覧(『マルコメのタスク見せて』等) — 名前解決器で unique に解けた時のみ表を描く
     #    (曖昧/不在は None を返し、呼び側が選択カード/近傍候補で拾う=無言None落ちさせない・Fable)

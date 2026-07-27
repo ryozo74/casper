@@ -18,7 +18,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "chat_server.py")
 WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
-        "_canonical", "_PJ_ALIAS", "_pj_index", "_pj_name_hit", "_pj_resolve"]
+        "_canonical", "_PJ_ALIAS", "_pj_index", "_pj_name_hit", "_pj_resolve",
+        "_PERSON_WORK_RE", "_PERSON_COLS"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -83,6 +84,20 @@ if os.path.exists("/tmp/cal_projects.json") and M["_pj_index"]()["idx"]:
     chk("名の無い一般の問いは none", _resolve("今日の締切は？")[0], "none")
 else:
     print("⏭  /tmp/cal_projects.json 不在ゆえ resolver 実データ検査は省略（SKIP=未検証・緑と数えぬ）")
+
+# ── ⑥ 人物ファセットの分岐(『Timは今なにしてる？』が無言で落ちぬこと) ──
+#    実害(殿ログ 16:33): roster に tim=uid42 が在るのに経路が無く「うまくお答えできませなんだ」。
+_PW = M["_PERSON_WORK_RE"]
+for q in ["Timは今なにしてるの？", "koheiの担当タスクは？", "ouは忙しい？", "terajimaの手持ちは",
+          "鈴木のスケジュール", "tetsuoは空いてる？"]:
+    chk(f"人物意図を検知: {q}", bool(_PW.search(q)), True)
+for q in ["今日の締切は？", "進行中のプロジェクトは？", "議事録を要約して"]:
+    chk(f"人物意図でないものは無視: {q}", bool(_PW.search(q)), False)
+chk("0件時と一覧時で列は同一(食い違いを断つ)", len(M["_PERSON_COLS"]), 7)
+if os.path.exists("/tmp/cal_projects.json") and M["_pj_index"]()["idx"]:
+    # PJ優先: 『marukomeのタスク』は人でなく PJ の表へ(分岐の前提条件そのものを検査)
+    chk("PJ unique が勝つ(人物分岐に入らぬ)", _resolve("marukomeのタスクを見せて")[0], "unique")
+    chk("人名のみの問いは PJ unique にならぬ", _resolve("Timは今なにしてるの？")[0] == "unique", False)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")
