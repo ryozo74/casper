@@ -233,41 +233,34 @@ MCP_SIDE_EFFECT = {"upload_asset", "add_reference_material", "send_message", "up
 # actor_id(本人uid)を引数に要する MCP ツール。chat ループで本人uidを強制注入(spoof防止)。
 MCP_ACTOR_TOOLS = {"upload_asset", "add_reference_material", "send_message", "get_messages", "update_task"}
 
-# Calendar タスクステータス 新19値(2026-07-08 刷新・ニブ資料 calendar_status_changes_summary)。
-# 完了は deliver のみ。遅延は status でなく isOverdue 派生(due<today かつ status∉{deliver,omit})。旧値は互換期間中も許容。
-_TASK_DONE = {"deliver", "completed", "done", "complete", "approved"}   # 完了扱い(新=deliverのみ・旧値も互換で吸収)
-_TASK_NOT_OVERDUE = {"deliver", "omit"}                                 # 遅延判定の除外(完了+作業対象外)
-# PJ が納期超過に"成り得ない"status(完了/対象外)。新値deliver+旧値completed等を互換吸収。
-_PJ_NOT_OVERDUE = {"deliver", "omit", "completed", "done", "complete",
-                   "cancelled", "canceled", "approved"}
+# Calendar タスクステータス。canonical は9値(ニブ殿 2026-07-24 実コード回答で訂正・旧「19値」は legacy ラベル)。
+# 完了/対象外の判断は **status_category(API単一ソース)** が正。status 集合は category 欠落時の fallback のみ。
+# → 判断の実体は casper_status_rules（単一機構）。ここではその薄い委譲だけを持つ。
+import casper_status_rules as _sr
+_TASK_DONE = _sr.TASK_DONE_FALLBACK              # 後方互換(既存参照用・fallback集合)
+_TASK_NOT_OVERDUE = _sr.TASK_INACTIVE_FALLBACK   # 後方互換(既存参照用・fallback集合)
+_PJ_NOT_OVERDUE = _sr.PJ_INACTIVE_FALLBACK
 
 
-def _not_overdue_set(scope):
-    """遅延判定の除外status集合。scope='task'は新19値の掟どおり{deliver,omit}のみ、'pj'は完了系も除外。
-    件数と表の二重基準ドリフト(approved超過タスクが件数=遅延/表=完了済 と食い違う)を防ぐ単一ソース(Fable指摘)。"""
-    return _TASK_NOT_OVERDUE if scope == "task" else _PJ_NOT_OVERDUE
+def _not_overdue(status, cat=None, scope="task"):
+    """遅延判定の除外(完了 or 対象外)か。category が在ればそれが正・無ければ status で fallback。
+    件数と表の二重基準ドリフト(承認済タスクが件数=遅延/表=完了済 と食い違う)を防ぐ単一ソース(Fable指摘)。"""
+    return _sr.is_inactive(status, cat, scope)
 
 
-def _overdue_days(due, status, today=None, scope="pj"):
+def _overdue_days(due, status, today=None, scope="pj", cat=None):
     """【納期超過=派生事実の唯一の判定機構(Fable: 集合/派生の判断は機構・LLMは修辞)】
     返り: 超過日数(int>0) / 0(超過でない) / None(日付不正)。
-    完了/対象外statusは due<today でも超過に非ず(isOverdue派生)。qwenに due<today の計算をさせない為の単一ソース。"""
-    import datetime as _dt
-    try:
-        d = _dt.date.fromisoformat(str(due)[:10])
-    except Exception:
-        return None
-    today = today or _dt.date.today()
-    if str(status or "").lower() in _not_overdue_set(scope):
-        return 0
-    return (today - d).days if d < today else 0
+    完了/対象外は due<today でも超過に非ず(isOverdue派生)。qwenに due<today の計算をさせない為の単一ソース。
+    cat=status_category を渡せば API 単一ソースで判断(ap/client_ap も completed=非超過)。"""
+    return _sr.overdue_days(due, status, cat, today, scope)
 
 
-def _due_note_c(due, status, today=None, scope="pj"):
+def _due_note_c(due, status, today=None, scope="pj", cat=None):
     """派生の『納期状況』を機構が確定して文字列化(qwen/表に日付計算を委ねない)。
     超過→🔴N日超過 / 本日締切→⚠️ / 過去だが完了→"完了済(納期超過ではない)"(誤計算封じ) / それ以外→""。"""
     import datetime as _dt
-    od = _overdue_days(due, status, today, scope)
+    od = _overdue_days(due, status, today, scope, cat)
     if od is None:
         return ""
     if od > 0:
@@ -277,7 +270,7 @@ def _due_note_c(due, status, today=None, scope="pj"):
     except Exception:
         return ""
     today = today or _dt.date.today()
-    done = str(status or "").lower() in _not_overdue_set(scope)
+    done = _not_overdue(status, cat, scope)
     if d == today and not done:
         return "⚠️本日締切"
     if d < today and done:                       # 過去納期だが完了 → 明示し qwen の「N日超過」誤断を封じる
@@ -1436,9 +1429,9 @@ def cross_digest(query):
         um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
               for u in _get("/users?limit=200").get("items", [])}
         import collections
-        _tdy = datetime.date.today().isoformat()          # 遅延=isOverdue派生(due<today かつ status∉{deliver,omit})。旧delayedステータスは廃止(2026-07-08)
-        dl = [t for t in tasks if str(t.get("due_date") or "")[:10] and str(t.get("due_date") or "")[:10] < _tdy
-              and (t.get("status") or "").lower() not in _TASK_NOT_OVERDUE]
+        # 遅延=isOverdue派生。除外は status_category(completed/held) が正——単一機構 _sr に委ねる
+        # (旧: status∉{deliver,omit} のハードコード → ap/client_ap を超過と誤判定していた。2026-07-27是正)
+        dl = [t for t in tasks if _sr.task_overdue_days(t)]
         byp = collections.Counter(pm.get(t.get("project_id"), t.get("project_id")) for t in dl)
         byu = collections.Counter(um.get(t.get("assigned_to"), "未割当") for t in dl)
         lines = [f"全PJ遅延タスク総数: {len(dl)}件",
@@ -3230,9 +3223,10 @@ def _table_card(query, who):
     _name_hit = bool(_match_online_pj(q))                # 表記ゆれ耐性の名前解決器へ統一(生substring照合を残さない)
     today = datetime.date.today()
 
-    def _due_note(due, status="", scope="pj"):
-        # 納期状況は status を見て機構が確定(完了PJの過去納期を超過表示しない・単一ソース _due_note_c)。
-        return _due_note_c(due, status, today, scope)
+    def _due_note(due, status="", scope="pj", cat=None):
+        # 納期状況は機構が確定(完了PJ/承認済タスクの過去納期を超過表示しない・単一ソース _due_note_c)。
+        # cat=status_category を渡せる時は必ず渡す(API単一ソース・status文字列での判断に落とさない)。
+        return _due_note_c(due, status, today, scope, cat)
 
     # ⓪-a 停滞FB/確認の一覧(通知の『停滞FB N件』の実体) — 進捗の真実源=Calendar からのみ描く。
     #    vault/legacy_score(過去DBM2 2022)を拾わせない(殿指摘2026-07-13: 進捗はCalendarが全て/vaultに進捗は無い設計)。
@@ -3293,7 +3287,8 @@ def _table_card(query, who):
                     due = str(t.get("due_date") or "")[:10]
                     rows.append([t.get("name") or t.get("title") or "?", t.get("type") or "",
                                  um.get(t.get("assigned_to"), "未割当"),
-                                 t.get("status_label") or t.get("status") or "", due, _due_note(due, t.get("status"), "task")])
+                                 t.get("status_label") or t.get("status") or "", due,
+                                 _due_note(due, t.get("status"), "task", t.get("status_category"))])
                 _hidden = (len(tks) - len(act)) if act else 0    # footerの嘘を断つ: 全件表示時は非表示0
                 _foot = "Calendar 確定データ。列見出しクリックで並べ替え。"
                 if _hidden:

@@ -21,9 +21,12 @@ NOTIFY_LOG = os.path.join(HERE, "casper_notify.jsonl")     # 積まれた通知(
 STATE_FILE = os.path.join(HERE, "casper_notify_state.json")  # dedup状態(最後にブリーフ出した日・既知の超過集合 等)
 CAL_PROJECTS = "/tmp/cal_projects.json"
 
-# 停滞FB とみなす status(API 19値・review系で監督/QC待ち)。完了=deliver/除外=omit は対象外。
+# 停滞FB とみなす status(review系で監督/QC待ち)。完了/対象外は対象外。
 _STALL_STATUS = {"qc_fb", "dir_wt", "qc", "v1qc", "ap_fb", "dir_fb"}
-_DONE_STATUS = {"deliver", "completed", "done", "cancelled", "omit"}
+# 完了/対象外の判断は status_category(API単一ソース)が正 → 単一機構 casper_status_rules へ委譲。
+# (旧: _DONE_STATUS のハードコードで ap/client_ap を「未完了」と誤認していた。2026-07-27是正)
+import casper_status_rules as _sr
+_DONE_STATUS = _sr.TASK_INACTIVE_FALLBACK   # 後方互換(fallback集合としてのみ)
 
 
 def _load_state():
@@ -70,8 +73,8 @@ def _overdue_projects(today):
         if str(p.get("display_status") or "online") != "online":
             continue
         due = str(p.get("end_date") or "")[:10]
-        st = str(p.get("status") or "").lower()
-        if due and due < today and st not in ("completed", "done", "cancelled"):
+        # PJ は status_category を持たぬ(実測)→ scope='pj' の fallback 集合で判断(単一機構 _sr)。
+        if due and due < today and not _sr.is_inactive(p.get("status"), p.get("status_category"), "pj"):
             od.append({"name": p.get("name"), "due": due,
                        "days": (datetime.date.fromisoformat(today) - datetime.date.fromisoformat(due)).days})
     return od
@@ -118,7 +121,7 @@ def compute(uid, now=None):
         od_txt = ("、".join(f"{o['name']}（{o['days']}日超過）" for o in overdue[:5]) if overdue else "なし")
         # 本日締切
         due_today = [t for t in tasks if str(t.get("due_date") or "")[:10] == today
-                     and str(t.get("status") or "").lower() not in _DONE_STATUS]
+                     and not _sr.is_inactive(t.get("status"), t.get("status_category"))]
         body = (f"本日 {today} の要点。\n"
                 f"・納期超過: {len(overdue)}件（{od_txt}）\n"
                 f"・本日締切のタスク: {len(due_today)}件\n"

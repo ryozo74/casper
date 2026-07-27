@@ -16,7 +16,10 @@ try:                                                   # 確認待ち系status�
     from casper_notify import _STALL_STATUS as _CONFIRM_WAIT
 except Exception:
     _CONFIRM_WAIT = {"qc", "qc_fb", "dir_wt", "v1qc", "ap_fb", "dir_fb"}   # フォールバック(import不可時)
-_DONE = {"deliver", "omit"}
+# 完了/対象外の判断は status_category(API単一ソース)が正 → 単一機構へ委譲。
+# (旧: _DONE={deliver,omit} で ap/client_ap 承認済タスクが議題に残っていた。2026-07-27是正)
+import casper_status_rules as _sr
+_DONE = _sr.TASK_INACTIVE_FALLBACK   # 後方互換(fallback集合としてのみ)
 
 
 def _dt(s):
@@ -61,7 +64,7 @@ def agenda_for(meeting, tasks, today, last_meeting_dt=None):
         if str(t.get("project_id") or "") != pid:
             continue
         st = str(t.get("status") or "").lower()
-        if st in _DONE:
+        if _sr.is_inactive(st, t.get("status_category")):    # 完了/対象外は議題に載せぬ(category単一ソース)
             continue
         reasons = []
         if st in _CONFIRM_WAIT:
@@ -118,7 +121,8 @@ def meetings_due(events, tasks, now, min_history=3, floor_days=14):
     """「そろそろ定例」＝経過 > max(1.5×中央値, floor_days) ∧ そのPJに未完タスクあり。経過の長い順。
     （floor_days=14≈10営業日。過去 min_history 回未満は判定せず＝根拠不足は黙る。）now は datetime/date/str 可。"""
     cad = meeting_cadence(events, now, min_history)
-    active_pj = {str(t.get("project_id")) for t in (tasks or []) if str(t.get("status") or "").lower() not in _DONE}
+    active_pj = {str(t.get("project_id")) for t in (tasks or [])
+                 if not _sr.is_inactive(t.get("status"), t.get("status_category"))}   # 未完=category単一ソース
     out = []
     for pid, c in cad.items():
         thresh = max(c["median"] * 1.5, floor_days)
