@@ -2790,6 +2790,21 @@ def _pj_index():
     return _PJ_ALIAS
 
 
+def _pj_name_hit(name, text):
+    """PJ名がテキストに『実体として』現れたか(単一機構)。素の `in` は ASCII短名が別語に埋没して
+    誤爆する: Calendar には実在PJ 'end'(id77) があり `'end' in 'Calendar'` は True——これが
+    「**end** には Calendar上 1件」なる別PJへの摩り替えを生んだ(殿ログ2026-07-27 16:37 実害)。
+    ASCII名は語境界を要求し、日本語名は境界概念が無いゆえ素の包含で可(名が長く弁別的)。"""
+    nm = (name or "").strip()
+    if not nm or not text:
+        return False
+    if nm.isascii():
+        if len(nm) < 3:                                   # 'V'/'GS' 級は本文照合の材料にせぬ(誤爆しか生まぬ)
+            return False
+        return re.search(rf"(?<![A-Za-z0-9]){re.escape(nm)}(?![A-Za-z0-9])", text) is not None
+    return nm in text
+
+
 def _pj_resolve(query):
     """クエリから online PJ を解決(Fable 3値)。返り (status, names, path)。
     status='unique'|'ambiguous'|'none'。閉集合(online PJ)照合ゆえ names は真実源の部分集合(構成上保証)。"""
@@ -2798,12 +2813,14 @@ def _pj_resolve(query):
     qcan = _canonical(q)
     hits = []
     for can, names in idx.items():
-        if any(nm in q for nm in names) or (len(can) >= 3 and can in qcan):   # 生一致 or 正準スケルトン一致
+        # 生一致は語境界つき(_pj_name_hit)。スケルトン一致は4字以上に限る——3字ASCII名(end/RND/TFT/BLG)は
+        # 正準空間で境界が消え 'calendar' 等に埋没するゆえ、生一致(語境界)でのみ拾う。
+        if any(_pj_name_hit(nm, q) for nm in names) or (len(can) >= 4 and can in qcan):
             hits += names
     hits = list(dict.fromkeys(hits))
     if not hits:
         return ("none", [], None)
-    exact = [nm for nm in hits if nm in q]               # 決定則: 完全(生)一致 > 部分/スケルトン一致
+    exact = [nm for nm in hits if _pj_name_hit(nm, q)]   # 決定則: 完全(生)一致 > 部分/スケルトン一致
     if len(exact) == 1:
         return ("unique", exact, "raw")
     if len(hits) == 1:
@@ -7615,13 +7632,26 @@ class H(BaseHTTPRequestHandler):
                                  r"(タスク|task)[^。]{0,16}(ありません|ございません)")
             if _status_q and _neg_re.search(final):
                 _online_pjs = json.load(open("/tmp/cal_projects.json")).get("items", [])
-                _hit_pj = next((p for p in _online_pjs if p.get("name") and p["name"] in final), None)
+                # 【錨は問い、生成文ではない(Fable retrieve-then-render)】訂正対象のPJは、まず「問いが名指し
+                # unique解決した実体」から採る。生成文から名を逆引きするのは最後の手段とし、その照合も
+                # _pj_name_hit(語境界)に一本化する——素の `in` は 'Calendar' の中の 'end' を拾い、
+                # 問われてもおらぬPJの件数で回答を摩り替えた(殿ログ 16:37)。
+                _q_st, _q_names, _ = _pj_resolve(ll_user)
+                _hit_pj = None
+                if _q_st == "unique":
+                    _hit_pj = next((p for p in _online_pjs if p.get("name") == _q_names[0]), None)
+                if not _hit_pj:
+                    _hit_pj = next((p for p in _online_pjs if _pj_name_hit(p.get("name"), final)), None)
                 if _hit_pj:
                     _cnt = sum(1 for t in _all_tasks() if t.get("project_id") == _hit_pj.get("id"))
                     if _cnt > 0:                          # PJ名が出て否定されているが実際はタスク在り→存在否定の嘘を差し止め
-                        final = (f"**{_hit_pj['name']}** には Calendar 上、現在 **{_cnt}件** のタスクが登録されています"
-                                 "（「無い/0件」は母集合を確認せぬ誤りにつき訂正）。"
-                                 "特定の条件（工程・確認待ち等）で絞りたい場合は、条件を明示してくだされ。")
+                        # 嘘の文だけを撃ち、残りは生かす(旧: 全文置換=正しい説明ごと消していた)。
+                        _kept = [s for s in re.split(r"(?<=[。\n])", final)
+                                 if s.strip() and not _neg_re.search(s)]
+                        _fix = (f"**{_hit_pj['name']}** には Calendar 上、現在 **{_cnt}件** のタスクが登録されています"
+                                "（「無い/0件」は母集合を確認せぬ誤りにつき訂正）。"
+                                "特定の条件（工程・確認待ち等）で絞りたい場合は、条件を明示してくだされ。")
+                        final = ("".join(_kept).rstrip() + "\n\n" + _fix) if _kept else _fix
         except Exception:
             pass
         # ※出力の文単位legacyスクラブは撤去(Fable審査2026-07-14): 接地はcontext入口(casper_rag除外)で断つのが本筋。
