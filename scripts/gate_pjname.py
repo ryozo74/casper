@@ -22,7 +22,7 @@ WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_PERSON_WORK_RE", "_PERSON_COLS", "_NAME_STOP", "_name_tokens", "_PJ_TASK_RE",
         "_NEG_EXIST_RE", "_NEG_SCOPE_RE",
         "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative",
-        "_ACT_NOT", "_ACTION_REQ_RE"]
+        "_ACT_NOT", "_ACTION_REQ_RE", "_DEIXIS_TABLE_RE", "deixis_table_digest"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -180,6 +180,25 @@ for q in ["ac3102を納品済にして", "このタスクをomitにして", "#28
 for q in ["Timは今なにしてるの？", "いま作業してます", "何をしていたの", "APは超過にするな",
           "marukomeのタスクは？"]:
     chk(f"依頼でないと判る: {q}", bool(_AR.search(q)), False)
+
+# ── ⑫ 『この表』の接地(直前の自分の応答を指せること) ──────────────────
+#    実測2026-07-27 19:28(殿御指摘「もう少し理解がいる」): 一手前に自ら出した9ステータスの表を
+#    『この表の中に権限も』と言われ『どの表を指すか明確ではありません』と問い返した。
+_DTD = M["deixis_table_digest"]
+_CONVO = [{"role": "user", "content": "9つのステータスを表に"},
+          {"role": "assistant", "content": "まとめました。\n\n| ステータス | 意味 |\n| :-- | :-- |\n"
+                                           "| WT | 保留 |\n| MK | 制作準備 |"},
+          {"role": "user", "content": "この表の中に権限の表記もお願い"}]
+_d = _DTD("この表の中に権限の表記もお願い", _CONVO)
+chk("『この表』で直前の表を特定する", bool(_d) and "| WT | 保留 |" in _d, True)
+chk("問い返しを禁ずる指示が入る", "問い返すな" in _d, True)
+chk("指示語が無ければ何も注入せぬ", _DTD("9つのステータスを表にまとめて", _CONVO), "")
+chk("直前に表が無ければ注入せぬ",
+    _DTD("この表に権限も", [{"role": "assistant", "content": "表はまだ作っておりませぬ。"}]), "")
+for q, w in [("この表の中に権限の表記もお願い", True), ("上の一覧に列を足して", True),
+             ("さっきのまとめを直して", True), ("marukomeのタスクは？", False),
+             ("表を新しく作って", False)]:
+    chk(f"指示語検出({w}): {q}", bool(M["_DEIXIS_TABLE_RE"].search(q)), w)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")

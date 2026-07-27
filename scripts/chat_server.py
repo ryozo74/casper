@@ -5283,6 +5283,87 @@ def aurora_url_digest(query):
     return out
 
 
+_THREAD_RULES_FILE = os.path.join(HERE, "thread_rules.jsonl")
+_THREAD_RULES = None                                      # thr -> [規則text] (遅延ロード)
+
+
+def _thread_rules_load():
+    """殿が会話中に示された規則を復元(プロセス再起動/auto-reload を越えて残す)。"""
+    global _THREAD_RULES
+    if _THREAD_RULES is not None:
+        return _THREAD_RULES
+    _THREAD_RULES = {}
+    try:
+        for ln in open(_THREAD_RULES_FILE, encoding="utf-8"):
+            if not ln.strip():
+                continue
+            d = json.loads(ln)
+            _THREAD_RULES.setdefault(d.get("thread") or "", [])
+            if d.get("text") not in _THREAD_RULES[d["thread"]]:
+                _THREAD_RULES[d["thread"]].append(d["text"])
+    except Exception:
+        pass
+    return _THREAD_RULES
+
+
+def thread_rules_observe(thr, query):
+    """【示された規則は履歴の予算に委ねぬ】殿が規則を述べたなら機構が控える。
+    実測2026-07-27 19:28: 権限の定義は19:17に確かに示されたのに、履歴予算(4500字)から押し出され、
+    『この表に権限も』へ『権限のデータが見つかりません』と答えた。会話の窓は有限ゆえ、
+    規則だけは窓の外へ出しても消えぬ場所へ移す(服従でなく機構で保つ)。"""
+    q = (query or "").strip()
+    if not thr or len(q) < 20 or not _looks_declarative(q):
+        return
+    st = _thread_rules_load().setdefault(thr, [])
+    t = q[:1500]
+    if t in st:
+        return
+    st.append(t)
+    del st[:-8]                                           # 直近8件まで(古い規則は新しいものに置き換わる想定)
+    try:
+        with open(_THREAD_RULES_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"thread": thr, "text": t}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def thread_rules_digest(thr):
+    """控えた規則を、履歴とは別枠で必ず注入する(小さいゆえ予算を圧迫せぬ)。"""
+    st = _thread_rules_load().get(thr or "") or []
+    if not st:
+        return ""
+    return ("\n\n## 【この会話で殿が示された規則(機構が保持・会話履歴から溢れても消えぬ)】\n"
+            + "\n---\n".join(st)
+            + "\n**表や説明を作る時は、まずここから値を採れ。**"
+            "『見つかりません/ご指示ください』と問い返す前に、ここに書かれていないかを必ず確かめよ。")
+
+
+_DEIXIS_TABLE_RE = re.compile(r"(この|その|上の|先の|さっきの|今の|前の)(表|テーブル|一覧|リスト|まとめ)", re.I)
+
+
+def deixis_table_digest(query, convo):
+    """【『この表』は直前の自分の応答の表である】指示語を機構で接地する。
+    実測2026-07-27 19:28(殿御指摘「もう少し理解がいる」): 一手前に自ら9ステータスの表を出したのに
+    『この表の中に権限の表記もお願い』へ『どの表を指すか明確ではありません』と問い返した。
+    履歴には在ったが、弱qwenがRAG雑音(DBM2レガシー等)に引かれて自分の直前の出力を見失った。
+    ゆえ機構が「これがその表だ」と名指して渡す(推測させず、問い返させぬ)。"""
+    if not _DEIXIS_TABLE_RE.search(query or ""):
+        return ""
+    for m in reversed(list(convo or [])):                 # 直近の assistant 応答から md 表を探す
+        if m.get("role") != "assistant":
+            continue
+        body = str(m.get("content") or "")
+        rows = [ln for ln in body.split("\n") if re.match(r"\s*\|.*\|\s*$", ln)]
+        if len(rows) >= 3:                                # 見出し＋区切り＋データ1行以上=表と見る
+            return ("\n\n## 【『この表』が指すもの＝直前の自分の応答の表(機構が特定)】\n"
+                    + "\n".join(rows[:40])
+                    + "\n**これが『この表』である。どの表かを問い返すな。**"
+                    "この表を土台に、求められた列/行を足して**表全体を作り直して**返せ。"
+                    "列を足す元の値は、この会話で殿が示された内容から採れ。"
+                    "会話に無い値は推測で埋めず、その欄は『—(未確定)』とし、何が足りぬかを1文で添えよ。")
+    return ""
+
+
 def seiri_vault_material(project_name, cap=12000):
     """PJ名で vault を横断し、既存の議事録/asset影武者/DB書庫/人物 等から素材を自動収集。
     60_projects(自らの結晶化=citogenesis回避)と汎用短名は除外。総量を上限で抑える。返り値=(素材text, 出典数)。"""
@@ -7459,6 +7540,9 @@ class H(BaseHTTPRequestHandler):
             sysadd += _gate["digest"]
         _au_note = aurora_url_digest(ll_user)            # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
         sysadd += _au_note
+        sysadd += deixis_table_digest(ll_user, msgs)      # 『この表』→直前の自分の応答の表を機構が名指して渡す
+        thread_rules_observe(thr, ll_user)                # 殿が述べた規則を控える(履歴予算から溢れても失わぬ)
+        sysadd += thread_rules_digest(thr)
         if _looks_declarative(ll_user) or len({m.group(0).lower() for m in _STATUS_VOCAB_RE.finditer(ll_user or "")}) >= 3:
             # ステータス語彙を論ずる時は、実装されている対応表を機構から渡す。渡さねば自らの機構と
             # 食い違う説明をする(実測2026-07-27: wt を『超過対象』と述べた——実装では wt=held=非超過)。
