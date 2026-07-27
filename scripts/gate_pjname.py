@@ -22,7 +22,8 @@ WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_PERSON_WORK_RE", "_PERSON_COLS", "_NAME_STOP", "_name_tokens", "_PJ_TASK_RE",
         "_NEG_EXIST_RE", "_NEG_SCOPE_RE",
         "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative",
-        "_ACT_NOT", "_ACTION_REQ_RE", "_DEIXIS_TABLE_RE", "deixis_table_digest"]
+        "_ACT_NOT", "_ACTION_REQ_RE", "_DEIXIS_TABLE_RE", "deixis_table_digest",
+        "_ASK_INTENT_RE", "_NOT_FILE_REF_RE", "_FILE_REF_RE", "_SELF_UIDS"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -199,6 +200,20 @@ for q, w in [("この表の中に権限の表記もお願い", True), ("上の�
              ("さっきのまとめを直して", True), ("marukomeのタスクは？", False),
              ("表を新しく作って", False)]:
     chk(f"指示語検出({w}): {q}", bool(M["_DEIXIS_TABLE_RE"].search(q)), w)
+
+# ── ⑬ DM: 問いを立てる依頼を「ファイル配信」と読み違えぬ ────────────────
+#    実測2026-07-27(殿御指摘「DM内容が微妙」): 『この表の中で〜どれか？をkiyotomo、Tetsuoに確認するDM』へ、
+#    配信の定型『データをお送りします。ご確認ください。＋URL』を返し、問いが本文から消え宛先も一名に落ちた。
+_ASK, _NFR, _FR = M["_ASK_INTENT_RE"], M["_NOT_FILE_REF_RE"], M["_FILE_REF_RE"]
+_DM_ASK = "じゃあこの表の中で、casperが変更かける必要があるステータスはどれが？をkiyotomo、Tetsuoに確認するDMをお願い"
+chk("尋ねる意図と判る(=配信でない)", bool(_ASK.search(_DM_ASK)), True)
+chk("『この表』はファイル参照でない", bool(_NFR.search(_DM_ASK)), True)
+for q in ["このファイルをtetsuoにDMして", "このリンクをkiyotomoに送っといて"]:
+    chk(f"正当な配信は配信のまま: {q}",
+        bool(_ASK.search(q)) or bool(_NFR.search(q)), False)
+    chk(f"文脈参照は生きている: {q}", bool(_FR.search(q)), True)
+chk("『この表を送って』は表参照(ファイルに非ず)", bool(_NFR.search("この表をtetsuoに送って")), True)
+chk("Casper自身(uid101)は宛先候補から除く", "101" in M["_SELF_UIDS"], True)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")

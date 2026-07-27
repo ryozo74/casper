@@ -794,6 +794,49 @@ def _strip_tool_leak(text):
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def _fanout_dm_recipients(query, who, pending_actions, trace_id=None):
+    """【名指しされた宛先を落とさぬ】問いが複数名に向いているのに下書きが1通しか出来ぬ時、機構が残りの宛先へ
+    同文を複製する。実測2026-07-27(殿御指摘「DM内容が微妙」): 『kiyotomo、Tetsuoに確認するDM』へ kiyotomo
+    1通のみが立ち、本文で『Tetsuoとも確認したい』と述べる歪な形になった。頼まれた宛先は機構が揃える
+    (弱qwenに『各人へ1通ずつ』と頼むだけでは通らぬ=掟: 服従でなく機構で強制)。送信は殿の承認が要るまま。"""
+    dms = [a for a in pending_actions if a.get("tool") == "send_message"]
+    if len(dms) != 1:
+        return 0                                          # 0通=別事/2通以上=既に揃っている
+    ppl = _resolve_persons(query, exclude=None)
+    if len(ppl) < 2:
+        return 0
+    def _strip_self_ref(body, nm):
+        """宛先本人の名を含む文を落とす。tetsuo宛の文面が『念のためTetsuoとも確認したいので』と
+        本人に本人への相談を告げる歪みを機構で断つ(頼むだけでは弱qwenは直さぬ・実測)。"""
+        if not nm or len(str(nm)) < 2:
+            return body
+        rx = re.compile(re.escape(str(nm)), re.I)
+        kept = [s for s in re.split(r"(?<=[。\n])", str(body or "")) if s.strip() and not rx.search(s)]
+        out = "".join(kept).strip()
+        return out if len(out) >= 15 else body            # 剥いで空同然になるなら原文を残す(壊すより残す)
+
+    base = dms[0]
+    have = {str(base.get("args", {}).get("to_user_id"))}
+    _bname = next((nm for u, nm in ppl if str(u) == str(base.get("args", {}).get("to_user_id"))), None)
+    if _bname:                                            # 先に立っていた1通も同じ検問に掛ける
+        base["args"]["body"] = _strip_self_ref(base["args"].get("body"), _bname)
+        base["summary"] = _action_summary("send_message", base["args"])
+    added = 0
+    for uid, nm in ppl:
+        if str(uid) in have:
+            continue
+        args = dict(base.get("args") or {})
+        args["to_user_id"] = str(uid)
+        args["body"] = _strip_self_ref(args.get("body"), nm)
+        summary = _action_summary("send_message", args)
+        pid = _register_pending("send_message", args, who.get("uid"), summary,
+                                origin="fanout", query=query, trace_id=trace_id)
+        pending_actions.append({"id": pid, "tool": "send_message", "args": args, "summary": summary})
+        have.add(str(uid))
+        added += 1
+    return added
+
+
 def _guard_completion_claims(text, pending_actions):
     """P1(Fable処方・fail-closed): アクション完了主張は"真実値テキスト"。承認カード(=アクション台帳の
     レシート)が無いのに送信/報告等を断じた文を打ち消す。既成事実化を salvage の網羅性でなく構造で封じる
@@ -850,9 +893,18 @@ _PW_RE = re.compile(r"(?:🔑|パス(?:ワード)?|ぱす|pw|password|ＰＷ)\s*
                     r"([A-Za-z0-9][A-Za-z0-9!-/:-@\[-`{-~]{2,})", re.I)   # PWは英数字始まり(散文『パスワードで共有』を拾わない)
 # 文脈参照(『このファイル/これ/上記/先ほどの』)。発火は別途『URL無し＋DM意図＋宛先解決＋直前にURL有り』で厳重ゆえ広めで安全。
 _FILE_REF_RE = re.compile(r"(この|その|これ|それ|先(の|ほど)|上記|さっき|例の|上の|あれ|奴|やつ)", re.I)
+# ただし指示語の受け先が『表/一覧/まとめ/内容』なら、それは会話中の表への参照であってファイルではない
+# (実測2026-07-27: 『この表の中で〜』の"この"を共有ファイル参照と取り、直前のAurora URLを配信しようとした)。
+_NOT_FILE_REF_RE = re.compile(r"(この|その|上の|先の|さっきの|今の|前の)(表|テーブル|一覧|リスト|まとめ|内容|話|件)", re.I)
 # "これは配信でなく"伝える"意図"の合図。担当違い/誤送/間違い等は、URLを配信するのでなく文面を書くべき。
 # (殿指摘2026-07-13: 誤QC依頼のURLを「このQCは担当でない旨をkiyotomoにDM」と言ったのにURL配信扱いされた)
 # 「担当出ない」のIME誤変換(で→出)も拾う。「違う」単独は拾わない(『違うファイルを送って』の正当配信を潰さぬ為)。
+#   ★問いを立てる依頼は配信ではない(殿御指摘2026-07-27「DM内容が微妙」)。
+#   『この表の中でcasperが変更かける必要があるステータスはどれか？をkiyotomo、Tetsuoに確認するDMを』へ、
+#   ファイル配信の定型『データをお送りします。ご確認ください。＋URL』を返した。問いが本文から消え、
+#   宛先も一名に落ちた。相手に尋ねる/相談する意図は、文面を書くべき筋であって、リンクを投げる筋ではない。
+_ASK_INTENT_RE = re.compile(r"(確認|質問|問い合わせ|聞(く|いて|きたい)|尋ね|伺(う|い)|相談|意見|"
+                            r"どれ(が|か)|どちら|どうする|可否|要否|決めて|判断(を|して)|ヒアリング)", re.I)
 _NOT_DELIVERY_RE = re.compile(
     r"(担当|たんとう|管轄|所管|範囲|役割)[^。\n]{0,4}(で|出|じゃ|では)[^。\n]{0,3}(な|無)|"
     r"(私|わたし|自分|うち|こちら)[^。\n]{0,5}(担当|案件|仕事|もの|役割)[^。\n]{0,4}(で|出|じゃ)[^。\n]{0,3}(な|無)|"
@@ -870,6 +922,9 @@ def _file_delivery_dm(user_msg, who, convo=None):
         # 資料URLを添えた定義/合意の共有は「これを誰かへ送れ」ではない。実測2026-07-27 19:05:
         # 19値の定義表を貼られて『共有リンクは受け取りました。どなた宛にDMしましょう？』と返した。
         return None
+    if _ASK_INTENT_RE.search(q):
+        # 尋ねる/相談する依頼は、定型の配信文でなく本文を書く経路へ譲る(問いが消えるのを防ぐ)。
+        return None
     if _NOT_DELIVERY_RE.search(q):
         # 「担当でない/誤送/間違い」=URLを配信するのでなく"その旨を伝える"文面が要る→配信fast-pathを退き、
         # 通常のDM作成(LLMが文脈のQC情報から丁寧な誤送連絡を起こす+承認カード)に委ねる(殿指摘2026-07-13)。
@@ -877,7 +932,7 @@ def _file_delivery_dm(user_msg, who, convo=None):
     urls = _URL_RE.findall(q)
     src = q                                               # PW/URLの抽出元(既定=現メッセージ)
     fname = None
-    if not urls and _FILE_REF_RE.search(q):               # 『このファイルを〜DMして』=直前の共有ブロックから引く
+    if not urls and _FILE_REF_RE.search(q) and not _NOT_FILE_REF_RE.search(q):   # 『このファイルを〜DMして』=直前の共有ブロックから引く
         for mm in reversed(convo or []):
             c = str(mm.get("content") or "")
             if _URL_RE.search(c):
@@ -2100,6 +2155,49 @@ def _fuzzy_person(query, exclude=None):
     if len(cands) > 1 and cands[0][0] == cands[1][0]:      # 最良が同距離で複数=曖昧→救済しない
         return None, None
     return _uid_int(cands[0][1]), _ROSTER_MAP.get(str(cands[0][1]), cands[0][2])
+
+
+_SELF_UIDS = {"101"}                                      # Casper 自身(system actor)。宛先候補から常に除く
+
+
+def _resolve_persons(query, exclude=None, cap=5):
+    """クエリ中の人物を**全員**解決。単数解決 _resolve_person を単一機構として使い、当たった表記を伏せて次を探す。
+    実測2026-07-27(殿御指摘「DM内容が微妙」): 『kiyotomo、Tetsuoに確認するDM』で宛先が tetsuo 一名に落ちた。
+    名指しされた者を黙って落とすのは、頼まれた仕事の半分を捨てることである。"""
+    q = _URL_RE.sub(" ", query or "")
+    out = []
+    for _ in range(cap):
+        uid, nm = _resolve_person(q, exclude=exclude)
+        if not uid or any(u == uid for u, _n in out):
+            break
+        if str(uid) not in _SELF_UIDS:                    # 自分(Casper)は宛先に成り得ぬ。『casperが変更かける…』の
+            out.append((uid, nm))                         #   "casper" を宛先と解き自分宛の下書きを立てた(実測)
+        else:
+            q = re.sub(re.escape(str(nm)), " ", q, flags=re.I) or q
+            continue
+        q2 = re.sub(re.escape(str(nm)), " ", q, flags=re.I)
+        if q2 == q:                                       # 別名/読み経由の一致で表記を伏せられぬ=打ち切る
+            break
+        q = q2
+    return out
+
+
+def dm_recipients_digest(query):
+    """名指しされた宛先が複数なら、機構がその全員を明示して渡す(一名に落とさせぬ)。"""
+    if not _DM_INTENT_RE.search(query or ""):
+        return ""
+    ppl = _resolve_persons(query, exclude=None)
+    if len(ppl) < 2:
+        return ""
+    return ("\n\n## 【DMの宛先＝機構が解決した全員】\n"
+            + "、".join(f"{nm}(uid{uid})" for uid, nm in ppl)
+            + f" の計{len(ppl)}名が名指しされておる。\n"
+            "**一名に落とすな。各人へ1通ずつ**下書きを作れ(to_user_id を取り違えぬこと)。"
+            "本文には殿が尋ねたい問いを具体的に書け——『データをお送りします』等の定型で済ませるな。"
+            "問いが本文から消えたら、その下書きは用を成さぬ。\n"
+            "**各人に個別に届くゆえ、本文に他の宛先の名を書くな**(『◯◯とも確認したい』は不要)。"
+            "**答えを決めつけるな**——『◯◯のみでよろしいでしょうか』と一案に絞らず、"
+            "こちらの分かっている前提を短く示した上で、開いた問いとして尋ねよ。")
 
 
 def _uid_int(u):
@@ -7543,6 +7641,7 @@ class H(BaseHTTPRequestHandler):
         sysadd += deixis_table_digest(ll_user, msgs)      # 『この表』→直前の自分の応答の表を機構が名指して渡す
         thread_rules_observe(thr, ll_user)                # 殿が述べた規則を控える(履歴予算から溢れても失わぬ)
         sysadd += thread_rules_digest(thr)
+        sysadd += dm_recipients_digest(ll_user)           # 複数名宛のDMで宛先が一名に落ちるのを断つ
         if _looks_declarative(ll_user) or len({m.group(0).lower() for m in _STATUS_VOCAB_RE.finditer(ll_user or "")}) >= 3:
             # ステータス語彙を論ずる時は、実装されている対応表を機構から渡す。渡さねば自らの機構と
             # 食い違う説明をする(実測2026-07-27: wt を『超過対象』と述べた——実装では wt=held=非超過)。
@@ -7916,6 +8015,13 @@ class H(BaseHTTPRequestHandler):
         _pre = final
         final = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         _salv = final != _pre; _pre = final
+        try:                                                         # 名指しされた宛先が揃うまで機構が下書きを複製(送信は承認要のまま)
+            _fan = _fanout_dm_recipients(str(ll_user), who, pending_actions, trace_id=_tid)
+            if _fan:
+                final = (final.rstrip() + f"\n\n（名指しされた宛先 計{_fan + 1}名分の下書きを揃えてござる。"
+                                          "各カードで宛先と本文を確かめてから送信くだされ。）")
+        except Exception:
+            pass
         final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
         _val = final != _pre; _pre = final
         final = _strip_name_gloss(final, sysadd, ll_user)            # 出口検問: 解決済みPJ名の推測括弧展開(丸亀製麺等)を剥ぐ(Fable処方3)
