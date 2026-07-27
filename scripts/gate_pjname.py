@@ -21,7 +21,8 @@ WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_canonical", "_PJ_ALIAS", "_pj_index", "_pj_name_hit", "_pj_resolve",
         "_PERSON_WORK_RE", "_PERSON_COLS", "_NAME_STOP", "_name_tokens", "_PJ_TASK_RE",
         "_NEG_EXIST_RE", "_NEG_SCOPE_RE",
-        "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative"]
+        "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative",
+        "_ACT_NOT", "_ACTION_REQ_RE"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -160,6 +161,25 @@ chk("Aurora資料URLを拾う",
 chk("URL末尾の全角空白を含めぬ",
     _AU.search("http://h:8100/doc/a/b　の資料").group(0), "http://h:8100/doc/a/b")
 chk("/doc/ を持たぬURLは対象外", bool(_AU.search("https://example.com/foo/bar")), False)
+
+# ── ⑪ 規則の記述と実行の依頼を分ける(会話を断ち切らぬ) ────────────────
+#    実測2026-07-27 19:20(殿御指摘「会話になっていない」): 『WT と OMIT は超過カウントしない。
+#    AP提出後でもクライアントからのリテイクが来たらQCFBに代わる』に対し、'除外' の一語で
+#    『どのタスクを「対象外」しまするか？』と返し、会話が断ち切られた。
+_AR = M["_ACTION_REQ_RE"]
+_RULE_MSG = ("WT (保留) と OMIT (除外) 　は超過カウントしない。"
+             "ディレクターが AP提出後でもクライアントからのリテイクが来たらQCFBに代わる。")
+chk("規則の記述は宣言と判る", _LD(_RULE_MSG), True)
+chk("規則の記述に依頼の標識は無い", bool(_AR.search(_RULE_MSG)), False)
+chk("status語彙は日本語直前でも数える(AP提出後)",
+    sorted({m.group(0).lower() for m in M["_STATUS_VOCAB_RE"].finditer(_RULE_MSG)}),
+    ["ap", "omit", "qcfb", "wt"])
+for q in ["ac3102を納品済にして", "このタスクをomitにして", "#2869 を対象外にしといて",
+          "c01を納品してくれ", "c01をdeliverに変更して"]:
+    chk(f"実行の依頼と判る: {q}", bool(_AR.search(q)), True)
+for q in ["Timは今なにしてるの？", "いま作業してます", "何をしていたの", "APは超過にするな",
+          "marukomeのタスクは？"]:
+    chk(f"依頼でないと判る: {q}", bool(_AR.search(q)), False)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")

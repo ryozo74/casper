@@ -3229,9 +3229,25 @@ _STATUS_VERB_RE = [
 # 「このタスクを納品せよ」ではない。実測2026-07-27 19:05: 殿が9値の定義表を示されたのを
 # 'DELIVER' の一語で拾い『どのタスクを「納品」しまするか？候補: …』と問い返した(殿御指摘の一件)。
 # 殿は2026-07-23 にも同じ誤読を指摘済(corrections 9b31db89)。語一つで動詞を起こすのを機構で止める。
-_STATUS_VOCAB_RE = re.compile(r"\b(wt|mk|wip|qc|qc_fb|ap|client_ap|deliver|omit)\b", re.I)
+# 語境界は ASCII のみで見る。\b は日本語の直前後で立たぬ——'AP提出後' の 提 は \w ゆえ \bap\b が落ち、
+# 殿の『WT と OMIT は超過カウントしない。AP提出後でも…QCFBに代わる』が語彙2種と数えられ宣言と判じられなかった
+# (実測2026-07-27 19:20)。表記ゆれ(qcfb/clientap)も同じ語として数える。
+_STATUS_VOCAB_RE = re.compile(r"(?<![A-Za-z0-9])(wt|mk|wip|qc|qc_fb|qcfb|ap|client_ap|clientap|deliver|omit)"
+                              r"(?![A-Za-z0-9])", re.I)
 _DECLARATIVE_RE = re.compile(r"確定(した|しました|事項)|以下に(確定|定義|決定)|定義(は|を|する)|"
-                             r"ルール|規定|仕様|に変更します|の資料|資料を確認|会議を行い|議事録", re.I)
+                             r"ルール|規定|仕様|に変更します|の資料|資料を確認|会議を行い|議事録|"
+                             # 規則を述べる言い回し(命令形でない断定)。『〜しない』『〜に代わる』『〜扱い』。
+                             r"カウントしない|数えない|対象外とする|扱いとする|扱いです|"
+                             r"に(代|変)わ(る|ります)|とする$|である", re.I)
+# 動作を頼む標識。これが無い status 動詞は「規則の記述」であって「実行の依頼」ではない。
+#   ※『て』の後に進行/過去が続くものは依頼でない(『今なにしてるの？』の "にして" を拾わぬため、
+#     各分岐に同じ否認先読みを掛ける)。_ACT_NOT = 進行形・過去形の語尾。
+_ACT_NOT = r"(?!(る|いる|います|ます|た|ました|いた|まし))"
+_ACTION_REQ_RE = re.compile(r"(して" + _ACT_NOT + r"|しといて|しとい|してくれ|して下さい|してください|"
+                            r"願|頼む|よろしく)|"
+                            r"(に|へ)(変更|更新|移動|し)て" + _ACT_NOT + r"|"
+                            r"(にし|済にし|済みにし)(て" + _ACT_NOT + r"|とけ|ておけ)|"
+                            r"(せよ|しろ|やって|出して|上げて|下げて)", re.I)
 
 
 def _looks_declarative(query):
@@ -3260,6 +3276,12 @@ def _status_card(query, who):
         return None
     target, cands = _resolve_target_task(query, tasks)
     if not target:
+        # 【対象なき動詞は、実行の依頼ではない】対象が解けず、かつ頼む言い回しも無いなら、それは規則の記述か
+        # 世間話である。ここで聞き返すと会話が断ち切られる——殿御指摘2026-07-27「会話になっていない」:
+        # 『WT と OMIT は超過カウントしない…』に『どのタスクを「対象外」しまするか？』と返した一件。
+        # 依頼の標識が無い時は None を返し、通常の会話へ委ねる(聞き返すのは頼まれた時だけ)。
+        if not _ACTION_REQ_RE.search(query or ""):
+            return None
         if cands:
             nm = "、".join((str(t.get("shotID") or "") + " " + str(t.get("name") or "")).strip() + f"(#{t.get('id')})" for t in cands[:6])
             return {"clarify": f"どのタスクを「{label}」しまするか？候補: {nm}。タスク名・shotコード・#番号でお指しくだされ。"}
