@@ -19,7 +19,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "chat_server.py")
 WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_canonical", "_PJ_ALIAS", "_pj_index", "_pj_name_hit", "_pj_resolve",
-        "_PERSON_WORK_RE", "_PERSON_COLS"]
+        "_PERSON_WORK_RE", "_PERSON_COLS", "_NAME_STOP", "_name_tokens", "_PJ_TASK_RE",
+        "_NEG_EXIST_RE", "_NEG_SCOPE_RE"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -98,6 +99,44 @@ if os.path.exists("/tmp/cal_projects.json") and M["_pj_index"]()["idx"]:
     # PJ優先: 『marukomeのタスク』は人でなく PJ の表へ(分岐の前提条件そのものを検査)
     chk("PJ unique が勝つ(人物分岐に入らぬ)", _resolve("marukomeのタスクを見せて")[0], "unique")
     chk("人名のみの問いは PJ unique にならぬ", _resolve("Timは今なにしてるの？")[0] == "unique", False)
+
+# ── ⑦ 名らしきトークンの切り出し(Calendar不在≠全体不在 の入口) ──────
+#    常用語を固有名詞と誤れば「『タスク』は Calendar に存在しない」なる注記を自ら注入する。
+_nt = M["_name_tokens"]
+chk("固有名詞を拾う(Solafune)", _nt("Solafuneの案件の担当はだれ？タスクは何があるの？"), ["Solafune"])
+chk("常用語『タスク』は名に非ず", "タスク" in _nt("ドローンの自立飛行に関してのタスクは？"), False)
+chk("『ドローン』は名として拾う", "ドローン" in _nt("ドローンの自立飛行に関してのタスクは？"), True)
+chk("常用語のみの問いは空", _nt("プロジェクトのステータスは？"), [])
+chk("短すぎるASCIIは拾わぬ", _nt("ouは？"), [])
+if os.path.exists("/tmp/cal_projects.json") and M["_pj_index"]()["idx"]:
+    # PJ名の一部をなす語を「Calendar に無し」と誤らぬこと(在るものを無いと告げる注記の予防)
+    _names = [nm for v in M["_pj_index"]()["idx"].values() for nm in v]
+    _part = lambda tok: any(tok.lower() in nm.lower() or M["_canonical"](tok) in M["_canonical"](nm)
+                            for nm in _names)
+    chk("『ドローン』は PJ名の一部と判る", _part("ドローン"), True)
+    chk("『Solafune』は PJ名の一部でない", _part("Solafune"), False)
+
+# ── ⑧ タスク一覧意図の検出(機構を素通りして作文に落ちぬこと) ─────────
+#    実測2026-07-27: 『〜のタスクは？』が どの分岐にも掛からず弱qwenへ流れ、3件在るPJを「0件」と作文した。
+_TR = M["_PJ_TASK_RE"]
+for q in ["ドローンの自立飛行に関してのタスクは？", "marukomeのタスクは？", "marukomeのタスクを見せて",
+          "タスクって何があるの", "どんなタスクがある？"]:
+    chk(f"一覧意図を検知: {q}", bool(_TR.search(q)), True)
+for q in ["このタスクは終わった", "今日の締切は？", "議事録を要約して", "タスクを新規作成して"]:
+    chk(f"一覧意図でないものは無視: {q}", bool(_TR.search(q)), False)
+
+# ── ⑨ 存在否定の出口検問が「撃つ資格」を持つ文の選別 ──────────────────
+#    限定なしの存在否定のみ撃つ。部分集合の否定(未着手0件等)は真でありうるゆえ撃たぬ
+#    (実測2026-07-27: 正しい文へ「全49件ある」と的外れな訂正を付した)。
+_NE, _NS = M["_NEG_EXIST_RE"], M["_NEG_SCOPE_RE"]
+_bare = lambda s: bool(_NE.search(s)) and not _NS.search(s)
+chk("限定なしの否定は撃つ: 登録されていません", _bare("marukome にタスクは登録されていません。"), True)
+chk("限定なしの否定は撃つ: 1件も無い", _bare("このPJにはタスクが1件も無い。"), True)
+chk("限定つきは撃たぬ: 未着手", _bare("未着手のタスクはありません。"), False)
+chk("限定つきは撃たぬ: 未完了", _bare("未完了のタスクはございません。"), False)
+chk("限定つきは撃たぬ: 本日締切", _bare("本日締切のタスクはありません。"), False)
+chk("限定つきは撃たぬ: 納期超過", _bare("納期超過のタスクは存在しません。"), False)
+chk("否定でない文は撃たぬ", _bare("全49件のタスクが登録されています。"), False)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")

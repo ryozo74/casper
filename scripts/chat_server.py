@@ -2835,7 +2835,10 @@ def _match_online_pj(query):
 
 
 _PJ_TASK_RE = re.compile(r"タスク.{0,8}(見せ|教え|一覧|リスト|出し|表示|見たい|ある|状況|ください|くれ|どうなって|進捗)|"
-                         r"(見せ|教え|一覧|表示|出し).{0,6}タスク|どんな.{0,4}タスク", re.I)
+                         r"(見せ|教え|一覧|表示|出し).{0,6}タスク|どんな.{0,4}タスク|"
+                         # 『〜のタスクは？』= 最も自然な言い回しが従来どこにも掛からず、機構(表/選択カード)を
+                         # 素通りして弱qwenの作文に落ちていた(実測2026-07-27: 3件在るPJを「0件」と作文)。
+                         r"タスク(は|って|とは)[^。]{0,8}[？?]\s*$|タスク.{0,6}(何|なに|どれ)", re.I)
 
 # 人物の手持ちを問う意図(『Timは今なにしてる？』『鈴木の担当タスク』『ouは忙しい？』)。
 # 実際に人物が解決できた時のみ表を描くゆえ、ここは意図の検出に徹する(人の同定は _resolve_person が正)。
@@ -2845,6 +2848,15 @@ _PERSON_WORK_RE = re.compile(
     r"(稼働|忙し|空いて(る|いる)|余裕|暇)|"                                      # 稼働状況/忙しい/空いている
     r"の(タスク|案件|仕事|予定|スケジュール|状況|進捗)", re.I)
 _PERSON_COLS = ["カット", "タスク", "プロジェクト", "工程", "状態", "期限", "納期"]   # 0件時と一覧時で同一(列の食い違いを断つ)
+
+# 存在否定の出口検問(後段)が使う二つの述語。module級に置くのは検査可能にするため(掟: 緑ゲートに嘘を映す)。
+# ① 存在そのものの否定 = 機構が実データで差し止める対象。
+_NEG_EXIST_RE = re.compile(r"登録され(ていません|ておりません)|1件も(無|な)い|存在しません|見当たりません|"
+                           r"(タスク|task)[^。]{0,16}(ありません|ございません)")
+# ② 部分集合への限定 = その否定は真でありうる(『未着手のタスクはありません』はmk=0なら正しい)。
+#    ①だけで撃つと、正しい文に「全49件ある」と的外れな訂正を付す(実測2026-07-27 marukome)。
+_NEG_SCOPE_RE = re.compile(r"未完了|未着手|進行中|作業中|残務|確認待ち|承認待ち|レビュー中|"
+                           r"遅延|超過|本日|今日|今週|期限切れ|wip|mk|qc", re.I)
 
 
 def _pj_near_candidates(query, k=4):
@@ -2871,6 +2883,84 @@ def _pj_near_candidates(query, k=4):
     return [nm for nm, _ in sorted(scored.items(), key=lambda x: -x[1])[:k]]
 
 
+# 固有名詞でない常用語(これらは資料に必ず在るゆえ、除かねば「『タスク』はCalendarに無い」なる戯言を注入する)。
+_NAME_STOP = {"タスク", "プロジェクト", "スケジュール", "カレンダー", "ステータス", "メンバー", "アサイン",
+              "チェック", "データ", "ファイル", "リスト", "コメント", "レビュー", "フィードバック",
+              "リテイク", "カット", "シーン", "ショット", "クライアント", "スタッフ", "ミーティング",
+              "task", "tasks", "project", "projects", "calendar", "status", "aurora", "casper", "vault"}
+
+
+def _name_tokens(query):
+    """クエリ中の『名らしき』生トークン(カタカナ3字以上 / ASCII4字以上)。正準化せぬ=コーパス字面照合に使うゆえ。
+    常用語は除く——固有名詞かどうかの判定であって、単に長い語を拾う話ではない。"""
+    toks = [t for t in re.findall(r"[゠-ヿ]{3,}|[A-Za-z][A-Za-z0-9]{3,}", query or "")
+            if t.lower() not in _NAME_STOP and t not in _NAME_STOP]
+    return list(dict.fromkeys(toks))[:6]
+
+
+_CORPUS_NAME_MEMO = {}                                    # tok(lower) -> [出所]。索引はプロセス寿命ゆえ結果も不変
+
+
+def _corpus_name_hits(tok, k=3):
+    """その名が資料/議事録に実在するか＋出所。RAGと同一コーパス(casper_rag の索引)を引く=母集合その二。
+    判定は字面の実在であって類似ではない(推測で『在る』と言わせぬ)。"""
+    if not casper_rag or not tok or len(tok) < 3:
+        return []
+    if tok.lower() in _CORPUS_NAME_MEMO:                  # 全走査は1トークン約26ms=連問で効くゆえ記憶する
+        return _CORPUS_NAME_MEMO[tok.lower()]
+    try:
+        if getattr(casper_rag, "_CACHE", None) is None:
+            casper_rag.candidates(tok, n=1)                   # 索引ロードは既存機構に委ねる(二重実装せぬ)
+        low, out = tok.lower(), []
+        for e in (casper_rag._CACHE or []):
+            if low in str(e.get("t", "")).lower() or low in str(e.get("title", "")).lower():
+                ttl = e.get("title") or os.path.basename(str(e.get("src") or "")) or "資料"
+                if ttl not in out:
+                    out.append(ttl)
+                if len(out) >= k:
+                    break
+        _CORPUS_NAME_MEMO[tok.lower()] = out
+        return out
+    except Exception:
+        return []                                         # 走査失敗は記憶せぬ(次回やり直す・空を確定と誤らせぬ)
+
+
+def _corpus_only_name(query):
+    """【Calendar不在 ≠ 全体不在(殿御指摘2026-07-27「Auroraを探してほしかった」)】
+    Calendar のPJ名には無いが、資料/議事録には在る名を検出。返り (tok, [出所]) or None。
+    母集合を二つ持つ以上、片方の不在で「無い」と名乗ってはならぬ——16:35『そのプロジェクト名に一致が
+    ございませぬ』で断ち切った Solafune は、議事録には確かに在った。"""
+    if _pj_resolve(query)[0] == "unique":
+        return None
+    _pj_names = [nm for names in _pj_index()["idx"].values() for nm in names]
+    for tok in _name_tokens(query):
+        if _pj_resolve(tok)[0] != "none":                     # Calendar に解ける名は対象外(PJ経路が正)
+            continue
+        # PJ名の一部をなす語は「Calendar に無し」ではない(『ドローン』⊂『ドローン R&D  GS/NINA連携』)。
+        # ここを見落とすと、在るものを無いと告げる注記を自ら注入することになる。
+        if any(tok.lower() in nm.lower() or _canonical(tok) in _canonical(nm) for nm in _pj_names):
+            continue
+        srcs = _corpus_name_hits(tok)
+        if srcs:
+            return (tok, srcs)
+    return None
+
+
+def _corpus_only_note(query):
+    """上の検出を弱qwen向けの拘束文へ。Calendar上のタスク/担当を語らせず、資料の内容は語らせる。"""
+    got = _corpus_only_name(query)
+    if not got:
+        return ""
+    tok, srcs = got
+    return ("\n\n## 【名の所在: Calendar に無し / 資料に在り】\n"
+            f"「{tok}」は Calendar のプロジェクト名には**存在しない**(閉集合照合で確認)。"
+            f"一方、資料/議事録には**在る**(出所: {' / '.join(srcs)})。\n"
+            f"**Calendar 上のタスク・担当・進捗・納期を「{tok}」の名で語ってはならぬ**(在ると答えれば捏造)。"
+            "資料に基づく内容(経緯・論点・決定事項・関係先)は答えてよい。"
+            "答える際は必ず『Calendar には案件登録が無い(ゆえにタスク/担当は未登録)』旨を添えよ。"
+            "関連しそうな Calendar PJ が別名で在るなら、断定せず『〜かもしれぬ』と候補として示せ。")
+
+
 def _pj_task_choices(query):
     """特定PJのタスク要求だが名前解決が unique でない時、候補PJを選択カードで提示(無言None落ちさせない・3値のnone/ambiguous出口)。"""
     if not _PJ_TASK_RE.search(query or ""):
@@ -2883,7 +2973,9 @@ def _pj_task_choices(query):
     else:                                                 # none: 名前らしきトークンがある時のみ近傍候補
         if not re.search(r"[゠-ヿA-Za-z]{2,}", query or ""):
             return None                                   # 名前らしきものが無い=一般タスク問い→通常経路へ
-        cands = _pj_near_candidates(query)
+        if _corpus_only_name(query):
+            return None                                   # Calendarに無くとも資料に在る名→選択カードで断ち切らず
+        cands = _pj_near_candidates(query)                #   通常経路へ落とす(呼び側が _corpus_only_note を注入)
         if not cands:
             return None
         prompt = "そのプロジェクト名に一致がございませぬ。もしやこちらでは？（違えば具体名で仰せを）"
@@ -7309,8 +7401,22 @@ class H(BaseHTTPRequestHandler):
             # 弱qwenは「表カードとして描画済み・再現するな」というメタ指示をそのまま鸚鵡返しし、ユーザーへ
             # 「表示装置が既に描画済み・重複して再現しません」と漏らす(殿指摘2026-07-17: 機械臭く分かりづらい)。
             # → 注記を"要約の作り方"に反転し、画面/自分の制約に触れる語を明示的に禁止(下段6915で機構除去も併走)。
+            # 【件数と一覧は同一関数(掟)】内訳を機構が数えて渡す。渡さねば弱qwenは context 中の別物
+            # (全社統計等)を当該PJの数として述べる——実測2026-07-27: marukome(実 ap40/qc_fb9)を
+            # 「wip13件・mk8件」と作文した。それは全社の in_progress/todo の数であった。
+            _cols = table_card.get("columns") or []
+            _brk = ""
+            if "状態" in _cols and table_card.get("rows"):
+                import collections as _co
+                _si = _cols.index("状態")
+                _c2 = _co.Counter(str(r[_si]) for r in table_card["rows"] if len(r) > _si)
+                _brk = ("この表の内訳（機構が数えた確定値）: "
+                        + "、".join(f"{k} {v}件" for k, v in _c2.most_common()) + "。"
+                        "**件数はこの確定値のみを使え。表に無い数字(全社の統計等)を"
+                        "この一覧の数として述べるな。**")
             sysadd += ("\n\n## 【この一覧の答え方】"
                        f"聞かれた一覧（{table_card['title']}・全{len(table_card['rows'])}件）は、この下に見やすい表で自動で並ぶ。"
+                       f"{_brk}"
                        "あなたの仕事は“表の再掲”ではなく“要約”。"
                        "**表・markdown表・各行の箇条書きで一覧を作り直すな。**"
                        "また『表カード』『表示装置』『描画』『重複』『再現しません』『装置』など、"
@@ -7454,6 +7560,8 @@ class H(BaseHTTPRequestHandler):
         choices_obj = None if (_snz or _fdm or _assign_short) else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定
         if not choices_obj and not _snz and not _fdm and not _assign_short:    # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
             choices_obj = _pj_task_choices(ll_user)
+        if not choices_obj:
+            sysadd += _corpus_only_note(ll_user)          # Calendar不在/資料在りの名は、出所つきで境界を明示(捏造の予防)
         if not _snz and not _assign_short:
             attn_cards = _attention_action_cards(who, ll_user)       # Q4: 今日の3件の overdue/loop を選択カードで(draftは①で承認カード)
         # P2(Fable propose→execute→render): DM等のアクションは制約デコード(format=json)で型付き提案を作り
@@ -7677,9 +7785,13 @@ class H(BaseHTTPRequestHandler):
         # 登録されていない」と否定する時、そのPJが実際にはCalendarにタスクを持つなら、母集合未確認の嘘(94件を0件)。
         # framingで頼むだけでは弱qwenが破るゆえ、機構が実データで否定を差し止め訂正する(存在否定は最も重い機構の嘘)。
         try:
-            _neg_re = re.compile(r"登録され(ていません|ておりません)|1件も(無|な)い|存在しません|見当たりません|"
-                                 r"(タスク|task)[^。]{0,16}(ありません|ございません)")
-            if _status_q and _neg_re.search(final):
+            _neg_re = _NEG_EXIST_RE
+            # 撃つ資格は「限定なしの存在否定」があること。『未着手のタスクはありません』は mk=0 なら真ゆえ、
+            # そこへ「全49件ある」と付すのは機構の側の的外れ(実測2026-07-27 marukome)。文単位で選り分ける。
+            _sents = [s for s in re.split(r"(?<=[。\n])", final) if s.strip()]
+            _bare = [i for i, s in enumerate(_sents)
+                     if _neg_re.search(s) and not _NEG_SCOPE_RE.search(s)]
+            if _status_q and _bare:
                 _online_pjs = json.load(open("/tmp/cal_projects.json")).get("items", [])
                 # 【錨は問い、生成文ではない(Fable retrieve-then-render)】訂正対象のPJは、まず「問いが名指し
                 # unique解決した実体」から採る。生成文から名を逆引きするのは最後の手段とし、その照合も
@@ -7690,13 +7802,24 @@ class H(BaseHTTPRequestHandler):
                 if _q_st == "unique":
                     _hit_pj = next((p for p in _online_pjs if p.get("name") == _q_names[0]), None)
                 if not _hit_pj:
-                    _hit_pj = next((p for p in _online_pjs if _pj_name_hit(p.get("name"), final)), None)
+                    # 逆引きの錨は「否定の主語」= 否定した文、無ければ直前の文(そこに主語が置かれる)。
+                    # 回答の他所で候補として挙げただけのPJを掴むのは、機構が関連を捏造すること
+                    # (実測2026-07-27: Solafuneの問いで候補列挙の RND を掴み、無関係な訂正を付した)。
+                    # 逆に窓を否定文のみに狭めると、直前の文で名指されたPJの否定を見逃す(同日実測)。
+                    # 併せて長い名から当てる('RND TKPプレヴィズ' を 'RND' と取り違えぬ)。
+                    _by_len = sorted(_online_pjs, key=lambda x: -len(str(x.get("name") or "")))
+                    for _i in _bare:
+                        _win = (_sents[_i - 1] if _i else "") + _sents[_i]
+                        _hit_pj = next((p for p in _by_len if _pj_name_hit(p.get("name"), _win)), None)
+                        if _hit_pj:
+                            break
                 if _hit_pj:
                     _cnt = sum(1 for t in _all_tasks() if t.get("project_id") == _hit_pj.get("id"))
                     if _cnt > 0:                          # PJ名が出て否定されているが実際はタスク在り→存在否定の嘘を差し止め
                         # 嘘の文だけを撃ち、残りは生かす(旧: 全文置換=正しい説明ごと消していた)。
-                        _kept = [s for s in re.split(r"(?<=[。\n])", final)
-                                 if s.strip() and not _neg_re.search(s)]
+                        # 撃つのは限定なしの否定のみ——限定つきの真の文まで消せば、それも改竄である。
+                        _bs = set(_bare)
+                        _kept = [s for i, s in enumerate(_sents) if i not in _bs]
                         _fix = (f"**{_hit_pj['name']}** には Calendar 上、現在 **{_cnt}件** のタスクが登録されています"
                                 "（「無い/0件」は母集合を確認せぬ誤りにつき訂正）。"
                                 "特定の条件（工程・確認待ち等）で絞りたい場合は、条件を明示してくだされ。")
