@@ -2182,6 +2182,25 @@ def _resolve_persons(query, exclude=None, cap=5):
     return out
 
 
+def dm_writing_digest(query, table_md=""):
+    """【宛先の目で書け】DM本文の作法を機構が課す。殿御指摘2026-07-27「DM内容が微妙」の芯:
+    『先ほど整理した表について、どれが該当しますか』——相手はその表を見ておらぬ。殿との会話を
+    相手の文脈と取り違えると、答えようのない問いを送りつけることになる。"""
+    if not _DM_INTENT_RE.search(query or ""):
+        return ""
+    out = ("\n\n## 【DM本文の作法(機構が課す)】\n"
+           "**宛先は殿とCasperの会話を一切見ておらぬ。**ゆえ本文で:\n"
+           "① 『先ほど』『この表』『上記』等、こちらの会話に依る指示語を使うな。何の件かを名で述べよ。\n"
+           "② **答えるに要る材料を本文に必ず載せよ**(候補の一覧・対象の名・現状の値)。"
+           "材料なき問いは相手に返せぬ。\n"
+           "③ 他の宛先へ相談を頼むな。各人に直接、同じ問いを立てよ(取り次ぎを依頼するのではない)。\n"
+           "④ 答えを一案に絞って諮るな。判断を仰ぐ点を開いた形で問え。\n"
+           "⑤ 何のために要るのか(この確定で何が前へ進むのか)を1文添えよ。")
+    if table_md:
+        out += ("\n**本文に載せるべき一覧はこれである(そのまま引き写せ・列を落とすな):**\n" + table_md)
+    return out
+
+
 def dm_recipients_digest(query):
     """名指しされた宛先が複数なら、機構がその全員を明示して渡す(一名に落とさせぬ)。"""
     if not _DM_INTENT_RE.search(query or ""):
@@ -5439,27 +5458,52 @@ def thread_rules_digest(thr):
 _DEIXIS_TABLE_RE = re.compile(r"(この|その|上の|先の|さっきの|今の|前の)(表|テーブル|一覧|リスト|まとめ)", re.I)
 
 
+def _deixis_table_rows(query, convo):
+    """『この表』が指す md 表の行だけを返す(digest と DM本文の接地で同じ抽出を使う=単一機構)。"""
+    if not _DEIXIS_TABLE_RE.search(query or ""):
+        return ""
+    for m in reversed(list(convo or [])):
+        if m.get("role") != "assistant":
+            continue
+        rows = [ln for ln in str(m.get("content") or "").split("\n") if re.match(r"\s*\|.*\|\s*$", ln)]
+        if len(rows) >= 3:                                # 見出し＋区切り＋データ1行以上=表と見る
+            return "\n".join(rows[:40])
+    return ""
+
+
+# DM本文に指示語だけが残り、答えるに要る材料が無い状態を検出する語。
+_DM_DEIXIS_RE = re.compile(r"(先ほど|さきほど|先般|この表|上記|上の表|先の表|前回の表|整理した表|"
+                           r"この一覧|添付の表|例の表)", re.I)
+
+
+def _ground_dm_body(body, table_md):
+    """【相手は殿との会話を見ておらぬ】DM本文が『先ほどの表について』と指示語で済ませ、当の表を含まぬなら
+    受け手には答えられぬ問いになる。殿御指摘2026-07-27「DM内容が微妙」の芯はここ:
+    宛先は kiyotomo/tetsuo であって、その表は殿とCasperの間にしか無かった。機構が材料を添える。"""
+    b = str(body or "")
+    if not table_md or not b:
+        return b
+    if re.search(r"\|[^\n]*\|", b):                       # 既に表を含む=材料は足りている
+        return b
+    if not _DM_DEIXIS_RE.search(b):                       # 指示語で済ませていない=そのままで通じる
+        return b
+    return b.rstrip() + "\n\n【ご確認いただきたい一覧】\n" + table_md
+
+
 def deixis_table_digest(query, convo):
     """【『この表』は直前の自分の応答の表である】指示語を機構で接地する。
     実測2026-07-27 19:28(殿御指摘「もう少し理解がいる」): 一手前に自ら9ステータスの表を出したのに
     『この表の中に権限の表記もお願い』へ『どの表を指すか明確ではありません』と問い返した。
     履歴には在ったが、弱qwenがRAG雑音(DBM2レガシー等)に引かれて自分の直前の出力を見失った。
     ゆえ機構が「これがその表だ」と名指して渡す(推測させず、問い返させぬ)。"""
-    if not _DEIXIS_TABLE_RE.search(query or ""):
+    rows = _deixis_table_rows(query, convo)
+    if not rows:
         return ""
-    for m in reversed(list(convo or [])):                 # 直近の assistant 応答から md 表を探す
-        if m.get("role") != "assistant":
-            continue
-        body = str(m.get("content") or "")
-        rows = [ln for ln in body.split("\n") if re.match(r"\s*\|.*\|\s*$", ln)]
-        if len(rows) >= 3:                                # 見出し＋区切り＋データ1行以上=表と見る
-            return ("\n\n## 【『この表』が指すもの＝直前の自分の応答の表(機構が特定)】\n"
-                    + "\n".join(rows[:40])
-                    + "\n**これが『この表』である。どの表かを問い返すな。**"
-                    "この表を土台に、求められた列/行を足して**表全体を作り直して**返せ。"
-                    "列を足す元の値は、この会話で殿が示された内容から採れ。"
-                    "会話に無い値は推測で埋めず、その欄は『—(未確定)』とし、何が足りぬかを1文で添えよ。")
-    return ""
+    return ("\n\n## 【『この表』が指すもの＝直前の自分の応答の表(機構が特定)】\n" + rows
+            + "\n**これが『この表』である。どの表かを問い返すな。**"
+            "この表を土台に、求められた列/行を足して**表全体を作り直して**返せ。"
+            "列を足す元の値は、この会話で殿が示された内容から採れ。"
+            "会話に無い値は推測で埋めず、その欄は『—(未確定)』とし、何が足りぬかを1文で添えよ。")
 
 
 def seiri_vault_material(project_name, cap=12000):
@@ -7639,6 +7683,8 @@ class H(BaseHTTPRequestHandler):
         _au_note = aurora_url_digest(ll_user)            # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
         sysadd += _au_note
         sysadd += deixis_table_digest(ll_user, msgs)      # 『この表』→直前の自分の応答の表を機構が名指して渡す
+        _dx_rows = _deixis_table_rows(ll_user, msgs)      # 同じ表を DM本文の接地にも使う(単一機構)
+        sysadd += dm_writing_digest(ll_user, _dx_rows)    # DMは宛先の目で書く(指示語禁・材料同梱・取次禁)
         thread_rules_observe(thr, ll_user)                # 殿が述べた規則を控える(履歴予算から溢れても失わぬ)
         sysadd += thread_rules_digest(thr)
         sysadd += dm_recipients_digest(ll_user)           # 複数名宛のDMで宛先が一名に落ちるのを断つ
@@ -8015,6 +8061,15 @@ class H(BaseHTTPRequestHandler):
         _pre = final
         final = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         _salv = final != _pre; _pre = final
+        try:                                                         # DM本文が指示語で済ませ材料を欠くなら、機構が当の表を添える
+            for _a in pending_actions:
+                if _a.get("tool") == "send_message" and _a.get("args", {}).get("body"):
+                    _nb = _ground_dm_body(_a["args"]["body"], _dx_rows)
+                    if _nb != _a["args"]["body"]:
+                        _a["args"]["body"] = _nb
+                        _a["summary"] = _action_summary("send_message", _a["args"])
+        except Exception:
+            pass
         try:                                                         # 名指しされた宛先が揃うまで機構が下書きを複製(送信は承認要のまま)
             _fan = _fanout_dm_recipients(str(ll_user), who, pending_actions, trace_id=_tid)
             if _fan:

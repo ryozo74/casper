@@ -23,7 +23,8 @@ WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_NEG_EXIST_RE", "_NEG_SCOPE_RE",
         "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative",
         "_ACT_NOT", "_ACTION_REQ_RE", "_DEIXIS_TABLE_RE", "deixis_table_digest",
-        "_ASK_INTENT_RE", "_NOT_FILE_REF_RE", "_FILE_REF_RE", "_SELF_UIDS"]
+        "_ASK_INTENT_RE", "_NOT_FILE_REF_RE", "_FILE_REF_RE", "_SELF_UIDS",
+        "_deixis_table_rows", "_DM_DEIXIS_RE", "_ground_dm_body"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -214,6 +215,27 @@ for q in ["このファイルをtetsuoにDMして", "このリンクをkiyotomo�
     chk(f"文脈参照は生きている: {q}", bool(_FR.search(q)), True)
 chk("『この表を送って』は表参照(ファイルに非ず)", bool(_NFR.search("この表をtetsuoに送って")), True)
 chk("Casper自身(uid101)は宛先候補から除く", "101" in M["_SELF_UIDS"], True)
+
+# ── ⑭ DM本文の接地: 宛先は殿との会話を見ておらぬ ──────────────────────
+#    実測2026-07-27(殿御指摘「DM内容が微妙」の芯): 『先ほど整理した表について、どれが該当しますか』を
+#    kiyotomo/tetsuo へ送ろうとした。相手はその表を見ておらぬゆえ、答えようのない問いであった。
+_G = M["_ground_dm_body"]
+_TBL = "| ステータス | 権限 |\n| :-- | :-- |\n| WT | オート |\n| AP | ディレクター |"
+_g1 = _G("先ほど整理した表について、どれが該当しますか。", _TBL)
+chk("指示語のみのDMには材料を添える", "| WT | オート |" in _g1, True)
+chk("添える時は見出しを付ける", "【ご確認いただきたい一覧】" in _g1, True)
+chk("既に表を含む本文は触らぬ", _G("一覧です。\n| A | B |\n以上。", _TBL).count("ステータス"), 0)
+chk("指示語が無ければ触らぬ",
+    _G("ステータス9値のうちどれをCasperが変更すべきかご教示ください。", _TBL),
+    "ステータス9値のうちどれをCasperが変更すべきかご教示ください。")
+chk("添える表が無ければ触らぬ", _G("先ほどの表について", ""), "先ほどの表について")
+chk("本文が空なら触らぬ", _G("", _TBL), "")
+chk("直前応答から表を抽出できる",
+    bool(M["_deixis_table_rows"]("この表に権限も",
+         [{"role": "assistant", "content": "整理しました\n| a | b |\n| :- | :- |\n| 1 | 2 |"}])), True)
+for q, w in [("先ほどの件について", True), ("この表のうちどれか", True), ("上記のとおり", True),
+             ("ステータス定義の件でご確認です", False)]:
+    chk(f"DM内の指示語検出({w}): {q}", bool(M["_DM_DEIXIS_RE"].search(q)), w)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")
