@@ -24,7 +24,8 @@ WANT = ["_KANA2ROMA", "_KANA_SMALL", "_kana_to_romaji", "_translit_kana_runs",
         "_STATUS_VOCAB_RE", "_DECLARATIVE_RE", "_AURORA_URL_RE", "_looks_declarative",
         "_ACT_NOT", "_ACTION_REQ_RE", "_DEIXIS_TABLE_RE", "deixis_table_digest",
         "_ASK_INTENT_RE", "_NOT_FILE_REF_RE", "_FILE_REF_RE", "_SELF_UIDS",
-        "_deixis_table_rows", "_DM_DEIXIS_RE", "_ground_dm_body"]
+        "_deixis_table_rows", "_DM_DEIXIS_RE", "_ground_dm_body",
+        "_ASK_KEEP_RE", "_AURORA_SAVE_REQ_RE"]
 
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
@@ -236,6 +237,24 @@ chk("直前応答から表を抽出できる",
 for q, w in [("先ほどの件について", True), ("この表のうちどれか", True), ("上記のとおり", True),
              ("ステータス定義の件でご確認です", False)]:
     chk(f"DM内の指示語検出({w}): {q}", bool(M["_DM_DEIXIS_RE"].search(q)), w)
+
+# ── ⑮ アンケート🙅の二件(2026-07-28)を機構で塞ぐ ─────────────────────
+#    ①「Auroraに保存するボタンがない」: 救済が応答の言い回し(承認ボタン/保存しますか…)しか見ておらず、
+#      『保存してよろしいでしょうか？承認いただければ』を取り落とした。錨を殿の依頼へ移す。
+_AU = M["_AURORA_SAVE_REQ_RE"]
+for q in ["そしたら、この表をAurora資料にしてアップして", "Auroraに保存して", "この表をauroraにアップして",
+          "Auroraノートにして", "オーロラに登録しといて"]:
+    chk(f"Aurora保存の依頼と判る: {q}", bool(_AU.search(q)), True)
+for q in ["Auroraの資料を読んで説明して", "marukomeのタスクは？"]:
+    chk(f"保存依頼でないものは無視: {q}", bool(_AU.search(q)), False)
+
+#    ②「DMが飛んでいない」の実体: 唯一の問いの文に相手の名が入っており剥がれ、
+#      表だけで問いの無いDMが tetsuo殿へ実際に送られた(state=sent)。問いの有無で守る。
+_AK = M["_ASK_KEEP_RE"]
+for b, w in [("どれになりますか？", True), ("ご確認をお願いいたす", True), ("ご教示ください", True),
+             ("いただけますでしょうか", True),
+             ("| ステータス | 意味 |\n| WT | 保留 |", False), ("以上が一覧です。", False)]:
+    chk(f"問い/依頼の残存判定({w}): {b[:20]}", bool(_AK.search(b)), w)
 
 n_ok, n = sum(results), len(results)
 print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")

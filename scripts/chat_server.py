@@ -637,7 +637,7 @@ def _build_choices(who, query, convo=None):
             "options": opts}
 
 
-def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None):
+def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None, table_md=""):
     """qwenが send_message を呼ばず DM をテキストで書いた場合の救済(JSONブロック＋プロセ両対応)。
     宛先uid/名＋本文を拾い pending 登録→承認カードを出す(ローカルqwenのfunction-calling不発対策)。"""
     if pending_actions:                            # 既にツール呼出で pending 済なら不要
@@ -645,13 +645,31 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
     f = final or ""
     # ⓪ Aurora ノート作成の表明救済: qwen が「Auroraに『TITLE』として作成しますか？承認ボタン…」と
     #    "言っただけ"で aurora_create を呼ばなかった場合、応答本体を本文に pending 登録→承認カードを出す。
-    if (re.search(r"[Aa]urora", f) and re.search(r"承認ボタン|作成しますか|保存されます|保存しますか|作成しました|保存しました", f)
-            and re.search(r"(ノート|ドキュメント|資料|note)", f)):
-        tm = re.search(r"[「『]([^」』]{2,80})[」』]", f)
+    #    ★錨は「殿が頼んだか」に置く。応答の言い回しだけを見ていたゆえ取り落とした——実測2026-07-28:
+    #    『この表をAurora資料にしてアップして』へ『保存してよろしいでしょうか？承認いただければ…』と
+    #    答えたが、語彙表(承認ボタン/保存しますか…)に無く救済が発火せず、殿の言う「保存ボタンがない」に至った。
+    _au_req = bool(_AURORA_SAVE_REQ_RE.search(query or ""))
+    if _au_req or (re.search(r"[Aa]urora", f)
+                   and re.search(r"承認ボタン|作成しますか|保存されます|保存しますか|作成しました|保存しました", f)
+                   and re.search(r"(ノート|ドキュメント|資料|note)", f)):
+        tm = (re.search(r"(?m)^\s*\**\s*タイトル\s*\**\s*[:：]\s*\**\s*(.+?)\s*\**\s*$", f)
+              or re.search(r"[「『]([^」』]{2,80})[」』]", f))
         title = (tm.group(1).strip() if tm else "Casperノート")
         # 本文=表明文(Aurora/承認ボタン等の行)を除いた応答本体(Casperが提示した一覧など)
-        body = re.sub(r"(?m)^.*(承認ボタン|作成しますか|保存されます|保存しますか|Auroraに|Aurora に).*$", "", f).strip()
+        body = re.sub(r"(?m)^.*(承認ボタン|作成しますか|保存されます|保存しますか|保存してよろしい|"
+                      r"承認いただけ|起票します|Auroraに|Aurora に).*$", "", f).strip()
         body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        _from_table = False
+        if table_md and _au_req:
+            # ★材料は機構が用意する。注入した表を弱qwenが見落とし『直前の応答に表が含まれていない』と
+            # 断って聞き返した(実測2026-07-29)。頼むのをやめ、解決済みの表を本文の正とする。
+            _h = [c.strip(" *") for c in table_md.split("\n")[0].strip().strip("|").split("|")]
+            title = (f"{_h[0]}一覧" if _h and _h[0] else title)
+            body = f"## {title}\n\n{table_md}\n\n（Casperとの会話で整理した内容を資料化）"
+            _from_table = True
+        elif re.search(r"特定できて(おりませ|いませ)|見つかりませ|含まれておりませ|貼り付けて|添付して|"
+                       r"いずれかの方法|教えていただけ", body):
+            return final                                  # 聞き返し/拒否の文面を資料として保存させぬ
         if len(body) >= 20:
             args = {"title": title, "body": body}
             if who.get("uid"):
@@ -659,6 +677,9 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
             summary = _action_summary("aurora_create", args)
             pid = _register_pending("aurora_create", args, who.get("uid"), summary, origin="user", query=query, trace_id=trace_id)
             pending_actions.append({"id": pid, "tool": "aurora_create", "args": args, "summary": summary})
+            if _from_table:                               # 機構が本文を確定した=qwenの散文は捨て、簡潔に告げる
+                return (f"「{title}」として Aurora に起票する下書きを用意いたした（{len(table_md.splitlines())}行の表）。"
+                        "↓の承認カードで内容をご確認の上、ボタンを押されればアップロードいたす。")
             f2 = re.sub(r"(作成します|保存します|作成しました|保存しました|作成しますか)", "下書きしました", f)
             return f2 + f"\n\n（↓の承認カードで確認し、ボタンを押すと Aurora に「{title}」として保存されます）"
     to = body = None
@@ -794,6 +815,28 @@ def _strip_tool_leak(text):
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+# DM本文に問い/依頼が残っているか。これを失った下書きは送っても用を成さぬ(表だけのDMを実際に送った реальный事故)。
+# 殿が Aurora への保存/アップを頼んだか(錨は応答の言い回しでなく依頼そのもの)。
+_AURORA_SAVE_REQ_RE = re.compile(
+    r"(aurora|オーロラ)[^。\n]{0,10}(に|へ|で)[^。\n]{0,10}(アップ|上げ|保存|登録|起票|作成|載せ|投稿|残)|"
+    # 裸の『して』は入れぬ——『Auroraの資料を読んで説明して』が保存依頼に化ける(自作ゲートが捕えた)。
+    r"(aurora|オーロラ)[^。\n]{0,8}(資料|ノート|文書|ドキュメント)[^。\n]{0,6}(にして|に直して|化して|作って|作成)", re.I)
+_ASK_KEEP_RE = re.compile(r"[？?]|ください|下さい|いただけ|頂け|ますか|ましょうか|願いま|お願い|"
+                          r"ご確認|ご教示|ご意見|ご返信|教えて", re.I)
+
+
+def _revise_pending(action):
+    """機構が下書き本文を整えたら、台帳(承認時の真実源)も同時に直す。
+    これを欠くと承認時に台帳側の旧本文が採用され、殿が見た文面と送られる文面が食い違う。"""
+    if not casper_outbox or not action.get("id"):
+        return
+    try:
+        action["summary"] = _action_summary(action["tool"], action["args"])
+        casper_outbox.revise(action["id"], args=action["args"], summary=action["summary"])
+    except Exception:
+        pass
+
+
 def _fanout_dm_recipients(query, who, pending_actions, trace_id=None):
     """【名指しされた宛先を落とさぬ】問いが複数名に向いているのに下書きが1通しか出来ぬ時、機構が残りの宛先へ
     同文を複製する。実測2026-07-27(殿御指摘「DM内容が微妙」): 『kiyotomo、Tetsuoに確認するDM』へ kiyotomo
@@ -807,20 +850,27 @@ def _fanout_dm_recipients(query, who, pending_actions, trace_id=None):
         return 0
     def _strip_self_ref(body, nm):
         """宛先本人の名を含む文を落とす。tetsuo宛の文面が『念のためTetsuoとも確認したいので』と
-        本人に本人への相談を告げる歪みを機構で断つ(頼むだけでは弱qwenは直さぬ・実測)。"""
+        本人に本人への相談を告げる歪みを機構で断つ(頼むだけでは弱qwenは直さぬ・実測)。
+        ただし**問いを消してはならぬ**——実測2026-07-28: 唯一の問いの文に相手の名が入っていたため
+        剥がれ、tetsuo殿へ『表だけで問いの無いDM』が実際に送られた(長さでは守れぬ。問いの有無で守る)。"""
+        b = str(body or "")
         if not nm or len(str(nm)) < 2:
-            return body
+            return b
         rx = re.compile(re.escape(str(nm)), re.I)
-        kept = [s for s in re.split(r"(?<=[。\n])", str(body or "")) if s.strip() and not rx.search(s)]
+        kept = [s for s in re.split(r"(?<=[。\n])", b) if s.strip() and not rx.search(s)]
         out = "".join(kept).strip()
-        return out if len(out) >= 15 else body            # 剥いで空同然になるなら原文を残す(壊すより残す)
+        if not _ASK_KEEP_RE.search(out):                  # 剥いだ結果、問い/依頼が残っておらぬなら剥がさぬ
+            return b
+        return out if len(out) >= 15 else b
 
     base = dms[0]
     have = {str(base.get("args", {}).get("to_user_id"))}
     _bname = next((nm for u, nm in ppl if str(u) == str(base.get("args", {}).get("to_user_id"))), None)
     if _bname:                                            # 先に立っていた1通も同じ検問に掛ける
-        base["args"]["body"] = _strip_self_ref(base["args"].get("body"), _bname)
-        base["summary"] = _action_summary("send_message", base["args"])
+        _nb = _strip_self_ref(base["args"].get("body"), _bname)
+        if _nb != base["args"].get("body"):
+            base["args"]["body"] = _nb
+            _revise_pending(base)                         # 台帳も直す(見せた文面と送る文面を一致させる)
     added = 0
     for uid, nm in ppl:
         if str(uid) in have:
@@ -5487,7 +5537,12 @@ def _ground_dm_body(body, table_md):
         return b
     if not _DM_DEIXIS_RE.search(b):                       # 指示語で済ませていない=そのままで通じる
         return b
-    return b.rstrip() + "\n\n【ご確認いただきたい一覧】\n" + table_md
+    # 仮置き(想定/推測)の表を社外・社内へそのまま出せば、仮が確定として伝わる。実測2026-07-28: 『想定権限』
+    # と自ら断った表が、断り書きを失ったまま tetsuo殿へ送られた。表が仮なら、仮と明記して添える。
+    _hedge = bool(re.search(r"想定|推測|仮定|仮置|かもしれ|と思われ|暫定", table_md))
+    head = ("【ご確認いただきたい一覧（※当方の仮置きにござる。正否のご確認をお願いいたす）】"
+            if _hedge else "【ご確認いただきたい一覧】")
+    return b.rstrip() + "\n\n" + head + "\n" + table_md
 
 
 def deixis_table_digest(query, convo):
@@ -8059,7 +8114,8 @@ class H(BaseHTTPRequestHandler):
             final = "(応答を得られませなんだ)"
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
         _pre = final
-        final = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
+        final = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid,
+                                       table_md=_dx_rows)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         _salv = final != _pre; _pre = final
         try:                                                         # DM本文が指示語で済ませ材料を欠くなら、機構が当の表を添える
             for _a in pending_actions:
@@ -8067,7 +8123,7 @@ class H(BaseHTTPRequestHandler):
                     _nb = _ground_dm_body(_a["args"]["body"], _dx_rows)
                     if _nb != _a["args"]["body"]:
                         _a["args"]["body"] = _nb
-                        _a["summary"] = _action_summary("send_message", _a["args"])
+                        _revise_pending(_a)               # 台帳も直す(承認時に旧本文が採用されるのを防ぐ)
         except Exception:
             pass
         try:                                                         # 名指しされた宛先が揃うまで機構が下書きを複製(送信は承認要のまま)

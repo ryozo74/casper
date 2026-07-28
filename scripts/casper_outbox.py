@@ -118,6 +118,21 @@ def _transition(pid, to_state, expect=None, result=None, uid=None, patch=None):
         return dict(rec)
 
 
+def revise(pid, args=None, summary=None):
+    """proposed のまま args/summary を改訂(状態は動かさぬ)。
+    承認カードを出した後に機構が本文を整える時、台帳(=承認時の真実源)も同時に直さねばならぬ。
+    これを欠くと『殿が見た文面』と『実際に送られる文面』が食い違う(実測2026-07-28: 材料を添えた
+    カードを見せながら、台帳には添える前の本文が残っていた)。"""
+    patch = {}
+    if isinstance(args, dict):
+        patch["args"] = args
+    if summary is not None:
+        patch["summary"] = summary
+    if not patch:
+        return None
+    return _transition(pid, "proposed", expect="proposed", patch=patch)
+
+
 def approve(pid, uid=None, body_edit=None):
     """proposed→approved(冪等: proposedでなければNone=二重承認を弾く)。body_edit で本文差替。"""
     patch = {"args": {"body": body_edit}} if body_edit is not None else None
