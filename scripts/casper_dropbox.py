@@ -28,6 +28,37 @@ def available():
     return bool(_token())
 
 
+_HOME = {"path": None}                                     # home_path のキャッシュ(1プロセス1回だけ問う)
+
+
+def home_prefix():
+    """team アカウントの『メンバーフォルダ』への接頭辞を返す(個人口なら "")。
+
+    【なぜ要るか】Business team token の既定 root は **team space の直下**で、殿のメンバーフォルダ
+    (/Studio Bokan)の外にござる。そこへ置いたファイルの共有リンクは、社外の相手にサインインを
+    求めることがある(殿御指摘2026-07-29「アカウントがないとダウンロードできない」)。
+    ゆえ転送物はメンバーフォルダ配下へ置く=通常の個人共有と同じ振る舞いにする。
+    root_info: root_namespace_id == home_namespace_id なら team space でない=接頭辞不要。"""
+    if _HOME["path"] is not None:
+        return _HOME["path"]
+    _HOME["path"] = ""
+    try:
+        st, r = _api(API + "/users/get_current_account", body={})
+        ri = (r or {}).get("root_info") or {} if st == 200 else {}
+        if str(ri.get("root_namespace_id")) != str(ri.get("home_namespace_id")):
+            hp = str(ri.get("home_path") or "").rstrip("/")
+            if hp.startswith("/"):
+                _HOME["path"] = hp
+    except Exception:
+        pass
+    return _HOME["path"]
+
+
+def base_folder():
+    """転送用フォルダの実パス(メンバーフォルダ配下)。"""
+    return home_prefix() + FOLDER
+
+
 def _api(url, arg=None, body=None, data=None, ctype="application/json"):
     """Dropbox API 呼び。arg=Dropbox-API-Arg(content系)・body=JSON body(rpc系)・data=バイナリ。"""
     tok = _token()
@@ -51,6 +82,21 @@ def _api(url, arg=None, body=None, data=None, ctype="application/json"):
             return e.code, json.loads(raw)
         except Exception:
             return e.code, {"error_summary": raw.decode("utf-8", "replace")[:300]}
+
+
+def _dl1(url):
+    """【dl=1 は必須】アカウント無しで落とせるかは、この一文字に懸かっておる。実測(2026-07-29・
+    未ログインの実ブラウザでパスワード投入まで通した結果):
+      ・dl=1 → パスワード通過と同時に**ダウンロードが始まる**(アカウント不要) ○
+      ・dl=0 → プレビュー頁に着くだけ。Downloadボタンは在るが匿名では落ちず「Log in / Sign up」のみ ×
+    殿御指摘2026-07-29「アカウントがないとダウンロードできない」の正体はこれ。
+    フォルダのリンクでも dl=1 は zip 一括ダウンロードとして効く。"""
+    if not url:
+        return url
+    url = url.replace("&dl=0", "&dl=1").replace("?dl=0", "?dl=1")
+    if "dl=" not in url:
+        url += ("&" if "?" in url else "?") + "dl=1"
+    return url
 
 
 def _gen_password(n=8):
@@ -92,7 +138,7 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
     if not _token():
         return {"ok": False, "error": "Dropbox token 未設定(.casper_dropbox_token)"}
     safe = "".join(c for c in (filename or "file") if c not in '\\/:*?"<>|').strip() or "file"
-    path = f"{FOLDER}/{safe}"
+    path = f"{base_folder()}/{safe}"
     ok, err = _upload_bytes(path, file_bytes)
     if not ok:
         es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
@@ -117,15 +163,7 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
                                           "audience": "public", "access": "viewer", "allow_download": True}})
         if stm == 200 and (rm or {}).get("url"):
             r = rm                                   # PW設定済みの最新リンク情報で上書き(pw と実リンクが一致)
-    url = r.get("url", "")
-    # 【dl=1 はパスワード付きリンクに付けぬ】直接ダウンロードのパラメータはパスワード検問の手前で
-    # 効かず、余計な中間頁(サインインの誘導を含む)へ飛ばす元になる。パスワードが要るリンクでは
-    # 素の頁(dl=0)へ導き、相手にPW入力→ダウンロードの正路を通らせる。
-    # (殿御指摘2026-07-29「アカウントがないとダウンロードできない」の調査中に判明・パスワード無し時のみ dl=1)
-    if direct_download and url and not pw:
-        url = url.replace("&dl=0", "&dl=1").replace("?dl=0", "?dl=1")
-        if "dl=" not in url:
-            url += ("&" if "?" in url else "?") + "dl=1"
+    url = _dl1(r.get("url", "")) if direct_download else r.get("url", "")
     return {"ok": True, "link": url, "password": pw, "name": safe, "size": len(file_bytes), "path": path,
             "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
             "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
@@ -139,7 +177,7 @@ def upload_into(folder, file_bytes, filename):
     """/Casper_Transfer/<folder>/<filename> へアップ(リンクは作らない=バッチ用)。返り {ok, path, size} or {ok:False,error}。"""
     if not _token():
         return {"ok": False, "error": "Dropbox token 未設定(.casper_dropbox_token)"}
-    path = f"{FOLDER}/{_safe(folder, 'batch')}/{_safe(filename, 'file')}"
+    path = f"{base_folder()}/{_safe(folder, 'batch')}/{_safe(filename, 'file')}"
     ok, err = _upload_bytes(path, file_bytes)
     if not ok:
         es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
@@ -152,7 +190,7 @@ def share_folder(folder, password=None):
     返り {ok, link, password, folder} or {ok:False,error}。"""
     if not _token():
         return {"ok": False, "error": "Dropbox token 未設定"}
-    path = f"{FOLDER}/{_safe(folder, 'batch')}"
+    path = f"{base_folder()}/{_safe(folder, 'batch')}"
     pw = password or _gen_password()
     st, r = _api(API + "/sharing/create_shared_link_with_settings",
                  body={"path": path, "settings": {"require_password": True, "link_password": pw,
@@ -164,7 +202,19 @@ def share_folder(folder, password=None):
             es = (r or {}).get("error_summary", str(r))[:200]
             return {"ok": False, "error": f"フォルダ共有リンク作成失敗: {es}"}
         r = links[0]
-    return {"ok": True, "link": r.get("url", ""), "password": pw, "folder": path}
+        # 単一ファイル側と同じく、既存リンクにパスワードを設定し直す(生成pwと実リンクの食い違いを断つ)。
+        stm, rm = _api(API + "/sharing/modify_shared_link_settings",
+                       body={"url": r.get("url", ""),
+                             "settings": {"require_password": True, "link_password": pw,
+                                          "audience": "public", "access": "viewer", "allow_download": True}})
+        if stm == 200 and (rm or {}).get("url"):
+            r = rm
+    # 【まとめリンクにも dl=1】此処が付いておらなんだ。複数ファイルを1リンクで送る経路(chat.html の
+    # dropboxTransferFiles 複数分岐)は dl=0 のまま渡しており、相手はプレビュー頁で止まり
+    # 「アカウントが無いと落とせぬ」に至る。フォルダは dl=1 で zip 一括ダウンロードになる。
+    return {"ok": True, "link": _dl1(r.get("url", "")), "password": pw, "folder": path,
+            "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
+            "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
 
 
 if __name__ == "__main__":
@@ -173,4 +223,4 @@ if __name__ == "__main__":
         st, r = _api(API + "/users/get_current_account", body={})
         print(r.get("name", {}).get("display_name"), "/", r.get("account_type"))
     else:
-        print("casper_dropbox:", "token有" if available() else "token無", "/ folder", FOLDER)
+        print("casper_dropbox:", "token有" if available() else "token無", "/ folder", base_folder())
