@@ -118,11 +118,17 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
         if stm == 200 and (rm or {}).get("url"):
             r = rm                                   # PW設定済みの最新リンク情報で上書き(pw と実リンクが一致)
     url = r.get("url", "")
-    if direct_download and url:
+    # 【dl=1 はパスワード付きリンクに付けぬ】直接ダウンロードのパラメータはパスワード検問の手前で
+    # 効かず、余計な中間頁(サインインの誘導を含む)へ飛ばす元になる。パスワードが要るリンクでは
+    # 素の頁(dl=0)へ導き、相手にPW入力→ダウンロードの正路を通らせる。
+    # (殿御指摘2026-07-29「アカウントがないとダウンロードできない」の調査中に判明・パスワード無し時のみ dl=1)
+    if direct_download and url and not pw:
         url = url.replace("&dl=0", "&dl=1").replace("?dl=0", "?dl=1")
         if "dl=" not in url:
             url += ("&" if "?" in url else "?") + "dl=1"
-    return {"ok": True, "link": url, "password": pw, "name": safe, "size": len(file_bytes), "path": path}
+    return {"ok": True, "link": url, "password": pw, "name": safe, "size": len(file_bytes), "path": path,
+            "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
+            "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
 
 
 def _safe(name, fallback):
