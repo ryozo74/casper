@@ -7384,20 +7384,58 @@ class H(BaseHTTPRequestHandler):
             # 生バイトを chunk で流せば、ブラウザもサーバも全体を抱えぬ。
             if not (casper_dropbox and casper_dropbox.available()):
                 self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
+            import urllib.parse as _up
+            total = int(self.headers.get("Content-Length", 0))
+            fn = _up.unquote(self.headers.get("X-Filename", "") or "file")
+            pw = (self.headers.get("X-Password", "") or "").strip() or None
+            folder = _up.unquote(self.headers.get("X-Folder", "") or "").strip()
+            _t0 = time.time()
+
+            def _dlog(msg):
+                """転送の顛末を必ず残す。記録が無いゆえ『Failed to fetch』の在処が判らなかった
+                (殿御報告2026-07-29)。ブラウザが受け取れずとも、機構の側に足跡を残す。"""
+                try:
+                    with open(os.path.join(HERE, "dropbox_transfer.log"), "a", encoding="utf-8") as _f:
+                        _f.write(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+                except Exception:
+                    pass
+
+            class _Counting:
+                """読めたバイト数を数えながら渡す。途中で尽きた時に『どこまで届いたか』を言えるようにする。"""
+                def __init__(self, fh):
+                    self.fh, self.n = fh, 0
+
+                def read(self, k):
+                    b = self.fh.read(k)
+                    self.n += len(b or b"")
+                    return b
+
+            _cnt = _Counting(self.rfile)
+            _dlog(f"START name={fn} size={total} folder={folder or '-'} pw={'有' if pw else '自動'}")
             try:
-                import urllib.parse as _up
-                total = int(self.headers.get("Content-Length", 0))
-                fn = _up.unquote(self.headers.get("X-Filename", "") or "file")
-                pw = (self.headers.get("X-Password", "") or "").strip() or None
-                folder = _up.unquote(self.headers.get("X-Folder", "") or "").strip()
                 if total <= 0:
-                    self._json({"ok": False, "error": "本体が空にござる(Content-Length=0)"}); return
+                    raise ValueError("本体が空にござる(Content-Length=0)")
                 if folder:                             # まとめ経路: フォルダへ流し込むのみ(リンクは後で1本)
-                    self._json(casper_dropbox.upload_into_stream(folder, self.rfile, total, fn))
+                    res = casper_dropbox.upload_into_stream(folder, _cnt, total, fn)
                 else:
-                    self._json(casper_dropbox.transfer_stream(self.rfile, total, fn, password=pw))
+                    res = casper_dropbox.transfer_stream(_cnt, total, fn, password=pw)
             except Exception as e:
-                self._json({"ok": False, "error": str(e)[:300]})
+                res = {"ok": False, "error": str(e)[:300]}
+            # 【返答の前に必ず読み切る】受け取り切らずに返して閉じると、送信途中のブラウザは
+            # 接続を切られ『Failed to fetch』となり、こちらの error 文言が一切届かぬ。
+            _rest = total - _cnt.n
+            if _rest > 0:
+                try:
+                    while _rest > 0:
+                        _b = self.rfile.read(min(1 << 20, _rest))
+                        if not _b:
+                            break
+                        _rest -= len(_b)
+                except Exception:
+                    pass
+            _dlog(f"END   name={fn} ok={res.get('ok')} recv={_cnt.n}/{total} "
+                  f"{round(time.time() - _t0, 1)}s err={str(res.get('error') or '')[:160]}")
+            self._json(res)
             return
         if self.path == "/api/dropbox/transfer":       # ファイル → Dropbox転送(パスワード付き共有リンク)
             n = int(self.headers.get("Content-Length", 0))
