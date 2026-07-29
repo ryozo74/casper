@@ -1155,9 +1155,13 @@ function dsend(file, opts){
     x.open('POST','/api/dropbox/raw',true);
     x.withCredentials=true;
     x.setRequestHeader('Content-Type','application/octet-stream');
-    x.setRequestHeader('X-Filename',encodeURIComponent(file.name||'file'));
+    x.setRequestHeader('X-Filename',encodeURIComponent(opts.rel||file.name||'file'));
     if(opts.password) x.setRequestHeader('X-Password',opts.password);
     if(opts.folder)   x.setRequestHeader('X-Folder',encodeURIComponent(opts.folder));
+    if(!(file&&file.size>0)){   // フォルダや読めぬ項目を投げた時は、接続の話にせず正直に告げる
+      return res({ok:false,error:'このファイルは読めませぬ（容量0）。フォルダを直に投げた場合は、'
+                  +'フォルダごとドロップいただければ中身をまとめて送りまする。'});
+    }
     if(opts.onprog) x.upload.addEventListener('progress',e=>{ if(e.lengthComputable) opts.onprog(e.loaded,e.total); });
     x.onload=()=>{ try{ res(JSON.parse(x.responseText)); }
                    catch(e){ res({ok:false,error:'応答を解釈できませなんだ (HTTP '+x.status+')'}); } };
@@ -1252,8 +1256,69 @@ async function dropboxTransferFiles(files){
   window.addEventListener('dragover',e=>{ if(ov.style.display==='flex') e.preventDefault(); });
   window.addEventListener('dragleave',e=>{ if(hasFiles(e)){ cnt--; if(cnt<=0){ cnt=0; ov.style.display='none'; } } });
   window.addEventListener('drop',e=>{ if(ov.style.display==='flex'){ e.preventDefault(); cnt=0; ov.style.display='none';
-    const fs=e.dataTransfer.files; if(fs&&fs.length) onFilesDropped(fs); } });
+    // 【フォルダも受ける】フォルダを落とすと dataTransfer.files には中身の無い項目が入り、読取が失敗して
+    // 要求がサーバへ発たぬ(殿御報告2026-07-29『Failed to fetch』/『読込失敗』の正体。台帳に足跡すら無し)。
+    // items から webkitGetAsEntry() で辿れば、中のファイルを一つずつ取り出せる。
+    _dtEntries(e.dataTransfer).then(r=>{
+      if(r.dirName){ dropboxTransferFolder(r.dirName, r.files); return; }   // フォルダ=まとめて1リンク
+      if(r.files.length) onFilesDropped(r.files.map(x=>x.file));
+    });
+  } });
 })();
+
+// dataTransfer からファイルを取り出す。フォルダなら再帰的に辿り、相対パスを保って返す。
+// 返り {dirName, files:[{file, rel}]}。dirName が空ならフォルダではない。
+async function _dtEntries(dt){
+  const items=[...(dt.items||[])];
+  const ents=items.map(it=>it.webkitGetAsEntry&&it.webkitGetAsEntry()).filter(Boolean);
+  const dirs=ents.filter(en=>en.isDirectory);
+  const out=[];
+  const readDir=en=>new Promise(res=>{ const rd=en.createReader(); const acc=[];
+    const step=()=>rd.readEntries(es=>{ if(!es.length) return res(acc); acc.push(...es); step(); }, ()=>res(acc)); step(); });
+  const getFile=en=>new Promise(res=>en.file(f=>res(f), ()=>res(null)));
+  async function walk(en, prefix){
+    if(en.isFile){ const f=await getFile(en); if(f) out.push({file:f, rel:(prefix?prefix+'/':'')+en.name}); return; }
+    for(const c of await readDir(en)) await walk(c, (prefix?prefix+'/':'')+en.name);
+  }
+  if(dirs.length===1 && ents.length===1){                  // フォルダ1つ=そのフォルダを1リンクで送る
+    for(const c of await readDir(dirs[0])) await walk(c, '');
+    return {dirName:dirs[0].name, files:out};
+  }
+  for(const en of ents) await walk(en, '');                // ファイル混在=従来通り(相対パスは使わぬ)
+  if(!ents.length) return {dirName:'', files:[...(dt.files||[])].map(f=>({file:f, rel:f.name}))};
+  return {dirName:'', files:out};
+}
+
+// フォルダを1リンクで送る(中身をDropboxの同名フォルダへ流し、最後にパスワード付き1リンク)。
+async function dropboxTransferFolder(dirName, entries){
+  const b=el('bot'); b.classList.add('cursor');
+  if(!entries.length){ b.classList.remove('cursor'); render(b,'📁 「'+esc(dirName)+'」は空にござった（送るものがございませぬ）。'); return; }
+  const totalB=entries.reduce((s,x)=>s+(x.file.size||0),0);
+  const folder=dirName+'_'+new Date().toISOString().slice(0,10).replace(/-/g,'');
+  render(b,'📁 フォルダ「'+esc(dirName)+'」（'+entries.length+'件 / '+(totalB/1e6).toFixed(1)+'MB）を Dropbox へ転送中…');
+  log.scrollTop=log.scrollHeight;
+  const up=[]; let doneB=0;
+  for(let i=0;i<entries.length;i++){
+    const {file,rel}=entries[i];
+    const r=await dsend(file,{folder, rel, onprog:(l,t)=>{
+      render(b,'📁 「'+esc(dirName)+'」転送中… ('+(i+1)+'/'+entries.length+') '+esc(rel)
+             +' — 全体 '+((doneB+l)/1e6).toFixed(1)+'/'+(totalB/1e6).toFixed(1)+'MB');
+    }});
+    doneB+=(file.size||0); up.push({name:rel,...r});
+  }
+  const okn=up.filter(r=>r.ok).length;
+  const sh=await dpost('/api/dropbox/batch_share',{folder});
+  b.classList.remove('cursor');
+  if(sh.ok){
+    render(b,'📁 フォルダ「'+esc(dirName)+'」の **'+okn+'/'+entries.length+'件** を上げ申した。下記の**1リンク（パスワード付き）**で、相手はアカウント無しにzipで受け取れまする。');
+    _dbxLinkCard(b,dirName+'（'+okn+'件）',sh.link,sh.password,'（フォルダまとめ）');
+    history.push({role:'assistant',content:'📦 Dropbox共有(フォルダ '+dirName+'・'+okn+'件): \n🔗 '+sh.link+'\n🔑 '+sh.password});
+    const ng=up.filter(r=>!r.ok);
+    if(ng.length){ const li=document.createElement('div'); li.style.cssText='margin-top:6px;font-size:12px;color:#fca5a5';
+      li.innerHTML='⚠️ 上げられなかった分: '+ng.map(r=>esc(r.name)+'（'+esc(r.error||'不明')+'）').join(' / '); b.appendChild(li); }
+  }else{ render(b,'📁 まとめリンクの作成に失敗いたした: '+esc(sh.error||'不明')+'（'+okn+'件はアップ済）'); }
+  log.scrollTop=log.scrollHeight;
+}
 
 // ドロップ/選択したファイルの種類を見て"扱うツール"を提示(自動振り分けせず殿に選ばせる・殿方針2026-07-15)
 function fileKind(f){

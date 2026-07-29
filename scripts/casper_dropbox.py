@@ -203,11 +203,20 @@ def transfer_stream(fh, total, filename, password=None, direct_download=True):
             "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
 
 
+def _safe_rel(rel, fallback="file"):
+    """相対パスを段ごとに清める(フォルダ投函で階層を保つため。'..' や空段は落とす)。"""
+    segs = [s for s in str(rel or "").replace("\\", "/").split("/") if s and s not in (".", "..")]
+    segs = [_safe(s, "") for s in segs]
+    segs = [s for s in segs if s]
+    return "/".join(segs) or fallback
+
+
 def upload_into_stream(folder, fh, total, filename):
-    """まとめ用: /base/<folder>/<filename> へ流し込む(リンクは作らぬ)。"""
+    """まとめ用: /base/<folder>/<相対パス> へ流し込む(リンクは作らぬ)。
+    filename に 'sub/dir/a.png' の形が来れば階層を保つ(フォルダごと投函された時の構造を壊さぬ)。"""
     if not _token():
         return {"ok": False, "error": "Dropbox token 未設定"}
-    path = f"{base_folder()}/{_safe(folder, 'batch')}/{_safe(filename, 'file')}"
+    path = f"{base_folder()}/{_safe(folder, 'batch')}/{_safe_rel(filename)}"
     ok, err = upload_stream(path, fh, total)
     if not ok:
         es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
