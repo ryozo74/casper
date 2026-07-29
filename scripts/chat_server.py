@@ -7378,6 +7378,27 @@ class H(BaseHTTPRequestHandler):
                     }.get(info.split(":")[0], f"日程変更できませなんだ（{info}）。"))
             self._json({"ok": ok, "info": info, "message": msg, "new_due": nd, "task_id": tid})
             return
+        if self.path.startswith("/api/dropbox/raw"):   # 生バイト転送(base64を経由せぬ正路)
+            # 【なぜ生で受けるか】base64(data URL)経由はブラウザがファイル全体を文字列に載せるため
+            # 大容量で FileReader が落ちる(殿御指摘2026-07-29「転送エラー: 読込失敗」)。
+            # 生バイトを chunk で流せば、ブラウザもサーバも全体を抱えぬ。
+            if not (casper_dropbox and casper_dropbox.available()):
+                self._json({"ok": False, "error": "Dropbox 転送は未設定にござる"}); return
+            try:
+                import urllib.parse as _up
+                total = int(self.headers.get("Content-Length", 0))
+                fn = _up.unquote(self.headers.get("X-Filename", "") or "file")
+                pw = (self.headers.get("X-Password", "") or "").strip() or None
+                folder = _up.unquote(self.headers.get("X-Folder", "") or "").strip()
+                if total <= 0:
+                    self._json({"ok": False, "error": "本体が空にござる(Content-Length=0)"}); return
+                if folder:                             # まとめ経路: フォルダへ流し込むのみ(リンクは後で1本)
+                    self._json(casper_dropbox.upload_into_stream(folder, self.rfile, total, fn))
+                else:
+                    self._json(casper_dropbox.transfer_stream(self.rfile, total, fn, password=pw))
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)[:300]})
+            return
         if self.path == "/api/dropbox/transfer":       # ファイル → Dropbox転送(パスワード付き共有リンク)
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")

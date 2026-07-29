@@ -132,6 +132,89 @@ def _upload_bytes(path, data):
     return True, None
 
 
+def upload_stream(path, fh, total):
+    """file-like から読みながらアップ(全体をメモリに載せぬ)。返り (ok, err)。
+
+    【なぜ要るか】従来は「ブラウザがファイル全体を base64 文字列にする → サーバが全体を bytes で持つ」
+    造りで、大きなファイルはブラウザ側の FileReader が落ちた(殿御指摘2026-07-29『転送エラー: 読込失敗』)。
+    base64 は容量が1.33倍に膨れ、文字列の上限にも当たる。生バイトを chunk ごとに流せば、
+    ブラウザもサーバも全体を抱えずに済む。"""
+    if total <= CHUNK:
+        return _upload_bytes(path, fh.read(total))
+    first = fh.read(CHUNK)
+    st, r = _api(CONTENT + "/files/upload_session/start", arg={"close": False}, data=first)
+    if st != 200:
+        return False, r
+    sid = r.get("session_id")
+    off = len(first)
+    while off < total:
+        chunk = fh.read(min(CHUNK, total - off))
+        if not chunk:
+            return False, {"error_summary": f"入力が途切れ申した(受領 {off}/{total} バイト)"}
+        last = off + len(chunk) >= total
+        if last:
+            st, r = _api(CONTENT + "/files/upload_session/finish",
+                         arg={"cursor": {"session_id": sid, "offset": off},
+                              "commit": {"path": path, "mode": "overwrite", "autorename": False, "mute": True}},
+                         data=chunk)
+        else:
+            st, r = _api(CONTENT + "/files/upload_session/append_v2",
+                         arg={"cursor": {"session_id": sid, "offset": off}, "close": False}, data=chunk)
+        if st != 200:
+            return False, r
+        off += len(chunk)
+    return True, None
+
+
+def _link_for(path, pw):
+    """path にパスワード付き公開リンクを作る/直す(単一ファイル・フォルダ共通の単一機構)。返り link情報 or None。"""
+    settings = {"require_password": True, "link_password": pw,
+                "audience": "public", "access": "viewer", "allow_download": True}
+    st, r = _api(API + "/sharing/create_shared_link_with_settings", body={"path": path, "settings": settings})
+    if st == 200:
+        return r
+    st2, r2 = _api(API + "/sharing/list_shared_links", body={"path": path, "direct_only": True})
+    links = (r2 or {}).get("links", []) if st2 == 200 else []
+    if not links:
+        return None
+    # 既存リンクには"実際にパスワードを設定し直す"(生成pwと実リンクの食い違いを断つ)。
+    stm, rm = _api(API + "/sharing/modify_shared_link_settings",
+                   body={"url": links[0].get("url", ""), "settings": settings})
+    return rm if (stm == 200 and (rm or {}).get("url")) else links[0]
+
+
+def transfer_stream(fh, total, filename, password=None, direct_download=True):
+    """生バイト(file-like)を受けて Dropbox へ流し、パスワード付きリンクを返す。base64 を経由せぬ正路。"""
+    if not _token():
+        return {"ok": False, "error": "Dropbox token 未設定(.casper_dropbox_token)"}
+    safe = _safe(filename, "file")
+    path = f"{base_folder()}/{safe}"
+    ok, err = upload_stream(path, fh, total)
+    if not ok:
+        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
+        return {"ok": False, "error": f"アップロード失敗: {es}"}
+    pw = password or _gen_password()
+    r = _link_for(path, pw)
+    if not r:
+        return {"ok": False, "error": "リンク作成失敗", "uploaded_path": path}
+    url = _dl1(r.get("url", "")) if direct_download else r.get("url", "")
+    return {"ok": True, "link": url, "password": pw, "name": safe, "size": total, "path": path,
+            "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
+            "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
+
+
+def upload_into_stream(folder, fh, total, filename):
+    """まとめ用: /base/<folder>/<filename> へ流し込む(リンクは作らぬ)。"""
+    if not _token():
+        return {"ok": False, "error": "Dropbox token 未設定"}
+    path = f"{base_folder()}/{_safe(folder, 'batch')}/{_safe(filename, 'file')}"
+    ok, err = upload_stream(path, fh, total)
+    if not ok:
+        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
+        return {"ok": False, "error": f"アップロード失敗: {es}"}
+    return {"ok": True, "path": path, "size": total}
+
+
 def transfer(file_bytes, filename, password=None, direct_download=True):
     """ファイルを Dropbox へ上げてパスワード付き共有リンクを返す。
     返り: {ok, link, password, name, size, path} or {ok:False, error}。"""
