@@ -15,8 +15,17 @@ $ports = 8443, 8770, 8100, 8201   # 8443=Casper HTTPS(携帯用) / 8770=Casper H
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "管理者として実行してくだされ（右クリック→管理者として実行）" -ForegroundColor Red
-    exit 1
+    # 【自ら昇格を求める】「管理者で実行せよ」と告げて終わるだけでは、殿が同じ命を打ち直す手間になり
+    # 実際に二度空振りした(2026-07-29)。ゆえ自分で昇格を申し出る=UACの確認が出るのみで済む。
+    Write-Host "管理者権限が要るゆえ、昇格を求めまする（UACの確認にお応えくだされ）" -ForegroundColor Yellow
+    try {
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"") | Out-Null
+    } catch {
+        Write-Host "昇格が拒まれ申した。右クリック→管理者として実行にてお願いいたす。" -ForegroundColor Red
+        Read-Host "（Enterで閉じまする）" | Out-Null
+    }
+    exit
 }
 
 Write-Host "中継先を 127.0.0.1 に据えまする（WSLのIPには依らぬ＝以後張り直し不要）" -ForegroundColor Cyan
@@ -53,3 +62,5 @@ if ($bad) {
     Write-Host "`n全て通り申した。携帯からは https://$lan`:8443/ にてお試しくだされ" -ForegroundColor Green
     Write-Host "（自署の証明書ゆえ初回は警告が出まする。以後この作業は不要にござる）" -ForegroundColor Green
 }
+
+Read-Host "`n（確認できましたら Enter で閉じまする）" | Out-Null
