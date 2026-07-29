@@ -1190,10 +1190,18 @@ function _copyFallback(text){
 function _copyBtn(btn, text, okLabel){
   btn.onclick=()=>{ Promise.resolve(copyText(text)).then(ok=>{ btn.textContent = ok ? (okLabel||'✓ コピー済') : '⚠ 選択してコピーを'; }); };
 }
-function _dbxLinkCard(b, name, link, password, sub){
+function _dbxLinkCard(b, name, link, password, sub, gated){
   const row=document.createElement('div'); row.style.cssText='margin-top:8px;padding:9px 12px;border:1px solid #243049;border-radius:9px;background:rgba(255,255,255,.02)';
+  // 【匿名検査の申告】殿はDropboxに署名済ゆえ、殿自身の画面ではパスワードを問われず素通りになる
+  // (権限がリンクのパスワードに優先する=Dropboxの仕様)。ゆえ『効いているか』は機構が匿名で確かめ、
+  // その結果をここに出す。殿が毎度疑わずに済むように(殿御疑義2026-07-29)。
+  const g = (gated===true)  ? '<div style="font-size:11.5px;color:#86efac;margin-top:4px">☑ 匿名検査済: '
+              +'アカウント無しの相手にはパスワードが要る状態にござる（殿ご自身は署名済ゆえ素通りいたす）</div>'
+          : (gated===false) ? '<div style="font-size:11.5px;color:#fca5a5;margin-top:4px">⚠ 匿名検査: '
+              +'パスワード無しで中身が取れてしまう状態にござる。共有前にご確認を</div>'
+          : '<div style="font-size:11.5px;color:#9fb3c8;margin-top:4px">— 匿名検査は行えませなんだ（要確認）</div>';
   row.innerHTML='📦 <b>'+esc(name)+'</b>'+(sub?' <span style="color:#9fb3c8;font-size:12px">'+esc(sub)+'</span>':'')+'<br>'
-    +'<span style="font-size:12px;color:#9fb3c8">🔗 '+esc(link)+'<br>🔑 <code>'+esc(password)+'</code></span>';
+    +'<span style="font-size:12px;color:#9fb3c8">🔗 '+esc(link)+'<br>🔑 <code>'+esc(password)+'</code></span>'+g;
   const bar=document.createElement('div'); bar.style.cssText='display:flex;gap:8px;margin-top:6px';
   const cl=document.createElement('button'); cl.textContent='🔗 リンクをコピー'; const cp=document.createElement('button'); cp.textContent='🔑 パスワードをコピー';
   [cl,cp].forEach(x=>x.style.cssText='padding:4px 11px;border-radius:7px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;cursor:pointer;font-size:12px');
@@ -1212,7 +1220,7 @@ async function dropboxTransferFiles(files){
                  +Math.floor(l/t*100)+'%）'+(l>=t?' — Dropboxへ書き込み中…':''));
       }});
       b.classList.remove('cursor');
-      if(r.ok){ render(b,'📦 Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。'); _dbxLinkCard(b,r.name,r.link,r.password,'（'+(r.size/1e6).toFixed(1)+'MB）');
+      if(r.ok){ render(b,'📦 Dropbox に上げ申した。下記のリンクとパスワードで共有できまする。'); _dbxLinkCard(b,r.name,r.link,r.password,'（'+(r.size/1e6).toFixed(1)+'MB）',r.gated);
         history.push({role:'assistant',content:'📦 Dropbox共有: '+r.name+'\n🔗 '+r.link+'\n🔑 '+r.password}); }   // 会話文脈に積む→『このファイルを◯◯にDMして』でサーバがリンクを拾える
       else render(b,'📦 転送に失敗いたした: '+esc(r.error||'不明'));
     }catch(err){ b.classList.remove('cursor'); render(b,'📦 転送エラー: '+esc(err.message||err)); }
@@ -1235,7 +1243,7 @@ async function dropboxTransferFiles(files){
   b.classList.remove('cursor');
   if(sh.ok){
     render(b,'📦 **'+okn+'/'+files.length+'件** を1つのフォルダにまとめ申した。下記の**1リンク（パスワード付き）**で全ファイル共有できまする。');
-    _dbxLinkCard(b,okn+'件のファイル',sh.link,sh.password,'（まとめリンク）');
+    _dbxLinkCard(b,okn+'件のファイル',sh.link,sh.password,'（まとめリンク）',sh.gated);
     history.push({role:'assistant',content:'📦 Dropbox共有('+okn+'件): '+up.filter(r=>r.ok).map(r=>r.name).join('、')+'\n🔗 '+sh.link+'\n🔑 '+sh.password});   // 会話文脈に積む→DM時にリンクを拾える
     const li=document.createElement('div'); li.style.cssText='margin-top:6px;font-size:12px;color:#9fb3c8';
     li.innerHTML='含まれるファイル: '+up.map(r=>esc(r.name)+(r.ok?'':' ⚠️')).join(' / ');
@@ -1311,7 +1319,7 @@ async function dropboxTransferFolder(dirName, entries){
   b.classList.remove('cursor');
   if(sh.ok){
     render(b,'📁 フォルダ「'+esc(dirName)+'」の **'+okn+'/'+entries.length+'件** を上げ申した。下記の**1リンク（パスワード付き）**で、相手はアカウント無しにzipで受け取れまする。');
-    _dbxLinkCard(b,dirName+'（'+okn+'件）',sh.link,sh.password,'（フォルダまとめ）');
+    _dbxLinkCard(b,dirName+'（'+okn+'件）',sh.link,sh.password,'（フォルダまとめ）',sh.gated);
     history.push({role:'assistant',content:'📦 Dropbox共有(フォルダ '+dirName+'・'+okn+'件): \n🔗 '+sh.link+'\n🔑 '+sh.password});
     const ng=up.filter(r=>!r.ok);
     if(ng.length){ const li=document.createElement('div'); li.style.cssText='margin-top:6px;font-size:12px;color:#fca5a5';

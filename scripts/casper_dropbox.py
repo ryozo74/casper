@@ -166,6 +166,29 @@ def upload_stream(path, fh, total):
     return True, None
 
 
+def verify_gated(url, timeout=20):
+    """【毎回、匿名で確かめる】そのリンクが「パスワードを要する状態」になっておるかを、
+    認証もcookieも持たぬ素の要求で検査する。返り True=パスワード頁で止まる(正常) / False=素通り。
+
+    殿御疑義2026-07-29「パスワード無くてもダウンロードできるよ？」——実測すると、殿の環境では
+    Dropboxに**所有者として署名済**ゆえ、権限がリンクのパスワードに優先して素通りになる(Dropboxの仕様)。
+    社外の相手(未署名)は password 頁で止まる。ゆえ『効いているか』は匿名でしか確かめられぬ。
+    人の目で確かめられぬものは、機構が毎回確かめて申告する。"""
+    if not url:
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "casper-link-check/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            head = r.read(200000)
+            ctype = (r.headers.get("Content-Type") or "").lower()
+        if "text/html" not in ctype:
+            return False                                   # 実体が返った=素通り(パスワードが効いておらぬ)
+        low = head.decode("utf-8", "replace").lower()
+        return ("password required" in low) or ("/sm/password" in low) or ("パスワード" in low)
+    except Exception:
+        return None                                        # 判定不能(通信不可等)は False と混ぜぬ
+
+
 def _link_for(path, pw):
     """path にパスワード付き公開リンクを作る/直す(単一ファイル・フォルダ共通の単一機構)。返り link情報 or None。"""
     settings = {"require_password": True, "link_password": pw,
@@ -199,6 +222,7 @@ def transfer_stream(fh, total, filename, password=None, direct_download=True):
         return {"ok": False, "error": "リンク作成失敗", "uploaded_path": path}
     url = _dl1(r.get("url", "")) if direct_download else r.get("url", "")
     return {"ok": True, "link": url, "password": pw, "name": safe, "size": total, "path": path,
+            "gated": verify_gated(url),                    # 匿名でパスワードが要る状態かを機構が毎回検査
             "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
             "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
 
@@ -257,6 +281,7 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
             r = rm                                   # PW設定済みの最新リンク情報で上書き(pw と実リンクが一致)
     url = _dl1(r.get("url", "")) if direct_download else r.get("url", "")
     return {"ok": True, "link": url, "password": pw, "name": safe, "size": len(file_bytes), "path": path,
+            "gated": verify_gated(url),
             "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
             "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
 
@@ -304,7 +329,9 @@ def share_folder(folder, password=None):
     # 【まとめリンクにも dl=1】此処が付いておらなんだ。複数ファイルを1リンクで送る経路(chat.html の
     # dropboxTransferFiles 複数分岐)は dl=0 のまま渡しており、相手はプレビュー頁で止まり
     # 「アカウントが無いと落とせぬ」に至る。フォルダは dl=1 で zip 一括ダウンロードになる。
-    return {"ok": True, "link": _dl1(r.get("url", "")), "password": pw, "folder": path,
+    _u = _dl1(r.get("url", ""))
+    return {"ok": True, "link": _u, "password": pw, "folder": path,
+            "gated": verify_gated(_u),
             "audience": ((r.get("link_permissions") or {}).get("effective_audience") or {}).get(".tag"),
             "visibility": ((r.get("link_permissions") or {}).get("resolved_visibility") or {}).get(".tag")}
 
