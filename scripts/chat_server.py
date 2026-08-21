@@ -7,7 +7,7 @@ CORS 不要・ブラウザから外部IPへ直接出ない。
 Usage:
   python3 chat_server.py --endpoint http://192.168.44.119:11434 --model qwen3:14b --port 8770
 """
-import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, time, urllib.request, urllib.error, uuid
+import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, threading, time, urllib.request, urllib.error, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +20,14 @@ try:
     import casper_tools
 except Exception:
     casper_tools = None
+try:
+    import casper_tool_ledger                    # cmd_508病五: 社内ツール名の単一ソース(散在リテラルの台帳化・漸進形)
+except Exception:
+    casper_tool_ledger = None
+try:
+    import casper_web                             # cmd_501: 一般の調べ物のためのネット検索(検問込み)
+except Exception:
+    casper_web = None
 try:
     import casper_mcp
 except Exception:
@@ -105,6 +113,10 @@ try:
 except Exception:
     casper_breaker = None
 try:
+    import casper_llm_client                      # cmd_519黒匣: 推論機呼出の横断台帳(inflight/incident/TTFT・軍師設計)
+except Exception:
+    casper_llm_client = None
+try:
     import casper_doc                             # 節構造ドキュメント(資料作り・節単位再生成/版管理・Fable UI設計)
 except Exception:
     casper_doc = None
@@ -127,6 +139,7 @@ ap.add_argument("--model", default="qwen3:14b")
 ap.add_argument("--port", type=int, default=8770)
 A = ap.parse_args()
 OLLAMA = A.endpoint.rstrip("/") + "/api/chat"
+_ENDPOINT_HOSTPORT = A.endpoint.rstrip("/").split("://", 1)[-1]   # "host:port"(cmd_509第2便: breaker gen:key用)
 
 # --- backend 切替 (ローカル Ollama / クラウド Anthropic つなぎ) ---
 BACKEND = os.environ.get("CASPER_BACKEND", "ollama").lower()
@@ -344,6 +357,19 @@ def _task_fb_active(t):
 PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
 _LAST_CHOICES = {}     # thread -> {"opts":[{say,label,card_type}], "uid", "ts"}: 直前に出した選択カード(③選択ログ用)
 _AURORA_CUR = {}       # thread -> {doc_id, title}: 1スレッド=1資料の紐付け(更新はappend)
+# cmd_492 第1便: 直前turnの話題を機構が記録する(記録のみ・まだ判定/注入には使わない)。
+# 既存の決定的解決器(top_source/_pj_resolve/_resolve_persons)が既に解決した結果を拾うだけで、新たな推測は行わない。
+_LAST_TOPIC = {}       # thread -> {"kind":"doc"|"project"|"person", "key":..., "label":..., "ts":..., "uid":...}
+# cmd_499: 裸の列挙選択(装置なしで①②を並べて選ばせる形)への応答で来た番号を、直前turnの
+# 列挙と突合するための控え(_LAST_TOPICと同型・cmd_492本体には手を入れず独立機構として新設)。
+_LAST_ENUM = {}         # thread -> {"lines":[str,...], "ts":..., "uid":...}
+# cmd_508 第3便(病三=対象スロットの空白): 直前turnで確定した対象(資料/案件/人物)を機構が保持する錨。
+# _LAST_TOPIC(cmd_492)と同型(thread->dict・per-thread store)だが別機構として独立させる——
+# _LAST_TOPICの引き継ぎ判定(_topic_handoff)はLLM classifier(_needs_prior_context)を要件とするのに対し、
+# 本機構(_anchor_continuation)は「判定はトークン照合のみ・LLM classifier不要」というbrief要件を満たす
+# 別経路であり、両者を一本化するとcmd_492のAC10回帰(既に本番稼働中)を巻き込む危険がある。
+# 書込は_LAST_TOPICと同じ解決結果(_resolve_turn_topic)を横取りするのみ=新たな推測機構は追加しない。
+_LAST_ANCHOR = {}       # thread -> {"kind":"doc"|"project"|"person", "key":..., "label":..., "ts":..., "uid":...}
 
 # --- 恒久 roster: token失効でも壊れぬ永続キャッシュ＋多源リフレッシュ(get_users優先→RO REST→DM収穫) ---
 ROSTER_FILE = os.path.join(HERE, "roster_cache.json")
@@ -506,8 +532,54 @@ def _draft_bodies_context(who, limit=6):
             "(「〜と思われる」等の憶測は禁止)。\n")
 
 
+# 依頼(query)に鉤括弧で本文そのものが明示指定されている形。殿が本文を指定した以上、
+# 中身の有無を機構が疑う筋ではない(cmd_494 AC3・過剰検問除け)。
+_DM_QUOTED_BODY_RE = re.compile(r"[「『][^」』]{1,400}[」』]")
+
+
+def _dm_body_complete(query, body):
+    """DM代筆の本文(body)が、依頼(query)された中身を実際に載せているかの三値判定(cmd_494)。
+    語彙表(禁止語リスト)は使わない——実害①(前置きのみで肝心の説明が丸ごと無い)と実害②(依頼と無関係な
+    本文)は『中身が無い』と『中身が違う』という同一構造ゆえ、意味判定1本で両方を捉える(軍師実測で
+    6/6正答・10/10揺らぎゼロ確認済のプロンプトをそのまま使う)。
+    戻り値は三値: True(complete)/False(incomplete)/None(判定不能=例外・timeout・JSON解析失敗・
+    keyの欠落・値がbool型でない)。呼出側は必ず `is not True` の明示比較で扱うこと(cmd_486以来の掟)。"""
+    q = str(query or "")
+    b = str(body or "")
+    if not b.strip():
+        return False
+    try:
+        r = _ollama_json(
+            "あなたは検査器。ユーザの依頼(query)と、AIが代筆したDM本文(body)を見比べ、"
+            "『依頼された中身が本文に実際に載っているか』だけを判定せよ。"
+            "本文が前置き・予告・案内のみで肝心の中身が無い、または依頼と無関係な内容ならcomplete=false。"
+            "依頼された事柄の実体(具体的な情報・数値・名前・文面)が本文に含まれていればcomplete=true。"
+            "短くとも依頼どおりの用が足りていればtrue。JSONのみ: {\"complete\":true|false}",
+            f"依頼: {q}\n本文: {b}", num_predict=60)
+        o = json.loads(r)
+        if "complete" not in o or not isinstance(o["complete"], bool):
+            return None
+        return o["complete"]
+    except Exception:
+        return None
+
+
+# cmd_494 1-3: False/None時の聞き返し文面(fail-closed)。カードを立てず、次に何をすればよいかを示す。
+_DM_BODY_INCOMPLETE_MSG = ("お送りする本文に、頼まれた中身がまだ入っておりませぬ。"
+                           "何を書いてお送りすればよいか、内容をお聞かせくだされ。")
+
+
 def _register_pending(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None):
     # query(発端の発話)+trace_id: 承認時の編集差分から教師信号の三つ組を復元する為に必須(Fable5指摘・A実装)
+    # cmd_494: DM代筆の中身欠如検問。send_messageの全登録経路(通常/fanout/action_router)が
+    # 必ずここを通る一点ゆえ、ここに置けば個別に足して片方が漏れる事故(cmd_485の轍)を構造的に防げる。
+    if tool == "send_message" and origin != "fanout":     # fanoutは原本の複製ゆえ原本判定を使い回す(1-5)
+        _q = query or ""
+        _body = (args or {}).get("body")
+        if not _DM_QUOTED_BODY_RE.search(_q):              # 殿が本文を鉤括弧で明示指定済みなら判定器を呼ばぬ(1-4)
+            _cmpl = _dm_body_complete(_q, _body)
+            if _cmpl is not True:                           # False/None(判定不能)を等しく fail-closed で倒す(cmd_486の掟)
+                return None
     if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
         try:
             pid = casper_outbox.propose(tool, args, uid, summary, thread=thread,
@@ -637,24 +709,85 @@ def _build_choices(who, query, convo=None):
             "options": opts}
 
 
-def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None, table_md=""):
+_AURORA_SAVE_UNKNOWN_PROMPT = "『Auroraへ保存』のご依頼と存じますが、判定機構が今しがた応答いたしませなんだ。いかがいたしましょう？"
+
+
+def _aurora_save_title_unknown_choices():
+    """(C・cmd_486是正) 承認カードの題を決められぬ時の聞き返しchoices。
+    既定題「Casperノート」で起票してしまうのが事故の源だったため、材料が無いturnは
+    既定で埋めるのでなく聞き返す(掟: 未確認をtrueと名乗るな)。"""
+    return {"prompt": "Aurora資料の題名をお決めいただきたく存じます。いかがいたしましょう？",
+            "options": [
+                {"label": "殿の発話をそのまま題にする", "say": "題名はそのままでよい"},
+                {"label": "内容から推測させる", "say": "題名はお任せする"},
+            ]}
+
+
+def _resolve_aurora_note_title(query, response_text, table_md):
+    """(C・cmd_486是正) 承認カード題の出所を優先順位で機構的に固定する:
+      ①殿の発話中の鉤括弧(queryから抽出。実例「Auroraに「status内容 0729」をまとめて」→題=status内容 0729)
+      ②機構が用意した材料の見出し(table_md経路・呼出側で別途処理済ゆえ本関数はtable_md優先枝には呼ばれぬ)
+      ③応答本文の「タイトル:」明示行のみ(qwenが意図的に題を宣言した形ゆえ信頼できる)
+      ④いずれも無い→None(既定題「Casperノート」で埋めず、呼出側が聞き返しへ回す)
+    旧実装は応答本文の鉤括弧(fの「」)や既定文字列「Casperノート」を安易に採っていたため、
+    Vimeo案内文が返ったturnで題が「🎬 Vimeoへアップ」等になる事故があった(実測)。
+    応答本文の鉤括弧はもはや題の出所にしない——それは殿の発話ではなく qwen の言い回しだから。"""
+    q = query or ""
+    qm = re.search(r"[「『]([^」』]{2,80})[」』]", q)
+    if qm:
+        return qm.group(1).strip()
+    tm = re.search(r"(?m)^\s*\**\s*タイトル\s*\**\s*[:：]\s*\**\s*(.+?)\s*\**\s*$", response_text or "")
+    if tm:
+        return tm.group(1).strip()
+    return None
+
+
+def _aurora_save_unknown_choices():
+    """(A・cmd_486是正) 分類器がsave意図をNone(判定不能)で返した時の聞き返しchoices。
+    層1を陽性へ倒して起票してはならぬ(fail-closed維持)——承認カードは立てず、choices(選択カード・
+    say型・既存機構に相乗り)で殿に決めていただく。sayの片方は即断路(規則ベース)で必ずTrueになる
+    文面を選ぶ——分類器が死んでいても、この再投入は規則だけで通り承認カードが立つ
+    (=分類器不応答でも殿は2クリックで目的を達せられる。無言落下の解消)。"""
+    return {"prompt": _AURORA_SAVE_UNKNOWN_PROMPT,
+            "options": [
+                {"label": "Auroraへ保存する", "say": "Auroraに保存して"},
+                {"label": "保存は不要(このまま続ける)", "say": "保存は不要"},
+            ]}
+
+
+def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None, table_md="", choices_obj=None):
     """qwenが send_message を呼ばず DM をテキストで書いた場合の救済(JSONブロック＋プロセ両対応)。
-    宛先uid/名＋本文を拾い pending 登録→承認カードを出す(ローカルqwenのfunction-calling不発対策)。"""
+    宛先uid/名＋本文を拾い pending 登録→承認カードを出す(ローカルqwenのfunction-calling不発対策)。
+    戻り値は (final, unknown_choices) のタプル。unknown_choicesは分類器が判定不能(None)だった時のみ
+    choices dictを返す(呼出側は choices_obj が未使用ならこれを採用する。既に choices_obj が
+    埋まっている場合は本カードを出さぬのが安全側=呼出側の責務)。"""
+    _AU_LAST_ROUTE["route"] = None                 # trace観測(cmd_487): turn毎に既定null/nullへ戻す
+    _AU_LAST_ROUTE["decision"] = None
     if pending_actions:                            # 既にツール呼出で pending 済なら不要
-        return final
+        return final, None
     f = final or ""
     # ⓪ Aurora ノート作成の表明救済: qwen が「Auroraに『TITLE』として作成しますか？承認ボタン…」と
     #    "言っただけ"で aurora_create を呼ばなかった場合、応答本体を本文に pending 登録→承認カードを出す。
     #    ★錨は「殿が頼んだか」に置く。応答の言い回しだけを見ていたゆえ取り落とした——実測2026-07-28:
     #    『この表をAurora資料にしてアップして』へ『保存してよろしいでしょうか？承認いただければ…』と
     #    答えたが、語彙表(承認ボタン/保存しますか…)に無く救済が発火せず、殿の言う「保存ボタンがない」に至った。
-    _au_req = bool(_AURORA_SAVE_REQ_RE.search(query or ""))
+    _au = _wants_aurora_save(query)
+    _au_req = (_au is True)          # ★三値の明示比較(cmd_486(A))。Noneは偽値ゆえ`if _au:`に潰すと
+    _au_unknown = (_au is None)      #   三値化しても実質何も変わらぬ最悪の結果になる——ここは掟。
+    # trace観測(cmd_487追加AC): 判定値と決着経路をmodule変数に確定する。nullは_wants_aurora_save側で
+    # 既に確定済(Aurora語なしのturn)。判定不能(None)はllm経路の中でも聞き返しへ回る特別な決着なので
+    # ここで"unknown_askback"に昇格させる(nullとfalseを混同せぬのと同じ掟でllmとunknown_askbackも混同せぬ)。
+    if _AU_LAST_ROUTE["route"] is not None:
+        _AU_LAST_ROUTE["decision"] = ("true" if _au is True else "false" if _au is False else "unknown")
+        if _au_unknown:
+            _AU_LAST_ROUTE["route"] = "unknown_askback"
+    else:
+        _AU_LAST_ROUTE["decision"] = None
+    if _au_unknown and not choices_obj:            # (A) 判定不能→起票せず聞き返しchoicesを返す(fail-closed維持)
+        return final, _aurora_save_unknown_choices()
     if _au_req or (re.search(r"[Aa]urora", f)
                    and re.search(r"承認ボタン|作成しますか|保存されます|保存しますか|作成しました|保存しました", f)
                    and re.search(r"(ノート|ドキュメント|資料|note)", f)):
-        tm = (re.search(r"(?m)^\s*\**\s*タイトル\s*\**\s*[:：]\s*\**\s*(.+?)\s*\**\s*$", f)
-              or re.search(r"[「『]([^」』]{2,80})[」』]", f))
-        title = (tm.group(1).strip() if tm else "Casperノート")
         # 本文=表明文(Aurora/承認ボタン等の行)を除いた応答本体(Casperが提示した一覧など)
         body = re.sub(r"(?m)^.*(承認ボタン|作成しますか|保存されます|保存しますか|保存してよろしい|"
                       r"承認いただけ|起票します|Auroraに|Aurora に).*$", "", f).strip()
@@ -663,13 +796,18 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
         if table_md and _au_req:
             # ★材料は機構が用意する。注入した表を弱qwenが見落とし『直前の応答に表が含まれていない』と
             # 断って聞き返した(実測2026-07-29)。頼むのをやめ、解決済みの表を本文の正とする。
+            # ②機構が用意した材料の見出し=既に殿の会話由来ゆえ、題の出所として①③に優先して確定する。
             _h = [c.strip(" *") for c in table_md.split("\n")[0].strip().strip("|").split("|")]
-            title = (f"{_h[0]}一覧" if _h and _h[0] else title)
+            title = (f"{_h[0]}一覧" if _h and _h[0] else (_resolve_aurora_note_title(query, f, table_md) or "Casperノート"))
             body = f"## {title}\n\n{table_md}\n\n（Casperとの会話で整理した内容を資料化）"
             _from_table = True
         elif re.search(r"特定できて(おりませ|いませ)|見つかりませ|含まれておりませ|貼り付けて|添付して|"
                        r"いずれかの方法|教えていただけ", body):
-            return final                                  # 聞き返し/拒否の文面を資料として保存させぬ
+            return final, None                            # 聞き返し/拒否の文面を資料として保存させぬ
+        else:
+            title = _resolve_aurora_note_title(query, f, table_md)
+            if title is None:                      # (C)④ いずれの出所にも無い→既定題で起票せず、題を聞き返す
+                return final, _aurora_save_title_unknown_choices()
         if len(body) >= 20:
             args = {"title": title, "body": body}
             if who.get("uid"):
@@ -679,9 +817,9 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
             pending_actions.append({"id": pid, "tool": "aurora_create", "args": args, "summary": summary})
             if _from_table:                               # 機構が本文を確定した=qwenの散文は捨て、簡潔に告げる
                 return (f"「{title}」として Aurora に起票する下書きを用意いたした（{len(table_md.splitlines())}行の表）。"
-                        "↓の承認カードで内容をご確認の上、ボタンを押されればアップロードいたす。")
+                        "↓の承認カードで内容をご確認の上、ボタンを押されればアップロードいたす。"), None
             f2 = re.sub(r"(作成します|保存します|作成しました|保存しました|作成しますか)", "下書きしました", f)
-            return f2 + f"\n\n（↓の承認カードで確認し、ボタンを押すと Aurora に「{title}」として保存されます）"
+            return f2 + f"\n\n（↓の承認カードで確認し、ボタンを押すと Aurora に「{title}」として保存されます）", None
     to = body = None
     cut = None
     # ① JSONブロック形 ```json {to_user_id, body}```
@@ -744,6 +882,16 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
             to = rev.get(nm) or rev.get(nm.replace("さん", ""))
             body = " ".join(q.strip() for q in quotes).strip()
             body = re.sub(r"^" + re.escape(nm) + r"\s*さん[、,：:]?\s*", "", body)
+    # ③.5(cmd_494 5便): 単一行完結形「〇〇(uid31)へ『本文』を送信しました/送りました/します」
+    # (qwenが「さん」抜き・引用ブロックなしで1行に収める頻出形——③は「さん」＋別行引用を要件とするため
+    # 拾えない。名前直後の(uidN)からuidを直接取れるので、roster逆引きより先にこちらを優先する)。
+    if not (to and body):
+        mu = re.search(r"([^\s、。：:（(『]+)\s*[（(]uid\s*(\d+)[）)]\s*(?:へ|に)\s*[『「](.+?)[』」]\s*"
+                       r"(?:を|と)?\s*(?:送信しました|送りました|お送りしました|送ります|送信します|DMしました|DMします|連絡しました)\s*[。\.]?", f)
+        if mu:
+            to = mu.group(2)
+            body = mu.group(3).strip()
+            cut = (mu.start(), mu.end())
     # ④ 関数呼び構文形 send_message(to_user_id="uid31", body="...") をテキストで書いた場合(qwen頻出)
     if not (to and body):
         mf = re.search(r"send_message\s*\(([^)]*)\)", f, re.S)
@@ -758,12 +906,14 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
                 body = mbd.group(1)
                 cut = (mf.start(), mf.end())
     if not (to and body):
-        return final
+        return final, None
     args = {"to_user_id": to, "body": _clean_dm_body(body)}   # salvage経路のDMもプレーンテキスト整形(読みやすさ)
     if who.get("uid"):
         args["actor_id"] = who["uid"]
     summary = _action_summary("send_message", args)
     pid = _register_pending("send_message", args, who.get("uid"), summary, origin="user", query=query, trace_id=trace_id)
+    if pid is None:                                    # cmd_494: 中身欠如→起票せず聞き返す(fail-closed)
+        return _DM_BODY_INCOMPLETE_MSG, None
     pending_actions.append({"id": pid, "tool": "send_message", "args": args, "summary": summary})
     if cut:
         f = (f[:cut[0]] + f[cut[1]:]).strip()
@@ -773,7 +923,7 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
     f = re.sub(r"(送信します|送ります|DMします)", "下書きします", f)
     f = re.sub(r"\n{3,}", "\n\n", f).strip()
     note = "（↓の承認カードで本文を確認・編集し、ボタンを押すと送信されます）"
-    return (f + "\n\n" + note) if f else note
+    return ((f + "\n\n" + note) if f else note), None
 
 
 def _strip_tool_leak(text):
@@ -823,6 +973,1072 @@ _AURORA_SAVE_REQ_RE = re.compile(
     r"(aurora|オーロラ)[^。\n]{0,8}(資料|ノート|文書|ドキュメント)[^。\n]{0,6}(にして|に直して|化して|作って|作成)", re.I)
 _ASK_KEEP_RE = re.compile(r"[？?]|ください|下さい|いただけ|頂け|ますか|ましょうか|願いま|お願い|"
                           r"ご確認|ご教示|ご意見|ご返信|教えて", re.I)
+
+# 保存意図判定(層1・目標①): 語彙列挙でなく構造(Aurora語+委任性)で拾う。未知の新語(AC5)にも耐える。
+_AURORA_WORD_RE = re.compile(r"(aurora|オーロラ)", re.I)
+# (1-A) 読取(閲覧/検索)の標識。近傍距離窓は廃止(将軍指摘cmd_485差戻: 長文の読取依頼が窓を越えて
+# すり抜けていた)。正規表現自体は語の有無のみを見る(節の切り出しは呼出側の責務)。
+# (cmd_486是正・欠陥2) 呼出側(_wants_aurora_save)は本regexを全文でなく
+# _aurora_read_verb_same_clause 経由でAurora語と同一節に限定して用いる——編集/読取語
+# (_AURORA_EDIT_READ_VERB_RE)側は先に節単位化されていたのに読取側だけ全文評価のままだった
+# 非対称が、無関係な節の読取語に保存依頼を殺させていた(将軍実測)。
+_AURORA_READ_RE = re.compile(
+    r"(読|見せ|見た|検索|探|調べ|説明|教え|何がある|ある[？?]|参照|開い|表示して|一覧|"
+    r"もう一度|再度|出して|確認して|どうなった|どこ)", re.I)
+# (1-A') 保存動詞が完了・受身形(既存物への言及)で使われている標識。
+# 「保存した/アップ済み/登録されている/以前アップした」等は"これから保存せよ"ではなく
+# "既に保存済みの物"を指す言及であり、読取語が無くとも即断路を陽性に倒してはならない
+# (将軍実測 subtask_485_qc2「Auroraに登録されている資料の一覧を出して」に読取語「一覧」を
+# 追加してもなお別文面で再発しうるため、時制側も機構化して二重に塞ぐ=軍師推奨(B))。
+_AURORA_SAVED_REF_RE = re.compile(
+    r"(aurora|オーロラ)[^。\n]{0,10}(に|へ|で)[^。\n]{0,15}"
+    r"(アップ|上げ|保存|登録|起票|作成|載せ|投稿|残し?)"
+    r"(済み|済|した|してある|されている|されてある|してた|してあった)|"
+    r"以前[^。\n]{0,6}(アップ|上げ|保存|登録|起票|作成|載せ|投稿|残)した", re.I)
+# 明示的な保存動詞(温存・即断路): 既存 _AURORA_SAVE_REQ_RE をそのまま使う。
+# (D・cmd_485_impl4是正) 即断路は「保存動詞の直後が依頼形」の時のみ許す構造に変更。
+# 旧実装は _AURORA_SAVE_REQ_RE(動詞の存在のみ)+ not _read + not _saved_ref で通していたため、
+# 「上げたやつ」「しておいたはず」「されたと思う」等、_AURORA_SAVED_REF_RE の語彙列挙が
+# 拾いきれない過去形・推量形・伝聞形が素通りしていた(将軍実測3件・subtask_485_qc3)。
+# 依頼形そのものを即断路の必要条件にすることで、時制語の追加列挙を不要にする。
+# (H・cmd_485_impl5是正・残穴D→cmd_485_impl6で列挙除外から文字種遷移判定へ再転換)
+# 保存動詞の直前が別語の語中でないことを要求する語境界配慮。「リストアップして」
+# 「ピックアップして」「クローズアップして」の"アップして"部分が保存動詞「アップ」に誤一致するのを防ぐ。
+# 旧実装は直前語を(リスト|ピック|クローズ)と列挙する否定先読みだったため、軍師qc5実測で
+# 「バージョンアップ」「レベルアップ」等の未列挙複合語が素通りした(AC10生成的組合せテストで発見)。
+# 個別語の列挙ではなく、直前1文字がカタカナ(=カタカナ複合語の語中である)か否かという
+# 文字種の遷移そのもので判定する——これは有限列挙でなく構造(語境界)なので、
+# 未知のカタカナ複合語にも原理的に耐える(掟: 列挙でなく構造で拾う)。
+_AURORA_IMMEDIATE_TAIL_VERB_BOUNDARY_NEG = r"(?<![ァ-ヴー])"
+# (J・cmd_485_impl5是正・退行) 助詞(を|の)の介在を許容。「保存をお願い」「登録をお願いします」
+# 「アップをお願い」等の丁寧形が、助詞なし語尾のみを想定していた旧実装で陰性化していた退行を是正。
+# (M・cmd_485_impl6是正・qc5 AC5) 「頼む」を「頼[むみ]」へ活用形展開。「頼みたい」(連用形+たい)が
+# 語幹一致せず漏れていた(qc5実測)。新語の追加列挙ではなく同一動詞の活用系統の拡張であり、
+# LLM経路(意味判定)の負担を実行頻度の高い定型からは減らす目的。
+_AURORA_IMMEDIATE_REQUEST_TAIL_RE = re.compile(
+    _AURORA_IMMEDIATE_TAIL_VERB_BOUNDARY_NEG +
+    r"(アップ|上げ|保存|登録|起票|作成|載せ|投稿|残)(を|の)?\s*"
+    r"(してくれ|してください|して下さい|しといて|しておいて|お願い|頼[むみ]|よろしく|て欲しい|てほしい|願いた|頂きたい|いただきたい|して(?![おて]))")
+# (1-B) 依頼形(委任性)の標識。動詞を列挙せず「〜して/してくれ/してください/しておいて/させて」等の語尾で取る。
+_ASK_DELEGATE_RE = re.compile(r"(てくれ|てください|て下さい|ておいて|といて|させて|お願い|頼む|願いた|頂きたい|いただきたい|て[？?]|て$)")
+# 灰色判定の一方の材料: 読取語と共起した時だけ意味が割れる保存示唆語(「見て、まとめて」等)。
+_SAVE_HINT_RE = re.compile(r"(まとめ|書き起こ|記録|整理|残し|残す)")
+# (G・cmd_485_impl5是正・残穴C) (1-B)の直前で陰性確定させる除外リスト。依頼されている動作が
+# 『保存』ではなく『編集・加工・整形・要約・修正等』であり、かつ目的語が既存のAurora資料である場合、
+# これは保存依頼ではない。語彙を(1-B)の陽性条件に足すのではなく、編集/読取動詞を陰性標識として
+# 新設し先に弾く方式を採る——未知の保存語(書きとどめて等)は(1-B)の対象外語彙のままなので
+# 引き続き陽性判定され、退行を避けられる(軍師推奨・除外リスト方式)。
+_AURORA_EDIT_READ_VERB_RE = re.compile(
+    r"(整え|要約|修正|直し|削除|リストアップ|ピックアップ|クローズアップ|一覧化|翻訳|変換|チェック|確認|開い|見せ|探し)")
+# (D・cmd_486是正・節跨ぎ誤該当) 上記は文中どこに在っても陰性確定させていたため、Aurora語と無関係な
+# 節に在る編集/読取語(「<PJ名>の進捗を確認した上で、Auroraにまとめて」の「確認」等)が
+# 保存依頼を巻き込んで殺していた(将軍実測)。節を跨いだ誤該当を機構で切る=Aurora語との同一節性を
+# 要求する(列挙でなく構造)。クエリを節に分割し、Aurora語を含む節のみを編集/読取判定の対象とする。
+_AURORA_CLAUSE_SPLIT_RE = re.compile(r"(?<=[、。\n])|(?<=てから)|(?<=た上で)")
+
+
+def _aurora_edit_read_verb_same_clause(q):
+    """Aurora語を含む節に編集/読取動詞が在る時のみ True(節を跨いだ誤該当を防ぐ)。"""
+    for clause in _AURORA_CLAUSE_SPLIT_RE.split(q or ""):
+        if _AURORA_WORD_RE.search(clause) and _AURORA_EDIT_READ_VERB_RE.search(clause):
+            return True
+    return False
+
+
+def _aurora_read_verb_same_clause(q):
+    """(cmd_486是正・欠陥2) Aurora語を含む節に読取語(_AURORA_READ_RE)が在る時のみ True。
+    編集動詞側は_aurora_edit_read_verb_same_clauseで既に節単位化済みだったが、読取判定
+    (_AURORA_READ_RE)だけは全文評価のまま残っていたため、片側だけ節単位に揃った非対称が生じ、
+    「先に資料を見せて、それをAuroraに保存して」のように無関係な節の読取語「見せて」が
+    別節の保存依頼を殺す実害があった(将軍実測・cmd_486差し戻し)。読取語も編集語と同型の
+    節スコープに揃える(構造の対称性を回復)。"""
+    for clause in _AURORA_CLAUSE_SPLIT_RE.split(q or ""):
+        if _AURORA_WORD_RE.search(clause) and _AURORA_READ_RE.search(clause):
+            return True
+    return False
+
+
+def _aurora_clause_delegate_form(q):
+    """(D派生) 依頼形の標識も、Aurora語を含む節自身で判定する(節を跨いだ希薄化を防ぐ)。
+    「Auroraにまとめて、あとで確認する」は全文では末尾が依頼形でなくなり(1-B)を素通りしていたが、
+    Aurora語を含む節「Auroraにまとめて、」自体は依頼形であり、後続の無関係な節に判定を
+    引きずられてはならない。全文一致も併せて見る(OR)ので退行は起きない——狭める変更ではなく
+    見落としを拾う変更。"""
+    if _ASK_DELEGATE_RE.search(q or ""):
+        return True
+    for clause in _AURORA_CLAUSE_SPLIT_RE.split(q or ""):
+        if _AURORA_WORD_RE.search(clause) and _ASK_DELEGATE_RE.search(clause.rstrip("、。\n")):
+            return True
+    return False
+# (F・cmd_485_impl4是正・残穴B) 受益・完了の複合形は「既存物の再提示要求」であり保存依頼ではない。
+# 「〜てもらった/〜ていただいた/〜たやつ/〜た分/〜たもの」および疑問形でない「〜てくれた」を
+# 陰性標識として機構化する。ただし「てくれた？」(kiyotomo殿実発話・AC1)は"これから"の依頼確認で
+# あり引き続き陽性を要するため、直後に疑問符が続く場合はこの陰性標識から除外する
+# (軍師助言: 区別の鍵は後続の要求動詞(もう一度/再度/出して等)の有無ではなく、疑問形か否かに置く
+#  —— 疑問形は未来への確認、平叙の完了形は既存物への言及という統語的差で機構的に割れる)。
+_BENEFIT_COMPLETION_NEG_RE = re.compile(
+    r"てもらった|ていただいた|てくれた(?![？?])|たやつ|た分|たもの")
+
+
+# trace観測(cmd_487追加AC): 直近の_wants_aurora_save判定が辿った決着経路を記録する。
+# 呼出側(_salvage_text_toolcall→chat_server本体)がcasper_trace.emitへ載せるための受け渡し専用。
+# ★三値(True/False/None)の設計・比較箇所には一切手を入れず、経路名だけを併走記録する副作用。
+_AU_LAST_ROUTE = {"route": None}
+
+
+def _decision_record(pj, digests_fired, rag_hits, web_fired, pending_actions, anchor=None, declines=None):
+    """【AC8決定記録(cmd_508第1便・最重要成果物)】turnごとに機構が吐く決定記録の骨組み。
+    Fable「服従でなく機構で強制せよは判定器にも適用される掟」に従い、qwenの文面(服従の言葉)ではなく
+    機構が実際に何を引いたかを測る。これが他の全ACの検証手段——文面だけで判ずるな(AC3以降が拠って立つ土台)。
+    対象スロット: _pj_resolve()の3値解決結果(閉集合ゆえ machine-checkable)。pj は既存trace形式
+    {"status","n","path"}(name一覧そのものは既存traceに無いためnを引き継ぐ・新規キー追加はしない)。
+    ★cmd_508第3便(病三): anchor(本turnで_LAST_ANCHORへ記録された対象・kind/key/label)をtarget_slotへ
+    追加する(軍師QC1申し送り: 「第3便では anchor を target_slot へ足す必要がある」)。
+    corpus: 母集合(rag_hits)がゼロより大きければ vault(RAG)を引いたと判る。
+    web発火の有無: casper_web.should_search()が実際に検索を実行したか(should_search=Trueだけでは発火とは言わぬ)。
+    カードpid: この turn で積まれた pending_actions の id 一覧(何を確定的に提示したかの証跡)。
+    ★cmd_510第3便(観測の機構・AC8降車ログ): declines(このturnで_record_declineが刻んだ一覧)を
+    そのまま載せる。新機構は作らず、既存の_DECLINE_LOGを decision_record へ横流しするだけ。"""
+    return {
+        "target_slot": {"status": (pj or {}).get("status"), "n": (pj or {}).get("n"),
+                         "path": (pj or {}).get("path"),
+                         "anchor": ({"kind": anchor.get("kind"), "key": anchor.get("key"),
+                                     "label": anchor.get("label")} if anchor else None)},
+        "corpus": "vault_rag" if (rag_hits or 0) > 0 else None,
+        "population_n": rag_hits or 0,
+        "web_fired": bool(web_fired),
+        "card_pids": [a.get("id") for a in (pending_actions or []) if a.get("id")],
+        "declines": list(declines or []),
+    }
+
+
+def _trace_payload(trace_id, query, actor, thread, routed, fastpath, echoed, vch,
+                    injected_facts, resp_ids, cont, gate, pj, rag_hits, ctx_len,
+                    gen_sec, salvaged, validated, gloss, guarded_claim, abstained,
+                    digests_fired, final_len, cards, fewshot_used, topic=None,
+                    stream_claim_held=0, web_fired=False, pending_actions=None,
+                    turn_start_ts=None, send_intent_gate=None, llm_calls=None):
+    """casper_trace.emitへ渡すpayload本体の組立(cmd_487是正: 配線をgateでast抽出検査可能にする)。
+    ★au_decision/au_routeは _AU_LAST_ROUTE から読む(呼出側の値でなくここで直接参照することで、
+    この2キーを消す/読み違える突然変異がここ1箇所を検査するだけで捕まる)。
+    ★cmd_510第3便: turn_start_ts(このturnの開始時刻)以降に_DECLINE_LOG[thread]へ積まれた分だけを
+    このturnの降車として渡す(_DECLINE_LOGはthread単位の累積台帳ゆえ、turnの境界はts比較で切り出す・
+    新たな台帳は作らない)。
+    ★cmd_511第2便(AC10・観測増設のみ): send_intent_gateは_turn_is_send_intent(層1)がこのturnで
+    実際に返した判定値(True=送信turn/False=読取turn)。一週間後の監査材料として必要
+    (現状traceにこの判定値が残らず、両義語是正の効果を事後に検証できなかった)。"""
+    _declines = [d for d in (_DECLINE_LOG.get(thread) or [])
+                 if turn_start_ts is None or float(d.get("ts") or 0) >= turn_start_ts]
+    return {"trace_id": trace_id, "query": query, "actor": actor, "thread": thread,
+            "routed": bool(routed), "action": (routed or {}).get("tool"),
+            "fastpath": fastpath, "echoed": echoed, "vch": vch,
+            "injected_facts": injected_facts, "resp_ids": resp_ids, "cont": cont,
+            "gate": gate,
+            "pj": pj,
+            "topic": topic,   # cmd_492第1便: _LAST_TOPIC記録の観測用(まだ判定/注入には使わない)
+            "rag_hits": rag_hits, "ctx_len": ctx_len,
+            "gen_sec": gen_sec, "salvaged": salvaged, "validated": validated, "gloss": gloss,
+            "guarded_claim": guarded_claim, "abstained": abstained,
+            "stream_claim_held": stream_claim_held,   # cmd_494 3便: ストリーム側で保留した完了主張行の数(0=発火なし)
+            "digests_fired": digests_fired,
+            "au_decision": _AU_LAST_ROUTE.get("decision"), "au_route": _AU_LAST_ROUTE.get("route"),  # cmd_487追加AC: 層1(Aurora保存意図)の判定値と決着経路
+            "send_intent_gate": send_intent_gate,   # cmd_511第2便AC10: 層1(_turn_is_send_intent)の判定値(True/False)
+            "final_len": final_len, "cards": cards, "fewshot_used": fewshot_used,
+            "llm_calls": list(llm_calls or []),           # cmd_515手当2(AC-L1/AC-L2): このturnの推論機呼出記録
+            "llm_calls_n": len(llm_calls or []),           # AC-L2: 1turnあたりの呼出回数
+            "llm_wait_total_sec": round(sum(c.get("wait_sec") or 0 for c in (llm_calls or [])), 3),  # このturnで推論機を待った合計
+            "decision_record": _decision_record(pj, digests_fired, rag_hits, web_fired, pending_actions,
+                                                 anchor=topic, declines=_declines)}  # AC8(cmd_508)・anchor=cmd_508第3便/declines=cmd_510第3便(降車ログ)
+
+
+def _wants_aurora_save(query):
+    """殿がAuroraへ新規に保存/記録することを頼んでいるか。戻り値は三値(True|False|None・cmd_486(A)):
+      True  = 保存意図あり(規則で確信 or 分類器がsave=true)
+      False = 保存意図なし(規則で陰性確定 or 分類器がsave=false)
+      None  = 判定不能(分類器が答えぬ。Aurora語+依頼形は在るが真偽を決められぬ)
+    呼出側は必ず `is True` / `is None` の明示比較で扱うこと(Noneは偽値なのでbool判定に潰すと
+    三値化の意味が失われる)。
+    cmd_485_impl6(K)(L): 5巡の実測(軍師 subtask_485_qc5)が「列挙で閉じることは原理的に不可能」
+    (日本語の編集動詞・複合語・丁寧形は事実上無限)と結論したため、語彙列挙を主経路から降ろし、
+    LLM意味判定(_wants_aurora_save_llm)を主経路に格上げする。即断路は「明示的保存動詞+依頼形+
+    編集/読取語なし」の狭い確信ケースのみ残す(高速路として温存・完全削除はしない)。
+    (L) 加えて、意味判定に回さぬ規則ベース陽性((1-B)相当)は「保存示唆語または明示的保存動詞が
+    在る時のみ」の白リストへ絞り、それ以外(編集/読取/未知動詞のみで保存示唆が無い)は陰性とする
+    (fail-closed。未知の保存語はここで陰性化しても(K)のLLM経路で拾われる設計)。
+    (A・cmd_486是正) LLM側が例外・timeout・解析不能の時はNoneをそのまま透過する(以前はFalseに
+    倒しており「答えなかった」と「陰性と答えた」を混同していた。fail-closedは起票しない側で保つ
+    ——Noneは起票せず聞き返しに回すので安全性は変わらない)。
+    Aurora語を含まぬ全turnでLLMは呼ばぬ(冷間timeout対策・実運用で稀)。
+    (cmd_487追加AC) 決着経路を _AU_LAST_ROUTE へ併記する:
+      "null"            = Aurora語なし(Aurora無関係のturn)
+      "rule_negative"   = 規則で陰性確定(読取/既存物言及/編集動詞/依頼形なし)
+      "immediate"       = 明示的保存動詞+依頼形の即断路(True確定)
+      "llm"             = 分類器(_wants_aurora_save_llm)へ回した(結果がTrue/False/Noneいずれでも経路はllm)"""
+    q = query or ""
+    if not _AURORA_WORD_RE.search(q):                     # 1. Aurora語なし → False(不変)
+        _AU_LAST_ROUTE["route"] = None
+        return False
+    _read = _aurora_read_verb_same_clause(q)  # (D派生・cmd_486是正) 読取語もAurora語と同一節のみ(節跨ぎ対称化)
+    _saved_ref = bool(_AURORA_SAVED_REF_RE.search(q))     # 既存物への言及(完了・受身形)か
+    _benefit_done = bool(_BENEFIT_COMPLETION_NEG_RE.search(q))  # 受益・完了の複合形(既存物の再提示要求)か
+    _edit_read_verb = _aurora_edit_read_verb_same_clause(q)  # (G)(D) 編集/読取動詞・Aurora語と同一節のみ
+    # 2. 読取標識が在り、保存示唆が無い → False(不変・(1-A))
+    if _read and not _SAVE_HINT_RE.search(q):
+        _AU_LAST_ROUTE["route"] = "rule_negative"
+        return False
+    # 3. 既存物言及・受益完了 → False(不変)
+    if _saved_ref or _benefit_done:
+        _AU_LAST_ROUTE["route"] = "rule_negative"
+        return False
+    # 4. 編集/読取動詞 → False(不変・(G)。(L)で白リスト側にも絞りをかけるため二重の防壁)
+    if _edit_read_verb:
+        _AU_LAST_ROUTE["route"] = "rule_negative"
+        return False
+    # 5. 明示的保存動詞+依頼形+上記いずれの陰性標識にも該当しない → True(即断路・高確信ケースのみ)
+    if bool(_AURORA_IMMEDIATE_REQUEST_TAIL_RE.search(q)) and not _read and not _saved_ref and not _benefit_done and not _edit_read_verb:
+        _AU_LAST_ROUTE["route"] = "immediate"
+        return True
+    # 6. 上記のいずれにも該当せず、Aurora語+何らかの依頼形が在る → LLM意味判定(K)。
+    #    灰色判定を大幅拡張(旧: 読取語+保存示唆語共起のみ → 新: 依頼形が在る全turn)。
+    #    戻り値は三値のまま透過する(True/False/None・(A))。
+    if _aurora_clause_delegate_form(q):
+        _AU_LAST_ROUTE["route"] = "llm"
+        return _wants_aurora_save_llm(q)
+    # 7. 依頼形すら無い → False(不変)
+    _AU_LAST_ROUTE["route"] = "rule_negative"
+    return False
+
+
+def _wants_aurora_save_llm(query):
+    """(K・cmd_485_impl6→(A)cmd_486是正) 層1主経路の意味分類。従来は灰色(読取語+保存示唆語共起)限定の
+    フォールバックだったが、5巡の実測(軍師 subtask_485_qc5)が語彙列挙の限界を示したため、
+    『Aurora語+依頼形』全turnへ適用範囲を拡大した主経路とする。
+    プロンプトは軍師qc5実測の誤起票類型(カタカナ複合語「アップ」語中一致)を明示的に反例として
+    列挙する——qwenは素の説明だけでは「バックアップ」等を保存動詞と誤認したため(実測)。
+    戻り値は三値: True(save=true)/False(save=false)/None(判定不能=例外・timeout・JSON解析失敗・
+    keyの欠落・save値がbool型でない)。cmd_485は例外時Falseに倒し陰性固定していたが、これは
+    「分類器が答えなかった」ことと「分類器が陰性と答えた」ことを混同させ、kiyotomo4発話が
+    無言でFalse落ちする実害を招いた(cmd_486真因)。以後、判定不能は上位(_wants_aurora_save)で
+    Noneとして扱い、fail-closed(起票しない)は保ったまま聞き返しへ回す設計に切替える。"""
+    try:
+        r = _ollama_json(
+            "あなたは意図分類器。ユーザ発話が『Aurora(社内ナレッジベース)へ新規に保存/記録すること』を"
+            "頼んでいるか否かを判定せよ。"
+            "重要な注意: 「バックアップ」「セットアップ」「フォローアップ」「ブラッシュアップ」「スタンバイ」等の"
+            "カタカナ複合語は、たとえ『アップ』を含んでいても、Aurora自体への保存動詞ではない"
+            "(それぞれ意味は: バックアップ=控えを取る/元データの複製、セットアップ=準備・設定、"
+            "フォローアップ=後続対応、ブラッシュアップ=改善、スタンバイ=待機)。"
+            "これらは既存の対象を『扱う・処理する』意図であり、Auroraへの新規保存の意図ではないので save=false とせよ。"
+            "既存資料の閲覧・検索・説明・編集・整形・改名・校正・分割・統合の依頼も save=false。"
+            "『まとめて』『保存して』『登録して』『アップして』『記録して』『書きとどめて』等、Aurora自体を保存先として"
+            "明示/示唆する依頼のみ save=true。JSONのみ: {\"save\":true|false}",
+            query or "", num_predict=60)
+        o = json.loads(r)
+        if "save" not in o or not isinstance(o["save"], bool):
+            return None
+        return o["save"]
+    except Exception:
+        return None
+
+
+# (cmd_490 手当2・B-1) Casper自身の使い方を尋ねているか。三値(True|False|None・_wants_aurora_saveと同形):
+#   True  = Casper(このアシスタント自身)の使い方/アクセス方法/機能/設定を尋ねている
+#   False = 案件・タスク・人物・議事録・資料等、Casper自身以外の内容についての問い
+#   None  = 判定不能(分類器が例外/timeout/解析不能)
+# 疑問形か依頼形かの粗い判定に使う(冷間timeout対策・全turnでLLMを呼ばぬ)。
+# ★境界探索実測(将軍実測4発話中2件): 「携帯ではいりたいんだけど」「携帯で、キャスパーにはいりたい
+# です。」はいずれも疑問符が無く、依頼形(1-B・てくれ/お願い等)にも一致しない——「〜たい」の
+# 願望形(そのままの意志表明・平叙形)が疑問形/依頼形いずれの網にも掛からず素通りしていた。
+# 願望形も「アクセス方法を尋ねる」turnの自然な言い回しの一部ゆえ、依頼形の標識へ加える。
+_QUESTION_FORM_RE = re.compile(r"[？?]|かな|かしら|でしょうか|ますか|んの|の[？?]?$")
+_DESIRE_FORM_RE = re.compile(r"たい(んだ|です|んです)?(けど|が|けれど)?[。.]?$")
+_REQUEST_FORM_RE = re.compile(_ASK_DELEGATE_RE.pattern + "|" + _DESIRE_FORM_RE.pattern)
+
+
+def _grounding_state(hits, fulltext, query):
+    """材料の接地状態を三値で返す。呼出側は`is`で明示比較すること(_asks_about_casperと同形)。
+    戻り: "grounded" | "thin" | "none"
+      grounded = 関連記録が在る(通常)               → 従来通り
+      thin     = 関連記録0件だが全文だけ在る(★実害の形) → 断言を禁ずる注意書きを添える
+      none     = 材料が何も無い                      → 正直に「記録に無い」と言わせる
+    ★件数の閾値で切らない。hitsが在ればgroundedとし、過剰な沈黙を招かない(cmd_497軍師実測: 単一閾値
+    では'おはよう'のスコア1.027が実害'携帯ではいりたい'の0.545を上回り解けない。件数でも閾値でもなく
+    「材料の構造の齟齬」=hits=0なのにfullnoteが付く、で判ずる)。"""
+    if hits:
+        return "grounded"
+    return "thin" if fulltext else "none"
+
+
+_GROUNDING_NOTE = {
+    "thin": ("\n\n※この資料は問いに直接該当せぬ可能性が高い(関連記録の検索は0件であった)。"
+             "この資料に書かれておらぬことを、書かれておるかのように述べるな。"
+             "問いに答える材料が無ければ『社内の記録には見当たりませなんだ』と正直に述べよ。\n"),
+    "none": ("\n\n※今回の問いに対し社内記録から材料を取得できなんだ。"
+             "推測で手順や機能を作って述べるな。分からぬことは分からぬと申せ。\n"),
+}
+
+
+def _build_grounding_block(gstate, src, fulltext):
+    """cmd_497 第2便(欠陥B是正): 注意書き(_GROUNDING_NOTE)を fulltext の有無から独立させて注入する。
+    以前は fullnote = (...) if fulltext else "" の内側に注意書きを置いていた為、"none"
+    (fulltext無し)の時は注意書きが★永久に注入されぬ死に分岐だった。注意書きはgstateにのみ従い、
+    全文引用はfulltextにのみ従う、という2つの独立した条件で組む。
+    戻り: (gstateに対応する注意書き) + (fulltextがあれば全文引用ブロック、無ければ空文字列)"""
+    gnote = _GROUNDING_NOTE.get(gstate, "")
+    fullnote = ("\n\n## 該当資料の全文 (" + str(src) + ")\n" + fulltext[:7000]) if fulltext else ""
+    return gnote + fullnote
+
+
+def _asks_about_casper(query):
+    """Casper自身(使い方・入り方・機能・通知設定)を尋ねているかの三値判定。呼出側は必ず
+    `is True` / `is None` の明示比較で扱うこと。
+    呼出条件(冷間timeout対策): 「疑問形 or 依頼形」かつ「案件語(PJ名解決uniqueがある等)が無い」turnのみ
+    分類器へ回す。_pj_resolve(query)[0] == "unique" なら案件の問いゆえ即False(既存機構の再利用)。"""
+    q = query or ""
+    if not q:
+        return False
+    if _pj_resolve(q)[0] == "unique":                      # 案件名が一意に解決→案件の問い(Casper自身の話ではない)
+        return False
+    if not (_QUESTION_FORM_RE.search(q) or _REQUEST_FORM_RE.search(q)):
+        return False                                       # 疑問形でも依頼形でもない→対象外(LLMを呼ばぬ)
+    return _asks_about_casper_llm(q)
+
+
+# cmd_498 穴B手当1: 「そのturnに正典が要るか」を先に判じ(_asks_about_casper再利用)、要る時だけ序列を動かす。
+_CANON_SRCS = ("30_culture_rules/casper_howto.md",)   # 家老裁定: 1ファイルの為の設定機構は過剰・ハードコードで進める
+
+
+def _prioritize_canon(hits, canon_srcs=_CANON_SRCS):
+    """正典を上位へ引き上げる。捨てるのではなく【並べ替える】だけ。
+    議事録も残るゆえ、議事録が本当に要る問いでも消えない(AC4の担保)。"""
+    canon = [h for h in hits if any(s in h for s in canon_srcs)]
+    rest = [h for h in hits if h not in canon]
+    return canon + rest
+
+
+# cmd_498 第2便・欠陥A手当2: 母集合(hybrid()の戻り)に正典が0件の時は【並べ替えでは救えぬ】。
+# casper_rag.search()自体はcandidatesで拾える正典chunkがあっても、より大きな(budget超過)chunkが
+# 上位にあると break で全滅する既存の字面挙動(casper_rag.pyのアルゴリズムは触れぬ制約ゆえ、
+# 呼出側=chat_server.pyで【直接差し込む】)。cmd_490の正典直接注入と同じ思想(retrieve-then-render)。
+_CANON_INJECT_KWS = ("8443", "携帯")   # AC7判定と同じ語(このどちらかを含むchunkのみ差し込む=無関係chunk混入を防ぐ)
+_CANON_INJECT_CACHE = {"mtime": 0.0, "lines": []}
+
+
+_CANON_INJECT_FRONTMATTER_RE = re.compile(r"^(name|tags|project)\s*:\s")   # cmd_498第3便: frontmatter行を構造で判定
+
+
+def _canon_inject_lines(canon_srcs=_CANON_SRCS, kws=_CANON_INJECT_KWS, limit=2):
+    """casper_howto.md を casper_rag._chunks() と同じ切り方で読み、kws を含む chunk を
+    hits と同じ整形("[title] text")で最大 limit 件返す。ファイル不在時は空リスト(is thin/none側へ倒す)。
+    mtime ホットリロード(他の正典系機構と同型)。
+    cmd_498第3便(欠陥C是正): 「文書順の先頭」ではなく【答え(8443)を含むもの優先】で選ぶ。
+    ★frontmatter(name:/tags:/project:で始まるchunk)は手順を一切含まぬゆえ除外する(構造判定・
+    kws一致だけでは"携帯"がtagsに載っている等で誤選出される=欠陥Cの再発防止)。"""
+    try:
+        hpath = pack_paths.vault(*canon_srcs[0].split("/"))
+        m = os.path.getmtime(hpath)
+    except Exception:
+        return []
+    if m == _CANON_INJECT_CACHE["mtime"]:
+        return list(_CANON_INJECT_CACHE["lines"])
+    try:
+        title, chunks = casper_rag._chunks(hpath)
+        body = [c for c in chunks if not _CANON_INJECT_FRONTMATTER_RE.match(c)]
+        primary_kw = kws[0]   # "8443" — 答えを実際に含む語を最優先で選ぶ
+        primary = [c for c in body if primary_kw in c]
+        fallback = [c for c in body if primary_kw not in c and any(k in c for k in kws)]
+        picked = (primary + fallback)[:limit]
+        lines = [f"[{title or canon_srcs[0]}] {c}" for c in picked]
+    except Exception:
+        lines = []
+    _CANON_INJECT_CACHE.update({"mtime": m, "lines": lines})
+    return list(lines)
+
+
+def _inject_canon(hits, canon_srcs=_CANON_SRCS, kws=_CANON_INJECT_KWS):
+    """欠陥A本丸: hits(hybrid()の戻り相当)に正典が1件も無ければ、機構が直接1〜2件差し込む
+    (検索の当たり外れに頼らない)。既に正典が在れば何もしない(_prioritize_canonで足りる=退行なし)。
+    ★存在判定は canon_srcs(パス文字列)ではなく kws(AC7と同一の語)で行う——hits の行は
+    "[title] text" 形式で title を持てば src パスは行内に一切現れず(実測で発見)、
+    _prioritize_canon のパス一致判定は casper_howto.md 相手には常に不一致=二重挿入の温床になる。"""
+    if any(any(k in h for k in kws) for h in hits):
+        return hits
+    injected = _canon_inject_lines(canon_srcs, kws)
+    if not injected:
+        return hits
+    return injected + hits
+
+
+def _asks_about_casper_llm(query):
+    """(B-1実体) 軍師実測で11/11正答・揺らぎゼロ(各3回試験)を確認したプロンプトをそのまま使う。
+    戻り値は三値: True(about_casper=true)/False(about_casper=false)/None(判定不能=例外・timeout・
+    JSON解析失敗・keyの欠落・値がbool型でない)。"""
+    try:
+        r = _ollama_json(
+            "あなたは意図分類器。ユーザ発話が『Casper(このアシスタント自身)の使い方・アクセス方法・機能・設定について尋ねている』か否かだけを判定せよ。"
+            "案件・プロジェクト・タスク・人物・議事録・資料の内容についての問いはfalse。"
+            "『これ/このツール/キャスパー/Casper』が主語で、使い方・入り方・見方・できること・通知設定を問うていればtrue。"
+            "JSONのみ: {\"about_casper\":true|false}",
+            query or "", num_predict=60)
+        o = json.loads(r)
+        if "about_casper" not in o or not isinstance(o["about_casper"], bool):
+            return None
+        return o["about_casper"]
+    except Exception:
+        return None
+
+
+# (B-2/B-3) casper_howto.md(正典)のキャッシュ読取。mtimeホットリロード(digestの他機構と同型)。
+_HOWTO_CACHE = {"mtime": 0.0, "body": ""}
+
+# ★体験ガイド(Aurora・社員向けonboarding資料 doc_id 2978eda6)への導線。殿御下命 2026-08-18。
+# 【なぜ機構で足すか】正典 casper_howto.md の本文に書くだけでは、
+#   ①正典が読めなんだ時(_HOWTO_FALLBACK経路)に案内が消える
+#   ②chunk切りの当たり外れで該当節が落ちれば案内も落ちる
+# ——ゆえに「Casper自身への問い」と判じた turn には★経路によらず必ず添える。
+# 【URLを機構が持つ理由】qwenにURLを覚えさせ・生成させてはならぬ(識別子は生成でなく決定的機構で選ぶ
+#   =接地の原則)。一字違えば繋がらぬものを、弱いモデルの記憶に委ねぬ。
+_TAIKEN_GUIDE_URL = ("http://nina_notepc_02:8100/doc/casper/2026-07-21/"
+                     "casper-taiken-gaido-dekirukoto-sawatsu-temiru")
+_TAIKEN_GUIDE_LINE = (
+    "\n\n## 【体験ガイド(社内資料)への案内・機構が確定的に添える】\n"
+    "答えの末尾に、次の一文を★そのまま添えよ(URLは一字も変えるな・短縮するな):\n"
+    "「詳しくは体験ガイドを御覧くだされ → " + _TAIKEN_GUIDE_URL + " 」\n"
+    "★このURLを記憶から書き起こすな。上の文字列をそのまま写せ。")
+
+_HOWTO_FALLBACK = ("Casperの使い方について、確かな手順をただいま参照できませなんだ。"
+                   "恐れ入るが『携帯 通知 設定』等と言い換えてお尋ねくだされ。")
+
+
+def _load_casper_howto():
+    """casper_howto.md(vault:30_culture_rules)を直接読む(B-2: RAGの当たり外れに委ねぬ確定的取得)。
+    ファイル不在・読取失敗時は空文字を返す(呼出側=casper_howto_digestがB-3のフォールバックへ倒す)。"""
+    try:
+        hpath = pack_paths.vault("30_culture_rules", "casper_howto.md")
+        m = os.path.getmtime(hpath)
+    except Exception:
+        return ""
+    if m != _HOWTO_CACHE["mtime"]:
+        try:
+            _HOWTO_CACHE["body"] = open(hpath, encoding="utf-8").read().strip()
+            _HOWTO_CACHE["mtime"] = m
+        except Exception:
+            return ""
+    return _HOWTO_CACHE["body"]
+
+
+def casper_howto_digest(query):
+    """(B-2・B-3) 判定Trueのturnで、casper_howto.mdの正典を機構が【確定的に】システムへ注入する
+    (retrieve-then-render)。RAG/条件注入(_CTX_CONDITIONAL)の当たり外れに委ねぬ独立経路——
+    見出し語がkwsに一致せずとも、分類器がTrueと答えた turn には必ず注入される。
+    判定Trueだが正典が空(ファイル不在・読取失敗)の場合は、qwenに自由作文させず機構が
+    正直な文を注入する(B-3・材料ゼロ時の正直な出口)。
+    判定FalseまたはNone(分類器がtimeout等で答えられない)の場合は何も注入しない
+    (cmd_515手当1: Noneは「判定不能」であって「使い方の話である」ことを意味せぬ——
+    無関係turnへの滲出を避ける)。"""
+    about = _asks_about_casper(query)
+    if about is not True:
+        return ""   # False(無関係) または None(判定不能=timeout等) → 何も差さぬ
+    body = _load_casper_howto()
+    if body:
+        return ("\n\n## 【Casperの使い方(正典・vault: casper_howto.md)】\n" + body +
+                 "\n\n上記の手順だけで答えよ。ここに無い手順(アプリストア/招待URL/VPN/QRコード/"
+                 "IT部門への依頼/リモートデスクトップ等)を一般知識で補うな(=捏造)。"
+                 "また、上記に無い外部への問い合わせ・依頼(IT部門へのDM送信提案等)を勧めるな"
+                 "——答えは正典に在るゆえ、外部へ問い合わせる筋を提案してはならぬ。"
+                 "\n★この正典は他のいかなる定型案内(動画アップロード案内等)にも優先する。"
+                 "Casper自身の使い方を問われたturnでは、必ず上記の手順を答えよ。"
+                 # ★体験ガイドの導線は【正典が実際に読めた turn のみ】に限る(2026-08-18 巻戻し)。
+                 # 【なぜ限ったか — 実害】同日 12:41、殿の「vaultではなくDM検索して」に対し
+                 #   Casper は★体験ガイドのURLだけを返し、問いに一切答えなかった。
+                 #   about is None(判定不能)の turn にまで導線を添えたため、
+                 #   「答えの末尾に添えよ」という指示が★答えそのものを乗っ取った。
+                 # 【教訓】添え物は、本文が確かに在る時にしか添えてはならぬ。
+                 #   本文の無い出口に添えれば、添え物が本文になる。
+                 + _TAIKEN_GUIDE_LINE)
+    # ここに来るのは about is True だが本文が空(ファイル不在/読取失敗)の場合のみ
+    # (about is None は上の `if about is not True: return ""` で既に排除済み)。
+    # ★ここには導線を添えぬ。材料ゼロの正直な出口に案内を足すと、案内が答えに化ける(上記実害)。
+    return "\n\n## 【Casperの使い方】\n" + _HOWTO_FALLBACK
+
+
+# ============================================================
+# cmd_503: Aurora一覧照会・存在確認(gate方式・retrieve-then-render)
+# 実害(2026-07-31 20:21): 「Aurora内の今日アップデートした資料って何？」に対しqwenが
+# 「リアルタイムで照会できません」と自ら文言を作り、2日前のファイルを最新と称した(この文言は
+# コードのどこにも無い=qwenの捏造)。casper_tools.pyへは足さない(qwenへ渡さない)——道具を
+# 渡すだけではqwenが呼ぶ気にならねば同じ事が起きる。機構がgateで検知し、決定的に呼び、
+# 結果を整形して注入し、「上の一覧をそのまま述べよ」と命ずる一連の手当で初めて直る。
+# ============================================================
+_AURORA_LIST_RE = re.compile(r"(Aurora|オーロラ|あうろら)", re.I)
+_AURORA_LIST_INTENT_RE = re.compile(
+    r"(上が|あが|アップ|更新|追加|入っ|投稿|載っ)[^。]{0,8}(資料|ドキュメント|もの|の)|"
+    r"(資料|ドキュメント)[^。]{0,8}(一覧|リスト|何|なに|ある)")
+
+
+def _aurora_list_turn(query):
+    """Auroraの一覧照会を求めるturnか(gate方式・二値で足りる)。
+    ①Auroraを指す語 ②一覧/更新の意図 ③疑問形or依頼形 の三条件。"""
+    q = query or ""
+    if not _AURORA_LIST_RE.search(q):
+        return False
+    if not _AURORA_LIST_INTENT_RE.search(q):
+        return False
+    return bool(_QUESTION_FORM_RE.search(q) or _REQUEST_FORM_RE.search(q))
+
+
+def _resolve_since(query, today=None):
+    """相対日付をsince(YYYY-MM-DD)へ写す。機構が決定的に解く(qwenに日付を作らせない=誤りの温床)。
+    戻り: (since:str|None, label:str)  None=期間の指定なし(既定へ)。"""
+    t = today or datetime.date.today()
+    q = query or ""
+    if re.search(r"(今日|本日|きょう)", q):
+        return t.isoformat(), "本日"
+    if re.search(r"(昨日|きのう)", q):
+        return (t - datetime.timedelta(days=1)).isoformat(), "昨日"
+    if re.search(r"(今週|直近1?週)", q):
+        return (t - datetime.timedelta(days=7)).isoformat(), "直近1週間"
+    if re.search(r"(今月|直近1?ヶ?月)", q):
+        return (t - datetime.timedelta(days=30)).isoformat(), "直近1ヶ月"
+    m = re.search(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})", q)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}", m.group(0)
+    return None, ""
+
+
+def _aurora_fmt_doc_line(d):
+    ts = str(d.get("uploaded_at") or "")[:16].replace("T", " ")
+    return f"- {d.get('title') or '(無題)'}（{d.get('uploaded_by') or '不明'} / {ts}）"
+
+
+def aurora_list_digest(who, query):
+    """【Aurora一覧=gate/retrieve-then-render(cmd_503)】判定Trueのturnで list_documents を機構が
+    決定的に呼び、題・投稿者・時刻を整形して注入する。qwenには「上の一覧をそのまま述べよ」と命じ、
+    件数を数え直させない。0件時は母集合(since無しの直近1件+全体件数)を示す
+    (「無い」と「その期間に無い」を区別する・掟: 失敗とゼロを別出口へ)。"""
+    try:
+        if _aurora_list_turn(query) is not True:
+            return ""
+        if not (casper_aurora and casper_aurora.configured()):
+            return ("\n\n## 【Auroraの資料一覧】\nAuroraへの接続が現在できませなんだ。"
+                    "推測で一覧を作文するな。『現在Auroraへ接続できませぬ』と正直に述べよ。\n")
+        since, label = _resolve_since(query)
+        docs = casper_aurora.list_documents(since=since) if since else casper_aurora.list_documents()
+        if docs is None:
+            return ("\n\n## 【Auroraの資料一覧】\nAuroraへの照会に失敗しました。"
+                    "推測で一覧を作文するな。『現在Auroraへ照会できませぬ』と正直に述べよ。\n")
+        if since and label == "昨日":                       # since=昨日は昨日+本日を含む→機構側で昨日のみへ絞る
+            docs = [d for d in docs if str(d.get("uploaded_at") or "")[:10] == since]
+        if docs:
+            lines = "\n".join(_aurora_fmt_doc_line(d) for d in docs)
+            period = f"({label}分)" if label else "(全期間)"
+            return (f"\n\n## Aurora の資料一覧(機構が取得・{period})\n" + lines +
+                    "\n──\n上の一覧をそのまま述べよ。件数を数え直すな。ここに無い資料名を作文するな。"
+                    "『リアルタイムで照会できません』等、できることをできぬと述べるな(機構が今取得した)。\n")
+        # 0件: 母集合を示す(since無しで再照会し、全体件数+直近1件を添える)
+        allrows = casper_aurora.list_documents() or []
+        latest_note = ""
+        if allrows:
+            latest = max(allrows, key=lambda d: str(d.get("uploaded_at") or ""))
+            latest_note = f"\n(Aurora全体では{len(allrows)}件が登録されており、直近は「{latest.get('title')}」{str(latest.get('uploaded_at') or '')[:10]} である)"
+        period = label or "指定期間"
+        return (f"\n\n## Aurora の資料一覧(機構が取得)\n"
+                f"{period}以降にアップロードされた資料は0件でござった。" + latest_note +
+                "\n上記をそのまま述べよ(『無い』と『その期間に無い』は別物ゆえ、母集合を必ず添えて答えよ)。\n")
+    except Exception:
+        return ""
+
+
+_AURORA_EXISTS_INTENT_RE = re.compile(
+    r"(資料|ドキュメント|ノート|文書)[^。]{0,10}(ある|在る|あります|存在)|存在確認|見当たら")
+
+
+_QUOTED_SPAN_RE = re.compile(r"[『「][^』」]*[』」]")
+# 「という資料」「『題』」等、特定1件の名を挙げて問う形——一覧意図語(資料ある/資料何 等)と字面上
+# 重なっても、named formが在れば個別照会が優先(実測: 題名に「アップ」を含む資料名で誤って一覧側に
+# 分類された。「資料ある」は_AURORA_LIST_INTENT_REの「(資料)...ある」にも一致するため、語彙の
+# 排他だけでは決着せぬ——named formの有無という構造で決める)。
+_AURORA_NAMED_DOC_RE = re.compile(r"[『「][^』」]{2,}[』」]|という(資料|ドキュメント|ノート|文書)")
+
+
+def _aurora_exists_turn(query):
+    """document_existsの答えを求めるturnか(gate方式)。Aurora語+個別資料名を問う語+疑問/依頼形。
+    一覧照会(_aurora_list_turn)とは、named form(引用符付き題名/「という資料」)の有無で切り分ける——
+    「資料ある」の字面は一覧意図語(_AURORA_LIST_INTENT_RE)とも重なるため、語彙の排他だけでは
+    決着せぬ(実測: 題名に「アップ」を含む資料名で誤って一覧側に分類された)。"""
+    q = query or ""
+    if not _AURORA_LIST_RE.search(q):
+        return False
+    if not _AURORA_EXISTS_INTENT_RE.search(q):
+        return False
+    if not _AURORA_NAMED_DOC_RE.search(q):                  # 特定1件の名指しが無いなら一覧照会側へ譲る
+        return False
+    return bool(_QUESTION_FORM_RE.search(q) or _REQUEST_FORM_RE.search(q))
+
+
+def aurora_exists_digest(who, query):
+    """【Aurora存在確認=gate(cmd_503・AC2)】殿は題で問う(「◯◯という資料ある?」)ため、
+    まずlist_documentsで引きtitleの一致で探す(document_existsはslugが要るが題→slug変換は機構では
+    解けぬ・slugが既知の時のみdocument_existsを使う設計だが、本digestは題からの照会のみを扱う)。"""
+    try:
+        if _aurora_exists_turn(query) is not True:
+            return ""
+        if not (casper_aurora and casper_aurora.configured()):
+            return ("\n\n## 【Aurora資料の存在確認】\nAuroraへの接続が現在できませなんだ。"
+                    "推測で在る/無いを答えるな。『現在Auroraへ接続できませぬ』と正直に述べよ。\n")
+        allrows = casper_aurora.list_documents() or []
+        q = query or ""
+        hit = next((d for d in allrows if d.get("title") and d["title"] in q), None)
+        if not hit:
+            return ("\n\n## 【Aurora資料の存在確認(機構が照合・全" + str(len(allrows)) + "件と照合)】\n"
+                     "結論: 該当なし。\n"
+                     "──\n上記の結論のみを踏まえ「その名の資料は見当たりませなんだ」等の一言で答えよ。"
+                     "在ると答えるな。指示文自体を復唱するな。\n")
+        ts = str(hit.get("uploaded_at") or "")[:16].replace("T", " ")
+        return (f"\n\n## 【Aurora資料の存在確認(機構が照合)】\n"
+                f"『{hit.get('title')}』は在り申す。最終更新は{ts}(version {hit.get('version')})。\n"
+                "上記をそのまま述べよ。\n")
+    except Exception:
+        return ""
+
+
+# ============================================================
+# cmd_492 第2便: ゼロ照応(対象省略)の意味判定＋慎重な引き継ぎ
+# ============================================================
+# _needs_prior_context: 「対象(資料/案件/人物)を要する問いなのに、その対象が発話中に明示されていない」かの
+# 三値判定(True|False|None・_asks_about_casperと同形)。語彙表(指示語リスト)を増やす対症療法は禁止
+# (cmd_485の轍)——「進捗はどう？」のような対象省略は指示語を含まぬゆえ語彙表では原理的に捉えられぬ。
+# 呼出条件(冷間timeout対策): 機構が既に対象を確定できるturnでは分類器を呼ばない安価な前置ゲート。
+# 軍師が実測で9/9正答・15/15揺らぎゼロを確認した文面をそのまま使う。
+def _needs_prior_context(query):
+    """三値: True(対象要るが無い=引き継ぎ検討対象) / False(対象明示済 or 対象不要=話題転換/対象外) /
+    None(分類器が例外・timeout・JSON解析失敗等で判定不能)。
+    呼出側は必ず `is True` / `is None` の明示比較で扱うこと(_asks_about_casperと同じ掟)。
+    ★実測是正(cmd_492 impl2検証時発見): 軍師ブリーフはtop_source()が資料を返す場合も前置ゲートで
+    即Falseとする指示だったが、実測でtop_source()は閾値0.32のtrigram類似度ゆえ「進捗はどう？」
+    「こんにちは」「東京の人口は？」等、対象を一切名指ししない発話にも常に何らかの資料を返す
+    (実測: 9例中9例が非nullを返した)。この前置ゲートを額面通り実装すると分類器へ到達する前に
+    ほぼ全turnがFalseへ倒れ、引き継ぎ機構そのものが恒久的に無効化される(実測: 「進捗はどう？」で
+    needs=Falseとなり2便の主目的=AC4/AC1いずれも検証不能だった)。ゆえtop_source前置ゲートは
+    採用せず、閉集合(online PJ名)の確定的一致である_pj_resolveのみを安価な前置ゲートとする。"""
+    q = query or ""
+    if not q:
+        return False
+    if _pj_resolve(q)[0] == "unique":                 # 案件名が一意解決→対象明示済(既存機構の再利用・LLM呼ばず)
+        return False
+    return _needs_prior_context_llm(q)
+
+
+def _needs_prior_context_llm(query):
+    """(実体) 軍師が実測で9/9正答・15/15揺らぎゼロを確認したプロンプトをそのまま使う。
+    戻り値は三値: True(needs_context=true)/False(needs_context=false)/None(判定不能=例外・timeout・
+    JSON解析失敗・keyの欠落・値がbool型でない)。"""
+    try:
+        r = _ollama_json(
+            "あなたは意図分類器。ユーザ発話が『対象(資料・案件・人物)を必要とする問いでありながら、"
+            "その対象が発話中に明示されていない』か否かを判定せよ。"
+            "対象が発話中に明示されている(固有名・PJ名・資料名がある)ならneeds_context=false。"
+            "対象が無く直前の話題を引き継がねば答えられぬならneeds_context=true。"
+            "挨拶・雑談・一般知識の問いはfalse。JSONのみ: {\"needs_context\":true|false}",
+            query or "", num_predict=60)
+        o = json.loads(r)
+        if "needs_context" not in o or not isinstance(o["needs_context"], bool):
+            return None
+        return o["needs_context"]
+    except Exception:
+        return None
+
+
+_TOPIC_HANDOFF_FRESH_SEC = 30 * 60                    # 鮮度: 30分以内の話題のみ引き継ぐ(古い話題は引き継がない)
+
+
+def _topic_handoff(thr, who, query):
+    """引き継ぎ判定(最重要・5条件すべて満たす時のみ引き継ぐ)。
+    ①_needs_prior_context(q) is True(対象が要るのに無い)
+    ②_LAST_TOPIC[thread]が存在する
+    ③同一thread かつ 同一uid(別人の話題を引き継がない)
+    ④鮮度: tsから30分以内(古い話題は引き継がない)
+    ⑤現turnに別の対象が明示されていない(①で担保されるが二重確認)
+    打ち切る条件(いずれか1つで打ち切り・引き継がない):
+    - _needs_prior_contextがFalse(対象が明示された=話題転換)→呼出側が_LAST_TOPICを新対象で上書きする
+    - 鮮度切れ / _LAST_TOPICが無い → 引き継がず聞き返しへ
+    - Noneの場合も引き継がない(掟: 失敗とゼロを別出口へ)。
+    戻り値: 引き継ぐ対象の _LAST_TOPIC dict、または None(引き継がない=打ち切り)。"""
+    needs = _needs_prior_context(query)
+    if needs is not True:                             # False(話題転換/対象明示済)・None(判定不能)いずれも引き継がぬ
+        return None
+    topic = _LAST_TOPIC.get(thr)
+    if not topic:                                     # ②直前の話題が無い
+        return None
+    if topic.get("uid") != (who or {}).get("uid"):    # ③別人の話題は引き継がない
+        return None
+    if time.time() - float(topic.get("ts") or 0) > _TOPIC_HANDOFF_FRESH_SEC:   # ④鮮度切れ
+        return None
+    return topic
+
+
+def _pending_question_synthesis(thr, who, query):
+    """cmd_492第3便(AC3): 前turnで聞き返した(_LAST_TOPIC.kind=="pending_question")状態で、今turnに
+    対象(資料/案件/人物)が判明したなら、元の問い(pending_questionのlabel)+新対象を合成して答えさせる。
+    ★_topic_handoffと対称的だが別条件: _topic_handoffは「今turnも対象が無い」時に前対象を引き継ぐのに対し、
+    こちらは「今turnに対象が明示された」時に前turnの"問い"を引き継ぐ(今turn自体は_needs_prior_context=False
+    になる=話題転換と同型のためtopic_handoffには乗らない・ゆえ別関数として独立させる)。
+    成立条件(4つすべて): ①前turnがpending_question ②同一thread・同一uid ③鮮度30分以内
+    ④今turnに対象が新たに判明(doc/project/person いずれか1つに解決)。
+    戻り値: (合成digest文字列, 新topic dict) のタプル。不成立なら("", None)。"""
+    prev = _LAST_TOPIC.get(thr)
+    if not prev or prev.get("kind") != "pending_question":
+        return "", None
+    if prev.get("uid") != (who or {}).get("uid"):
+        return "", None
+    if time.time() - float(prev.get("ts") or 0) > _TOPIC_HANDOFF_FRESH_SEC:
+        return "", None
+    new_topic = None
+    try:
+        # 閉集合(online PJ名・人物名)の確定的一致を先に試す——top_source()は閾値0.32のtrigram類似度
+        # ゆえいかなる発話にも何らかの資料を返しがち(2便実測の既知ノイズ・_needs_prior_contextが
+        # top_source前置ゲートを不採用とした理由と同根)。PJ/人物名が一意名指しされた場合はそちらを
+        # 優先し、いずれでもない場合のみtop_source(資料名の指定)にフォールバックする。
+        _pj_st, _pj_names, _ = _pj_resolve(query)
+        if _pj_st == "unique":
+            new_topic = {"kind": "project", "key": _pj_names[0], "label": _pj_names[0]}
+        else:
+            _ppl = _resolve_persons(query)
+            if len(_ppl) == 1:
+                _puid, _pnm = _ppl[0]
+                new_topic = {"kind": "person", "key": _puid, "label": _pnm}
+            else:
+                src, fulltext = (casper_rag.top_source(query) if (casper_rag and query) else (None, None))
+                if fulltext and src:
+                    new_topic = {"kind": "doc", "key": src, "label": src}
+    except Exception:
+        new_topic = None
+    if not new_topic:
+        return "", None
+    kind = {"doc": "資料", "project": "案件", "person": "人物"}.get(new_topic.get("kind"), "対象")
+    label = new_topic.get("label") or ""
+    orig_q = prev.get("label") or ""
+    digest = (f"\n\n## 【聞き返しへの回答が判明した(機構が確定・対象は「{label}」・{kind})】\n"
+              f"直前のturnで殿に「{orig_q}」という元の問いについて対象を聞き返しており、"
+              f"今回の発言でその対象が「{label}」であると判明した。"
+              f"**元の問い「{orig_q}」を、対象「{label}」について答えよ。**"
+              "聞き返した挙句に別の話へ逸れてはならない。対象について材料が無い/読み取れない場合は、"
+              "推測で埋めず正直にその旨を述べた上で、可能な範囲で答えよ。")
+    return digest, new_topic
+
+
+def topic_handoff_digest(thr, who, query, topic=None):
+    """引き継ぎ成立時、機構が確定的に対象をsystemへ注入する(retrieve-then-render・
+    casper_howto_digestと同じ形)。5条件を満たさぬ場合は何も注入しない(無関係turnへの滲出を避ける)。
+    topic: 呼出側が既に_topic_handoff(thr,who,query)を計算済みならその結果を渡してLLM classifier
+    二重呼出を避けられる(省略時は本関数が自前で計算する・後方互換)。"""
+    if topic is None:
+        topic = _topic_handoff(thr, who, query)
+    if not topic:
+        pq_digest, _ = _pending_question_synthesis(thr, who, query)
+        return pq_digest
+    kind = {"doc": "資料", "project": "案件", "person": "人物"}.get(topic.get("kind"), "対象")
+    label = topic.get("label") or ""
+    return (f"\n\n## 【この turn の対象は「{label}」である(機構が直前の話題から確定・{kind})】\n"
+            f"殿の今回の発言には対象が明示されていないが、直前のやり取りの対象「{label}」を引き継ぐ。"
+            "**この対象について答えよ。**対象がこの資料/案件/人物であることを疑わず、また他の対象に"
+            "すり替えるな。この対象について材料が無い/読み取れない場合は、"
+            "推測で埋めず『{label}については読み取れなかった』等、正直に述べよ。".replace("{label}", label))
+
+
+def _resolve_turn_topic(query, handoff_topic, pq_new_topic, canon_turn, src_resolved):
+    """cmd_492 第1便(記録)〜第5便是正: 本turnの_LAST_TOPIC記録先を確定的に解決する(純関数・副作用なし)。
+    優先順位: ①引き継ぎ成立(handoff_topic)→前対象を維持(Noneを返し上書きさせない) ②聞き返し合成成立
+    (pq_new_topic)→新対象で上書き ③どちらも不成立→本turnを通常解決し、対象が無くneeds_prior_context=True
+    なら聞き返しturnとしてpending_questionを記録する(top_source noiseに埋もれる前に先着判定・2便実測の
+    既知ノイズ対策) ④PJ/人物いずれも一意解決せず、かつCasper自身の使い方を尋ねたturn(canon_turn=True)
+    なら記録しない(5便是正: 正典で完結して答えており、top_source()のtrigram noise=閾値0.32ゆえ無関係な
+    議事録等にも常に何か当たるを次turnへ引き継ぐ対象として記録すると、次の正当な引き継ぎ質問がその
+    無関係docへ誤誘導される退行を招く。実測: 「キャスパーって携帯で見れるの？」→top_source()が無関係な
+    mtg_17_GS検証会議.mdを返し、次の「どうやってみることが出来るの？」が誤誘導され「読み取れなかった」
+    とだけ答えて終わる退行を発見) ⑤いずれでもなければtop_source()の結果(src_resolved)をdocとして記録
+    する(従来挙動・knowledge経路のみ計算済/status経路ではNone)。"""
+    if handoff_topic:
+        return None            # 前対象は既に_LAST_TOPICに入っている・このturnでは上書きしない
+    if pq_new_topic:
+        return pq_new_topic
+    if _needs_prior_context(query) is True:
+        return {"kind": "pending_question", "key": query, "label": query}
+    _pj_st, _pj_names, _ = _pj_resolve(query)
+    if _pj_st == "unique":
+        return {"kind": "project", "key": _pj_names[0], "label": _pj_names[0]}
+    _ppl = _resolve_persons(query)
+    if len(_ppl) == 1:
+        _puid, _pnm = _ppl[0]
+        return {"kind": "person", "key": _puid, "label": _pnm}
+    if canon_turn:
+        return None
+    if src_resolved:
+        return {"kind": "doc", "key": src_resolved, "label": src_resolved}
+    return None
+
+
+# ── cmd_508 第3便(病三): 対象スロットの錨(anchor)機構 ─────────────────────────
+# 表については機構化済(deixis_table_digest「これがその表だ」)。だが接地するのは表だけで、
+# 資料・応答本文という一般対象にスロットが無い空白があった。ここはその空白を埋める。
+# ★判定はトークン照合のみでLLM classifierを使わない(brief要件)。_topic_handoff(cmd_492)とは
+# 独立の機構であり、_LAST_TOPICには一切書き込まない(既存機構への非干渉)。
+
+# 継続形の合図: 「も」で前対象へ足す／指示語(それ/あの件等、既存_DEICTIC_RE語彙を流用)／
+# 属性語だけの短い問い(「工数を教えて」「進捗はどう」等・固有名を伴わない属性名詞+定型の依頼動詞)。
+# 属性語は手書き列挙でなく「常用語(_NAME_STOP、道具/属性を表す一般名詞の集合)」を単一ソースとして使う
+# ——_NAME_STOPは元々「固有名詞でない常用語」を集めた集合であり、属性語の定義と一致する。
+# _NAME_STOPはこの関数より後方(module後半)で定義されるため、正規表現は初回呼出時に遅延構築する
+# (_build_internal_tool_scope_re と同じ作法・module load順への依存を断つ)。
+_ANCHOR_CONT_PARTICLE_RE = re.compile(r"(も|とも)\s*(教え|見せ|お願い|ください|くれ|知りたい|どう(です)?|どうな)")
+_ANCHOR_CONT_ATTR_RE = [None]        # 遅延構築のキャッシュ(1要素list=関数内でrebindせず書換える為)
+
+
+def _anchor_cont_attr_re():
+    if _ANCHOR_CONT_ATTR_RE[0] is None:
+        _vocab = sorted(_NAME_STOP | {"工数", "進捗", "状況", "状態"})
+        _ANCHOR_CONT_ATTR_RE[0] = re.compile(
+            r"^[^。、\s]{0,10}(" + "|".join(re.escape(w) for w in _vocab) + r")"
+            r"[はもを]?\s*(教え|見せ|お願い|ください|くれ|どう|どうな|知りたい)", re.I)
+    return _ANCHOR_CONT_ATTR_RE[0]
+
+
+_ANCHOR_CONT_MAXLEN = 20            # 継続形とみなす短文の上限字数(長い問いは新規の複合発話とみなし引き継がぬ)
+
+# ── cmd_510第3便(実害C): anchor型2(述語継承・対象差替) ─────────────────────
+# 型1(上記・無改変)は「対象を引き継ぎ述語を変える」(『それの工数は？』)のみを継続形と定義しており、
+# 「述語を引き継ぎ対象を差し替える」型(『kiyotomoからは？』)を構造的に排除していた(軍師実測・51/51緑が
+# 前者の宇宙だけを測っていた)。型2はこの逆方向を埋める。
+# ★述語らしき語の単一ソース: 型1が既に使っている「継続の合図語」(教え/見せ/お願い/ください/くれ/
+# どう/どうな/知りたい)をそのまま流用する(新語彙表を作らない・型1と型2で語彙が割れるのを防ぐ)。
+_ANCHOR_PREDICATE_WORD_RE = re.compile(r"(教え|見せ|お願い|ください|くれ|知りたい|どう(です)?|どうな)")
+# cmd_512第3便(手当4リスク対応): _ANCHOR_PREDICATE_WORD_REのうち「お願い/ください/くれ/知りたい」は
+# 読取・送信いずれの依頼文にも自然に付く★丁寧さの標識に過ぎず(既に_ASK_DELEGATE_RE/_REQUEST_FORM_RE側の
+# 語彙と重複)、読取か送信かを分けない。読取か送信かを分けるのは「教え(て)」「どう/どうな」の2つだけ——
+# これらは「対象の状態・内容を尋ねる」動詞であり、依頼形と組み合わさっても送信依頼にはならない
+# (「kiyotomoに今日の予定を教えて」は依頼形だが読取turn)。よって_ANCHOR_PREDICATE_WORD_REの語彙から
+# 丁寧語標識を除いた部分集合のみを流用する(新しい語彙表ではなく既存語彙の部分集合)。
+_SEND_GATE_READ_PREDICATE_RE = re.compile(r"(教え|どう(です)?|どうな)")
+_LAST_PREDICATE = {}   # thread -> 直前turnで検出された述語らしき語(str)。鮮度・スコープは_LAST_ANCHORに同居させず
+                       # 独立の薄い記録とする(型2の判定条件「直前turnに述語があった時だけ」の単一材料)。
+_DECLINE_LOG = {}      # thread -> [{"mechanism":str,"reason":str,"ts":float}]: 降車ログ(cmd_510 AC8)。
+                       # 「検討したが降りた機構とその条項」を刻む。新機構ではなく既存decision_recordの隣に置く記録先。
+
+
+def _record_decline(thr, mechanism, reason):
+    """降車ログへ一件追記する(cmd_510 AC8)。件数上限は_LAST_ANCHOR等と同じ間引き作法に揃える。"""
+    if not thr:
+        return
+    lst = _DECLINE_LOG.setdefault(thr, [])
+    lst.append({"mechanism": mechanism, "reason": reason, "ts": time.time()})
+    if len(lst) > 50:
+        del lst[:-50]
+
+
+def _record_predicate(thr, query):
+    """本turnのuser発話から『述語らしき語』を抽出し、次turnの型2判定材料として記録する(純粋な記録・
+    推測はしない)。語が無ければ何も記録しない(=次turnで型2は『直前turnに述語なし』として降りる)。"""
+    if not thr:
+        return
+    m = _ANCHOR_PREDICATE_WORD_RE.search(query or "")
+    if m:
+        _LAST_PREDICATE[thr] = m.group(0)
+        if len(_LAST_PREDICATE) > 200:
+            for _k in list(_LAST_PREDICATE)[:-200]:
+                _LAST_PREDICATE.pop(_k, None)
+    else:
+        _LAST_PREDICATE.pop(thr, None)
+
+
+def _anchor_continuation_form(query, thr=None):
+    """query が継続形か否かを判定し、型を返す(トークン照合のみ・LLM classifier不使用)。
+    戻り値: "object"(型1・対象継承/述語変更) | "predicate"(型2・述語継承/対象差替) | False(継続形でない)。
+    ★型2は過剰接地を避けるため『直前turnに述語らしき語があった時だけ』を必須条件とする(軍師リスク指摘・
+    新対象が出た時に古い述語を勝手に引き継がぬ)。鮮度30分・同一uid・同一threadの既存ガードは
+    呼出元のanchor_digestが引き続き担う(本関数はそれらを判定しない・cmd_508第3便からの分担を維持)。"""
+    q = (query or "").strip()
+    if not q or len(q) > _ANCHOR_CONT_MAXLEN:
+        return False
+    _has_new_pj = _pj_resolve(q)[0] != "none"
+    _has_new_person = bool(_resolve_persons(q))
+    if not _name_tokens(q) and not _has_new_pj and not _has_new_person:
+        # 型1(現行・無改変): 新対象の明示が一切ない→対象継承・述語変更の継続形か。
+        if _ANCHOR_CONT_PARTICLE_RE.search(q) or _DEICTIC_RE.search(q) or _anchor_cont_attr_re().search(q):
+            return "object"
+        return False
+    # ここに来るのは「新たな対象らしきものがある」turn。型1の従来判定なら一律Falseだったが、
+    # 型2の条件(新対象が解け ∧ 述語らしき語が無い ∧ 短文 ∧ 直前turnに述語あり)を満たせば述語継承とみなす。
+    if _ANCHOR_PREDICATE_WORD_RE.search(q):
+        # 述語らしき語が本turn自身にある=新規の複合発話とみなし継続形でない(型2の条件に反する)。
+        if thr is not None:
+            _record_decline(thr, "anchor_predicate_form", "本turnに述語語がある(新規発話)")
+        return False
+    _new_person_or_pj = _has_new_pj or _has_new_person
+    if not _new_person_or_pj:
+        return False   # 固有名詞トークンはあるが案件/人物いずれにも解決しなかった→型2の前提(新対象が解ける)を満たさない
+    _prior_predicate = _LAST_PREDICATE.get(thr) if thr is not None else None
+    if not _prior_predicate:
+        if thr is not None:
+            _record_decline(thr, "anchor_predicate_form", "人物名検出(直前turnに述語なし・過剰接地ガード)")
+        return False
+    return "predicate"
+
+
+_ANCHOR_FRESH_SEC = 30 * 60          # 鮮度: 30分以内の錨のみ引き継ぐ(deixis_table_digest等と同じ運用値)
+
+
+def anchor_digest(thr, who, query):
+    """『この turn の対象は直前の錨である』ことを機構が確定的に名指して注入する
+    (deixis_table_digestと同じ文法: 「これがその対象だ。問い返すな」)。
+    5条件(継続形/錨あり/同一uid/同一thread/鮮度)を満たさぬ場合は何も注入しない。
+    ★cmd_510第3便: 型2(述語継承・対象差替)の場合は、対象は本turn自身の新対象(query)であり、
+    引き継ぐのは直前turnの述語(_LAST_PREDICATE)である——型1(対象を引き継ぐ)とは逆の注入文になる。"""
+    kind2 = _anchor_continuation_form(query, thr=thr)
+    if not kind2:
+        return ""
+    if kind2 == "predicate":
+        anchor = _LAST_ANCHOR.get(thr)
+        if not anchor:
+            return ""
+        if anchor.get("uid") != (who or {}).get("uid"):
+            return ""
+        if time.time() - float(anchor.get("ts") or 0) > _ANCHOR_FRESH_SEC:
+            return ""
+        predicate = _LAST_PREDICATE.get(thr) or ""
+        return (f"\n\n## 【この turn は直前の問い「{predicate}」を、対象を差し替えて繰り返している"
+                "(機構が確定・型2=述語継承)】\n"
+                f"殿の今回の発言は新たな対象を指しているが、動詞・依頼の型「{predicate}」は直前turnと同じである。"
+                "**新たな対象について、直前と同じ種類の答えを返せ。問い返すな。**"
+                "資料に記載が無ければ、推測で埋めず『資料に無い』と正直に述べよ。")
+    # 型1(現行・無改変)
+    anchor = _LAST_ANCHOR.get(thr)
+    if not anchor:
+        return ""
+    if anchor.get("uid") != (who or {}).get("uid"):
+        return ""
+    if time.time() - float(anchor.get("ts") or 0) > _ANCHOR_FRESH_SEC:
+        return ""
+    kind = {"doc": "資料", "project": "案件", "person": "人物"}.get(anchor.get("kind"), "対象")
+    label = anchor.get("label") or ""
+    return (f"\n\n## 【この turn の対象は「{label}」である(機構が直前の対象から確定・{kind})】\n"
+            f"殿の今回の発言には対象が明示されていないが、直前で確定した対象「{label}」を引き継ぐ。"
+            "**この対象について答えよ。問い返すな。**"
+            f"資料に「{label}」についての記載が無ければ、推測で埋めず『資料に無い』と正直に述べよ。")
+
+
+def _record_anchor(thr, who, turn_topic):
+    """本turnの対象解決結果(_resolve_turn_topicが既に計算した結果を横取り)を_LAST_ANCHORへ記録する。
+    kind='pending_question'(聞き返しturn)は対象が未確定ゆえ錨として書かない。
+    新たな推測機構は追加しない(既存の決定的解決器の結果を使い回すのみ)。"""
+    if not turn_topic or turn_topic.get("kind") == "pending_question":
+        return
+    _LAST_ANCHOR[thr] = {"kind": turn_topic.get("kind"), "key": turn_topic.get("key"),
+                          "label": turn_topic.get("label"), "ts": time.time(),
+                          "uid": (who or {}).get("uid")}
+    if len(_LAST_ANCHOR) > 200:
+        for _k in list(_LAST_ANCHOR)[:-200]:
+            _LAST_ANCHOR.pop(_k, None)
+
+
+# ── cmd_510第3便(観測の機構): 再打鍵/言い換え検知 ─────────────────────────
+# Fable「gateの想像力の外側を照らす唯一の光源」。同一/同義の問いが60秒以内に再入力されたら、
+# それは既存機構のどこかが答えられなかったことの体感失敗シグナルである(殿の実測: 12:31に同じ問いを
+# 二度打っておられた)。新しい判定器は作らず、直前queryとの一致/近似のみをトークン照合で見る。
+_RETRY_WINDOW_SEC = 60
+# containment型bigram重なり率(下記_query_similarity参照)の閾値。0.64(『kiyotomoからは？』/『tetsuoからは？』
+# =別人ゆえ非再打鍶であるべき)は下回り、0.83(『DM見せて』/『DMを見せてほしい』=同義の言い換え)は上回る
+# 実測に基づき0.75へ設定(当方の実測: 別人ペア0.64 < 0.75 < 言い換えペア0.83)。
+_RETRY_SIMILARITY_THRESHOLD = 0.75
+_RETRY_LOG = {}   # thread -> {"query":str, "ts":float}: 直前queryの控え(60秒窓判定の唯一材料)
+
+
+def _query_bigrams(s):
+    can = _canonical(s or "")
+    return {can[i:i + 2] for i in range(len(can) - 1)}
+
+
+def _query_similarity(a, b):
+    """二つのqueryの近似度(0.0-1.0)。_canonical後のbigram重なり率(病五是正で使っている手法の再利用)——
+    ★containment型(分母=短い方のbigram数)を使う。『DM見せて』のような短い問いに『を』『ほしい』が
+    足された言い換え(『DMを見せてほしい』)は文字数差が大きくmax分母では過小評価されるため。"""
+    ba, bb = _query_bigrams(a), _query_bigrams(b)
+    if not ba or not bb:
+        return 1.0 if _canonical(a) == _canonical(b) else 0.0
+    return len(ba & bb) / min(len(ba), len(bb))
+
+
+def _detect_retry(thr, who, query, now=None):
+    """同一/同義の問いが60秒窓内に再入力されたかを判定する。真なら失敗イベントとして_DECLINE_LOGへも
+    刻み(降車ログと同じ器に「機構が答えられなかった」型の失敗として記録)、Trueを返す。
+    now: テスト用の時刻注入(省略時はtime.time())。"""
+    _now = now if now is not None else time.time()
+    prev = _RETRY_LOG.get(thr)
+    _RETRY_LOG[thr] = {"query": query, "ts": _now}
+    if len(_RETRY_LOG) > 200:
+        for _k in list(_RETRY_LOG)[:-200]:
+            _RETRY_LOG.pop(_k, None)
+    if not prev:
+        return False
+    if _now - float(prev.get("ts") or 0) > _RETRY_WINDOW_SEC:
+        return False
+    if _query_similarity(prev.get("query") or "", query or "") < _RETRY_SIMILARITY_THRESHOLD:
+        return False
+    _record_decline(thr, "retry_detected", f"60秒内の再打鍵/言い換え(前回={prev.get('query')!r}に近似)")
+    return True
+
+
+def retry_fallback_digest(thr, who, query, now=None):
+    """再打鍵検知後の縮退: 同じ断言を繰り返させず、生の材料(スレッド一覧そのもの)へ落とすことを
+    機構が指示する。検知しなければ何も注入しない。"""
+    if not _detect_retry(thr, who, query, now=now):
+        return ""
+    return ("\n\n## 【同じ問いの再入力を検知した(機構が確定)】\n"
+            "殿は直前とほぼ同じ問いを60秒以内に再度お尋ねである。前回と同じ断定を繰り返してはならない。"
+            "**推測や要約で答えず、材料そのもの(該当する一覧・生データ)を提示せよ。**"
+            "材料が無ければ、無いことを正直に述べよ。")
+
+
+# (B-4) 出口検問: 判定Trueのturnの応答に禁止語(捏造手順・誤った外部依頼提案)が現れたら該当行を落とす。
+# ★実測境界(将軍実測「携帯ではいりたいんだけど」他): 正典自身が「アカウント作成や招待URLは不要で、
+# 一般公開・アプリストア配信も行っていません」と★否定形で述べる——この正しい一文まで誤って
+# 引っ掛けて剥がすと、かえって正しい説明を壊す(過剰打ち消し)。禁止語の直後に否定標識
+# (不要|不要で|行っていません|ではありません|ではない|なし|必要ありません)が続く場合は
+# 捏造でなく正典由来の正しい否定文ゆえ除外する(構造で判定=列挙でなく否定文脈の有無)。
+_CASPER_HOWTO_FORBIDDEN_NEGATION_RE = re.compile(r"(不要|行っていません|ではありません|ではない|なし|必要ありません|不要で)")
+_CASPER_HOWTO_FORBIDDEN_RE = re.compile(
+    r"アプリストア|招待URL|VPN|QRコード|IT部門|リモートデスクトップ|一般公開|7/18\s*Launch|Slack|スクリーンショット共有")
+
+
+def _casper_howto_forbidden_hit(line):
+    """禁止語が行に在っても、その直後(20字以内)に否定標識が続くなら正典由来の正しい否定文とみなし
+    非該当とする(過剰打ち消し防止・実測: 「アカウント作成や招待URLは不要」を誤って剥がしていた)。"""
+    m = _CASPER_HOWTO_FORBIDDEN_RE.search(line)
+    if not m:
+        return False
+    tail = line[m.end():m.end() + 20]
+    return not _CASPER_HOWTO_FORBIDDEN_NEGATION_RE.search(tail)
+# 誤った前提に基づく実行系の提案(DM送信等の外部依頼を持ちかける文)も同じ出口検問で抑止する。
+_CASPER_HOWTO_BAD_SUGGESTION_RE = re.compile(
+    r"(IT部門|システム管理者|管理者).{0,10}(DM|連絡|送信|お送り|依頼|確認).{0,6}(しましょうか|いたしましょうか|ますか|しては|いかが)")
+
+
+def _guard_casper_howto_claims(text, query):
+    """判定Trueのturnの応答から、捏造された手順(禁止語)および誤った外部依頼の提案を出口で落とし、
+    正典の手順文へ差し替える(cmd_486の_guard_completion_claimsと同じ「出口で機構が書き換える」形)。
+    判定Falseの turnには一切手を触れない(無関係な応答を巻き込まぬ)。"""
+    if not text or _asks_about_casper(query) is not True:
+        return text
+    lines = text.splitlines()
+    kept = [ln for ln in lines
+            if not _casper_howto_forbidden_hit(ln) and not _CASPER_HOWTO_BAD_SUGGESTION_RE.search(ln)]
+    if len(kept) == len(lines):
+        return text
+    out = "\n".join(kept)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    canon = _load_casper_howto()
+    note = ("携帯からCasperに入るには、ブラウザで https://192.168.44.45:8443 を開くだけです。"
+            "iPhoneはホーム画面に追加後「🔔 通知」ボタンから許可してくだされ。" if canon else _HOWTO_FALLBACK)
+    return (out + "\n\n" + note).strip()
 
 
 def _revise_pending(action):
@@ -881,36 +2097,229 @@ def _fanout_dm_recipients(query, who, pending_actions, trace_id=None):
         summary = _action_summary("send_message", args)
         pid = _register_pending("send_message", args, who.get("uid"), summary,
                                 origin="fanout", query=query, trace_id=trace_id)
+        if pid is None:                                 # 理論上到達せぬはず(fanoutは判定スキップ)だが安全側に握る
+            continue
         pending_actions.append({"id": pid, "tool": "send_message", "args": args, "summary": summary})
         have.add(str(uid))
         added += 1
     return added
 
 
+# 通信系動詞(送信/連絡/報告等): Aurora文脈を問わず常に完了主張の検問対象(既存回帰・温存)。
+# cmd_494 2便(2): 「DM を送りました」のように動詞が「送信/お送り」でなく裸の「送り/送っ」で現れる形を追加
+# (軍師実測で取りこぼしを確認)。あくまで(1)構造的強制上書きの補助であり、これ単独に頼らない。
+_COMPLETION_VERB_COMM_RE = r"(送信|お送り|送り|送っ|DM|連絡|報告|通知|投稿)"
+# Aurora系動詞のうち、専用語(登録/起票/資料化/呼び出)は語自体がAurora文脈を含意するので無条件対象。
+_COMPLETION_VERB_AURORA_ONLY_RE = r"(アップ(ロード)?|登録|保存|起票|呼び出)"
+# 汎用動詞(作成/表示/資料化)はAurora語の要求なしでは発火させぬ——通常のチャット応答(表の作成/表示等)を
+# 誤って打ち消していた(将軍実測: 欠陥3)。Aurora文脈がある行でのみ完了主張とみなす。
+_COMPLETION_VERB_GENERIC_RE = r"(作成|資料化|ドキュメント化|表示)"
+# cmd_494 2便(2): 動詞と語尾の間に読点・引用符閉じ(』」)・助詞・空白が挟まる形を許容(軍師実測「DM を送りました」)。
+# 未来/意志形(します/送ります)も対象に追加——qwenが「これから送る」と言い切る形も完了主張と同じ構造の虚偽になり得る。
+_COMPLETION_GAP_RE = r"[^。\n]{0,8}"
+_COMPLETION_TAIL_RE = r"(ました|しました|いたしました|致しました|済み|完了しました|できました|しておきました|ます|します|いたします|致します)"
+# 読取(閲覧/検索)の完了主張は"アクション"ではない——「Auroraの資料を読みました」まで打ち消すと過剰打ち消しになる。
+_COMPLETION_READ_EXCL_RE = re.compile(r"(読み|閲覧し|検索し|見つけ|確認し|参照し)" + _COMPLETION_TAIL_RE)
+# cmd_494 4便(至急差戻): 下書き告知行(「DM下書きを作成しました」等)は"未実行を自ら明示する語"を同一行に伴う限り
+# 完了主張ではない——AC3退行の真因(軍師特定)。同一行内にこれらの語が在れば行単位で除外する
+# (cmd_486の_COMPLETION_READ_EXCL_REと同型・前例踏襲)。Aurora側の既存注記文言(「まだ実行しておりませぬ」)も
+# 同じ語群で拾える(advisory対応・二重手当て回避)。
+_COMPLETION_UNDONE_EXCL_RE = re.compile(r"まだ.{0,4}(送って|実行して)おりませぬ|下書き|承認カード|ボタンを押すと")
+
+
+_COMPLETION_COMM_RE = re.compile(_COMPLETION_VERB_COMM_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
+_COMPLETION_AURORA_ONLY_RE = re.compile(_COMPLETION_VERB_AURORA_ONLY_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
+_COMPLETION_GENERIC_RE = re.compile(_COMPLETION_VERB_GENERIC_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
+
+
+def _completion_claim_line_hit(ln):
+    """行が完了主張として打ち消し対象か。返り値: (is_hit, is_aurora_subject)。
+    汎用動詞(作成/表示/資料化)はAurora語がその行にある時のみ対象——距離を測らず行単位の文脈で判定。
+    cmd_494 3便: _guard_completion_claims(final一括処理)から切り出し、ストリーム側(_semit)でも
+    同一判定を使う(件数/一覧・出口検問/ストリーム検問を別ロジックで書かない=掟)。
+    ★cmd_494 5便: ストリーム側の保留判定はこの関数でなく_send_mention_line_hit(語彙非依存・カードの
+    有無で決着させる方式)に置き換えた。本関数はfinal一括処理(_guard_completion_claims、pending_actions
+    が空の時のみ発火するfail-closed網)専用として残す——語彙表方式そのものは今回の設計転換対象ではない。"""
+    if _COMPLETION_READ_EXCL_RE.search(ln):
+        return False, False
+    if _COMPLETION_UNDONE_EXCL_RE.search(ln):
+        return False, False
+    if _COMPLETION_COMM_RE.search(ln):
+        return True, False
+    if _COMPLETION_AURORA_ONLY_RE.search(ln):
+        return True, True
+    if _COMPLETION_GENERIC_RE.search(ln) and _AURORA_WORD_RE.search(ln):
+        return True, True
+    return False, False
+
+
+# cmd_510第2便(実害B機構化): 「DMを指す語」の単一ソース。_SEND_MENTION_RE(送信判定専用・広く緩い
+# 一次判定ゆえDM語だけを取り出すには腐っている)から切り出さず、ここで一度だけ定義し、送信側/読取側
+# (dm_threads_digest)の双方がこの定数を参照する(病五=語彙表の分岐を繰り返す轍を断つ)。
+_DM_WORD_RE = re.compile(r"(DM|dm|ディーエム|ダイレクトメッセージ|メッセージ)")
+
+# cmd_494 5便(至急差戻・軍師案(2)採用): 除外語方式(下書き/承認カード等の語を含むかで弾く)から脱却し、
+# 「送信という行為そのものに言及しているか」を広く緩く一次判定する。この判定は誤検出があってよい
+# (過剰に広く保留する方が安全側)——狙いは「弾く/通す」の精密さでなく、判定をカードの有無(_semit/
+# _flush_pendでの保留→turn終了時のpid確定を見た解放)に委ねる構造そのものにある。
+# 意志表明("〜します"型、まだ送っていない)も完了断定("〜しました"型)も同じ行為言及として一様に保留する
+# ——語彙を積み増すほど次の別語彙で抜けるcmd_485の轍(6巡した語彙表)を、除外語を足さずに断つ。
+_SEND_MENTION_RE = re.compile(
+    r"(DM|dm)|(送信|お送り|送ります|送りました|送って|送付|送りする|送る)|(連絡し|報告し|通知し|投稿し)")
+# 読取(閲覧/検索)は送信行為そのものではない——「資料を読みました」まで保留すると過剰保留になる。
+_SEND_MENTION_READ_EXCL_RE = re.compile(r"(読み|閲覧し|検索し|見つけ|確認し|参照し)(ました|します|ます)")
+
+
+def _send_mention_line_hit(ln):
+    """行が送信行為(DM等)に言及しているか——語尾の完了/意志/断定を問わず広く一次判定する(cmd_494 5便)。
+    Trueの行はここでは弾かず(打ち消しは行わず)、呼び出し側(_semit/_flush_pend)が turn 終了まで
+    保留し、_register_pendingの結果(カード成立/不成立)に応じて確定文へ機械的に差し替える。
+    ここで完了/意志/Aurora等の形を分類しないのは、分類自体が語彙表の穴を生むため
+    (軍師是正方針: 判定は文字列の形でなくカードの有無で行う)。"""
+    if _SEND_MENTION_READ_EXCL_RE.search(ln):
+        return False
+    return bool(_SEND_MENTION_RE.search(ln))
+
+
+# cmd_494 5便: ストリームで保留された送信言及行を、turn終了時のカード成立/不成立に応じて確定文へ
+# 差し替える為の正直な定型文(既存の「下書きしました。承認ボタンを押すと…」型の言い回しを踏襲)。
+_SEND_HELD_DRAFTED_MSG = ("下書きしました。画面下の承認ボタンを押すと送信されます。"
+                          "**まだ送信しておりませぬ**——お確かめの上お進みくだされ。")
+
+
+def _resolve_send_mentions(text, held_lines, pending_actions):
+    """cmd_494 5便: ストリームで_semit/_flush_pendが保留した送信言及行(held_lines、原文のqwen生成行)を、
+    final一括テキスト(text)からも同一の行単位で除去し、turn終了時に確定したpending_actionsを見て
+    ①送信系カードが1件でも成立(pid確定)→正直な下書き告知文 ②不成立→_DM_BODY_INCOMPLETE_MSG、
+    のいずれか一文に差し替える。stream_claim_held性質と同じ判定材料(pending_actionsの有無)を使い、
+    件数/一覧・ストリーム検問・final検問を別ロジックで書かない(掟)。
+    ★意志表明("〜します")も完了断定("〜しました")も_send_mention_line_hitで一様に保留された行なので、
+    ここでも一様に一文へ差し替える(語彙の形で場合分けしない)。"""
+    if not held_lines:
+        return text
+    _lines = text.splitlines(keepends=True)
+    _kept = [ln for ln in _lines if not _send_mention_line_hit(ln)]
+    text = "".join(_kept)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    _has_send_card = any((a.get("tool") or "") == "send_message" for a in (pending_actions or []))
+    note = _SEND_HELD_DRAFTED_MSG if _has_send_card else _DM_BODY_INCOMPLETE_MSG
+    return (text + "\n\n" + note).strip() if text else note
+
+
 def _guard_completion_claims(text, pending_actions):
     """P1(Fable処方・fail-closed): アクション完了主張は"真実値テキスト"。承認カード(=アクション台帳の
     レシート)が無いのに送信/報告等を断じた文を打ち消す。既成事実化を salvage の網羅性でなく構造で封じる
-    ——qwenがどんな未知の書式でツールをテキスト化しても、カードが無ければ完了主張は通さない。"""
+    ——qwenがどんな未知の書式でツールをテキスト化しても、カードが無ければ完了主張は通さない。
+    Aurora系の動詞(登録/保存/起票/呼び出)も対象——「aurora_createを呼び出しました」のようにツール名を
+    名乗る嘘も同じ構造で拾う(2026-07-30拡張・目標②本命)。
+    汎用動詞(作成/表示/資料化)はAurora文脈がある行でのみ対象とし(cmd_485差戻: 欠陥3是正)、通常チャット
+    応答(表の作成/表示等)を巻き込まぬ。差替注記の主語は実際に一致した動詞群から機構的に決定する
+    (欠陥2是正: 通信系のみ一致した時にAurora注記を出す誤りを排す)。"""
     if not text or pending_actions:                        # カードあり=台帳にレシート有り→主張は裏付く
         return text
-    if not re.search(r"(送信|お送り|DM|連絡|報告|通知|投稿|アップ(ロード)?)(しました|いたしました|済み|完了しました)", text):
+    _hits = [_completion_claim_line_hit(ln) for ln in text.splitlines()]
+    if not any(h for h, _ in _hits):
         return text
     # レシート無し＋完了主張 → 該当行を打ち消し、未実行の注記へ差替(fail-closed=疑わしきは実行済と言わせぬ)
-    text = re.sub(r"(?m)^.*(送信|お送り|DM|連絡|報告|通知|投稿|アップ(ロード)?)(しました|いたしました|済み|完了しました).*$", "", text)
+    _any_aurora = any(is_au for hit, is_au in _hits if hit)
+    _any_comm = any(hit and not is_au for hit, is_au in _hits)
+    text = "\n".join(ln for ln, (hit, _) in zip(text.splitlines(), _hits) if not hit)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return (text + "\n\n※上記アクション(送信/報告等)はまだ実行しておりませぬ。承認カードが出ておらねば、恐れ入りますがもう一度お申し付けを。").strip()
+    if _any_aurora and not _any_comm:
+        note = "※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。"
+    else:
+        # 通信系が混じる(またはAurora以外)場合は主語を固定せず汎用注記へ——事実と異なる主語を語らせぬ(欠陥2)。
+        note = "※上記アクションはまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。"
+    return (text + "\n\n" + note).strip()
+
+
+# cmd_512第1便手当6・AC8機械証明用カウンタ: _ollama_json(=LLM分類器の唯一の入口)の呼出回数を数える。
+# replay_corpus.pyがreplay前後の差分をこれで読み、規則側判定へ差し替えたことを
+# 「grepでurlopenが無い」ではなく実行時の値で証明する(間接呼出も捕捉できる)。
+_OLLAMA_JSON_CALL_COUNT = 0
+
+
+def ollama_json_call_count():
+    """現在の_ollama_json呼出累計回数を返す(AC8: replay前後の差分を機械的に取るための単一ソース)。"""
+    return _OLLAMA_JSON_CALL_COUNT
+
+
+# cmd_515手当2(軍師設計subtask_515_strategy1をそのまま実装): 推論機占有の台帳。
+# ★★呼出元それぞれの自己申告は採らぬ——推論機へ出る口は3つ(_ollama_json/ollama_chat/
+# ollama_chat_stream)あり、cmd_512の_OLLAMA_JSON_CALL_COUNTは_ollama_jsonしか数えておらず
+# 残り2つを数え忘れていた(軍師自認の穴)。3箇所すべてが通る薄い出口をここに一つ設け、
+# 呼出元はsite名を渡すだけにする(計測の責は束ねた出口が持つ・単一機構の作法)。
+# turn(=1 HTTPリクエスト=1スレッド)ごとに集計するためthreading.localへ積む
+# (ThreadingHTTPServerゆえ1turn=1スレッド。globalリストだと並行turnで混線する)。
+_LLM_CALL_LOCAL = threading.local()
+
+
+def _llm_call_turn_reset():
+    """turn(1 HTTPリクエスト)の開始時に呼ぶ。このスレッドの呼出記録を空にする。"""
+    _LLM_CALL_LOCAL.calls = []
+
+
+def _llm_call_turn_records():
+    """このturnで積まれた呼出記録一覧を返す(turn終了時にcasper_trace.emitへ載せるため)。"""
+    return list(getattr(_LLM_CALL_LOCAL, "calls", []) or [])
+
+
+def _llm_is_timeout_error(e):
+    """例外がtimeout由来か(outcomeをok/timeout/errorの三値に分ける・失敗とゼロを別出口へ・cmd_512以来の掟)。
+    urllib.request.urlopen(timeout=N)超過は socket.timeout(=TimeoutErrorの別名) を送出する。"""
+    import socket
+    return isinstance(e, (socket.timeout, TimeoutError)) or "timed out" in str(e).lower()
+
+
+def _llm_call_record(site, model, fn):
+    """推論機へ出る3つの口(_ollama_json/ollama_chat/ollama_chat_stream)が共通で通る計測の薄い出口。
+    刻む時点は送出★直前と受信★直後(リクエスト構築前でも応答parse後でもない・軍師設計の核心)。
+    outcomeはok/timeout/errorの三値(失敗とゼロを別出口へ・cmd_512以来の掟)。
+    ★観測のために新たな呼出を増やさない——既存のfn()呼出に時刻を添えるだけ(軍師risk_notes)。"""
+    t_send = time.time()
+    outcome = "error"
+    server_total_sec = server_eval_sec = None
+    try:
+        result = fn()
+        outcome = "ok"
+        if isinstance(result, dict):
+            st, se = result.get("total_duration"), result.get("eval_duration")
+            if isinstance(st, (int, float)):
+                server_total_sec = round(st / 1e9, 3)
+            if isinstance(se, (int, float)):
+                server_eval_sec = round(se / 1e9, 3)
+        return result
+    except Exception as e:
+        outcome = "timeout" if _llm_is_timeout_error(e) else "error"
+        raise
+    finally:
+        t_recv = time.time()
+        rec = {"site": site, "model": model, "t_send": round(t_send, 3), "t_recv": round(t_recv, 3),
+               "wait_sec": round(t_recv - t_send, 3), "server_total_sec": server_total_sec,
+               "server_eval_sec": server_eval_sec, "outcome": outcome}
+        calls = getattr(_LLM_CALL_LOCAL, "calls", None)
+        if calls is None:
+            calls = _LLM_CALL_LOCAL.calls = []
+        calls.append(rec)
 
 
 def _ollama_json(system, user, num_predict=400):
     """z8a を format='json' の制約デコードで呼び、JSON文字列を返す(P2ルーター/引数抽出の土台)。
     Ollamaのschema-object modeはqwenが無視する為、format='json'＋プロンプト記述スキーマを使う(実測で確実)。"""
+    global _OLLAMA_JSON_CALL_COUNT
+    _OLLAMA_JSON_CALL_COUNT += 1
     body = {"model": A.model, "stream": False, "think": False, "keep_alive": -1, "format": "json",
             # num_ctx は対話/pinger と統一(Fable): 不一致は Ollama のランナー再作成=実質再ロードで温存を壊す(冷間の真犯人)
             "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": 0},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
-    req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=40) as r:
-        return json.load(r).get("message", {}).get("content", "")
+
+    def _do():
+        req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return json.load(r)
+
+    resp = _llm_call_record("_ollama_json", A.model, _do)
+    return resp.get("message", {}).get("content", "")
 
 
 def _qwen_is_warm():
@@ -939,6 +2348,220 @@ def _looks_like_action(msg):
 _URL_RE = re.compile(r"https?://[^\s　」』)）\]】]+")
 _DM_INTENT_RE = re.compile(r"(DM|ディーエム|送っ?と?い?て|送信|送る|送って|連絡|伝え|渡(し|す|して)|共有|届け|投げ|報告|"
                            r"dropbox|ドロップボックス|リンク|納品|校了|共有)", re.I)
+# cmd_510第1便(実害A止血・層1): _DM_INTENT_RE の中で「話題としてDMに触れているだけ」の語は
+# 送信の意志を意味しない——「DMを見せて」「DMは届いておりません」のような読取turnにも
+# 普通に現れる。_turn_is_send_intent はこれらの話題語だけを除いた残りが_DM_INTENT_RE自身に
+# 当たるかで判定する(=新しい語彙表を作らず、既存の単一ソースの中の"話題語"部分だけを
+# 機械的に除外する)。
+# ★cmd_510第3便是正(軍師QC1条件1): 「共有」はここから除いた。「共有」は話題語でなく行為語であり
+# (「共有して」は送信の依頼そのもの)、「この内容をryojiに共有しておいて」のように送信語彙が
+# 「共有」しか無い依頼文で、話題語として除くと何も残らずFalse(読取)へ誤判定されていた。
+# ★軍師が最も強く警告した方向の誤り(「迷えば送信turn側へ倒せ・不快より嘘の方が重い」の逆)。
+# ★cmd_511第2便是正(軍師戦略review済・subtask_511_strategy1): 「報告」「納品」「校了」を
+# ここから除いた。これらは話題語でなく行為語である——「〜して」を付けて依頼文になる
+# (「報告して」「納品して」「校了を報告して」は送信の依頼そのもの)。「TimにQC結果を報告して」
+# 「kiyotomoに納品して」「tetsuoに校了を報告して」のように送信語彙がこれらの語しか無い
+# 依頼文で、話題語として除くと何も残らずFalse(読取)へ誤判定されていた(軍師実測)。
+# ★cmd_511追加便是正(将軍検品turn2指摘・軍師真因決着): 「連絡」もここへ加えた。「連絡」は
+# 「報告」等と同型の両義語(送信/読取いずれの文脈でも自然に現れる)であり、_DM_TOPIC_ONLY_RE
+# 側の①(行為として使える)を満たしFalse固定の話題語にはできない一方、②(裸の名詞としても
+# 地の文に現れる=「Timからの連絡」のような読取turn)も満たすため、報告/納品/校了と同じ
+# 「要接尾辞語」集合に属する。従来は_DM_INTENT_REの残存判定でしか吸収されず、裸の名詞出現
+# (「Timからの連絡」)まで送信語彙と誤認しturn2を送信turn(gate=True)と誤判定していた。
+# ★残す語は①(行為として使える=「〜して」で依頼文になる)を満たさず、②(話題として名詞で
+# 対象を指す)のみを満たす語に限る——道具の名(DM本体・dropbox・リンク)である:
+#   DM/ディーエム   … 「DMして」という動詞化はしない。常に名詞(対象)としてのみ現れる。
+#   dropbox/ドロップボックス … 固有名詞。動詞化しない。
+#   リンク          … 「リンクして」は日常語として送信依頼を意味しない(道具の名として現れる)。
+_DM_TOPIC_ONLY_RE = re.compile(r"(DM|ディーエム|dropbox|ドロップボックス|リンク)", re.I)
+
+# cmd_511第2便是正(軍師戦略review point_c裏取りで発覚・実ログ12:37:44「直近のDM見せてsorafuneの
+# 報告だと思う」で赤化を確認): 「報告」「納品」「校了」は_DM_TOPIC_ONLY_REから出したが、これらは
+# DM/dropbox/リンクと違い★裸の名詞としても文中に自然に現れる(「〜の報告だと思う」「納品状況」
+# 「校了の状況」)。裸のまま_DM_INTENT_REの残存判定に委ねると、読取turn中の地の文の名詞まで
+# 送信語彙と誤認する(実害Aの再演)。行為語として真に効くのは①(「〜して」を付けて依頼文になる)
+# の場合のみゆえ、_DM_TOPIC_ONLY_REと対称の「要接尾辞語」集合として別途持ち、
+# 依頼接尾辞が直後に付く時だけ送信語彙として認める(DM等の話題語+接尾辞と同型の構造判定)。
+# ★cmd_511追加便で「連絡」を追加(理由は上のコメント参照・turn2「Timからの連絡」の誤判定是正)。
+# ★cmd_511追加便・軍師全数検査(裁可済): 「送信」「共有」も同型の漏れと判明したため追加。
+# 「共有」はcmd_510第3便で_DM_TOPIC_ONLY_REから正しく外されたが(行為語ゆえ)、その際
+# _DM_AMBIGUOUS_VERB_ONLY_REへの転記が漏れ裸の名詞のまま残っていた——「Timからの共有、
+# ありがとう」のような読取turnの地の文が誤ってTrue(送信)判定されていた。
+# 「送信」は元から未対応(_DM_INTENT_REの裸語彙のまま)——「Timからの送信を確認」も同型の誤判定。
+# cmd_511追加便2是正(軍師QC4 verdict=CONDITIONAL_PASS・全数検査の母集合を「corpus内実例」から
+# 「_DM_INTENT_REの全語」へ拡大): 上のコメントの「対象外」判断は誤りだった。「からの<語>」の
+# 直後結合(裸名詞)としては不成立でも、_DM_INTENT_REはsearch(部分一致)であり文中のどこに現れても
+# 一致する。「Timが送ってきたDMを見せて」「Timからの届け物ある？」のように、動詞の活用形が
+# 過去形/completed表現(〜てきた/〜た/〜物 等)の一部として地の文に現れる読取turnで、
+# 依頼形(〜して/〜しといて)と区別できず送信語彙として誤判定されていた(軍師実測)。
+# 全数検査(_DM_INTENT_REの全語を「<人名>からの<語>」/「<人名>に<語>して」で機械的に走らせた)で
+# 検出: 伝え/届け/投げ/送って/送る/送っといて/渡し/渡す/渡して の9語。
+# これらは報告/納品/校了等(名詞+する)と違い★既に活用済みの動詞(て形/終止形)であり、依頼接尾辞
+# 「して」を追加結合すると非文になる(「送っといてして」)。よって同じ「要接尾辞語」構造は使えず、
+# 代わりに「動詞の直後に依頼として成立する形しか続いていないか」を正の許可リストで判定する
+# (_DM_VERB_REQUEST_TAIL_RE)。非依頼の継続表現は「てきた/た/物」等、際限なく増えうる開集合で
+# 網羅列挙は漏れの再演を招くため、依頼として成立する続き(ください/くれ/おいて/ね/よ/文末等)
+# という閉じた許可リスト側で判定する方が堅牢(軍師QC4指摘の同型再発防止)。
+_DM_AMBIGUOUS_VERB_ONLY_RE = re.compile(r"(報告|納品|校了|連絡|送信|共有)", re.I)
+# 依頼接尾辞: 「して」系(意志/完了/丁寧命令形含む)。cmd_510第1便のTOPIC語+動詞化と同型。
+_REQUEST_SUFFIX_RE = r"(して|しといて|しといてください|してください|します|しました)"
+_DM_TOPIC_WORD_AS_VERB_RE = re.compile(
+    r"(?:" + _DM_TOPIC_ONLY_RE.pattern + r")" + _REQUEST_SUFFIX_RE, re.I)
+_DM_AMBIGUOUS_WORD_AS_VERB_RE = re.compile(
+    r"(?:" + _DM_AMBIGUOUS_VERB_ONLY_RE.pattern + r")" + _REQUEST_SUFFIX_RE, re.I)
+# 既に活用済みの動詞語彙(_DM_INTENT_RE内の該当語すべて・て形/連用形/終止形いずれも含む)。
+# 残存判定(stripped)からはこの全形を除く(裸の語幹/活用形のどれで現れても話題語・両義語と
+# 同様にノイズとして扱う——依頼形かどうかは別途_dm_verb_word_as_requestのみで判定する)。
+_DM_VERB_CONJUGATED_RE = re.compile(
+    r"(送っ?と?い?て|送る|送って|伝え(て)?|渡(して|し|す)|届け(て)?|投げ(て)?)", re.I)
+# 依頼として成立する語形(て形のみ)にマッチ末尾の直後、依頼として成立する続き
+# (_DM_VERB_REQUEST_TAIL_RE)だけが来ていれば依頼形と認める。裸の語幹(伝え/届け/投げ等・
+# て形化されていない)はここでは対象外(「Timに伝え」だけでは依頼として不成立)。
+_DM_VERB_TE_FORM_RE = re.compile(r"(送っ?と?い?て|送って|伝えて|渡して|届けて|投げて)", re.I)
+_DM_VERB_REQUEST_TAIL_RE = re.compile(r"^(ください|くれ|おいて|ね|よ|[。！？\s]|$)", re.I)
+
+
+def _dm_verb_word_as_request(q):
+    """活用済み動詞語彙のて形(_DM_VERB_TE_FORM_RE)が、直後に依頼として成立する続き
+    (_DM_VERB_REQUEST_TAIL_RE)のみを伴って現れているかを判定する。「Timに送って」は
+    True、「Timが送ってきた」「送ったファイル」のように動詞へさらに活用/名詞化が続く場合はFalse。"""
+    for m in _DM_VERB_TE_FORM_RE.finditer(q):
+        if _DM_VERB_REQUEST_TAIL_RE.match(q[m.end():]):
+            return True
+    return False
+
+
+# _DM_INTENT_REの残存判定(stripped)から、報告/納品/校了の"裸の名詞出現"も除外する必要がある
+# (接尾辞判定は別途_DM_AMBIGUOUS_WORD_AS_VERB_REで拾うため、残存判定側では話題語と同様に
+# ノイズとして除いてよい)。動詞語彙(_DM_VERB_CONJUGATED_RE・て形/裸の語幹いずれも)も同様に、
+# 依頼形判定は別途_dm_verb_word_as_requestで拾うため残存判定からは除く。
+_DM_STRIP_FOR_RESIDUAL_RE = re.compile(
+    _DM_TOPIC_ONLY_RE.pattern + "|" + _DM_AMBIGUOUS_VERB_ONLY_RE.pattern + "|" +
+    _DM_VERB_CONJUGATED_RE.pattern, re.I)
+
+
+# cmd_511第1便(補集合設計への転換・軍師戦略review済subtask_511_strategy2): 接尾辞列挙方式
+# (_DM_VERB_REQUEST_TAIL_RE/_REQUEST_SUFFIX_RE)は開集合(依頼の言い回し)を閉集合と誤認する
+# 病五の再演である——「をお願い」「を頼む」「てもらえる」「てほしい」「ていただけますか」等の
+# 丁寧語形6組すべてが漏れ、送信依頼を読取と誤判定していた(将軍検品subtask_511_qc5_shogun_finding)。
+# 差出人マーカー: roster人名は解けても「〜からの」「が送っ」は宛先でなく差出人であり、
+# 「tetsuoからの報告を教えて」のような読取turnを送信と誤判定する穴を塞ぐ(軍師実測)。
+_DM_SENDER_MARKER_RE = re.compile(r"(から(の|来た|届いた|もらった|送られ)|が送っ)", re.I)
+
+
+def _dm_sender_marker_hit(q, resolved_name):
+    """★足軽2号実測是正(AC-S2掃引で発覚): _DM_SENDER_MARKER_REの列挙(の|来た|届いた|
+    もらった|送られ)は「から」の直後の続きを開集合で数え上げており、「Timから送っといてと
+    言われた件」のような自由形の伝聞(「から<動詞>と言われた」等)を漏らす。続きを列挙で
+    足すのは病五の再演ゆえ、代わりに「解決した人名(resolved_name)そのものの直後にから が
+    来ているか」という格助詞の構造で判定する(数え上げるのは"から"という助詞一つだけであり、
+    続きの形は問わない=閉じている)。"""
+    if _DM_SENDER_MARKER_RE.search(q):
+        return True
+    if resolved_name and re.fullmatch(r"[A-Za-z0-9]+", str(resolved_name)):
+        if re.search(re.escape(resolved_name) + r"から(?![^ぁ-ヿ一-龯A-Za-z0-9]*(に|へ))",
+                      q, re.I):
+            return True
+    return False
+
+
+# cmd_512第4便(手当4の依頼形3種の穴・軍師戦略review済subtask_512_strategy4): 条件(4)は
+# _QUESTION_FORM_RE/_REQUEST_FORM_REのいずれにも当たらない「してほしい」「よろしく」
+# 「願います」の3形を通さず、11語すべてがこの3形で読取へ誤って倒れていた(軍師QC2で発見)。
+# 軍師は当初、条件(4)を補集合側へ寄せる案(案B)を献策したが★自ら実装・実測し、名詞句読取
+# 6件が新規に送信誤判定される退行(「kiyotomoは元気」まで送信と判定される等)を発見して
+# ★自ら棄却した。代わりに★案D(宛先格判定)を献策・実測済み: 穴の3形と退行例を比較すると、
+# 人名の直後の格助詞が弁別子になる——「kiyotomoへ送付してほしい」は人名直後が「に/へ」
+# (宛先格)、「kiyotomoの送付状況」「kiyotomoは元気」は人名直後が「の/は」(連体・主題)。
+# 送信依頼は定義上「宛先へ向かう」行為ゆえ、宛先格の有無こそが弁別子である。
+# _dm_sender_marker_hitの対称形として設計: 数え上げるのは格助詞「に」「へ」の二つだけであり
+# 依頼の言い回し(開集合)は数えない。ただし「〜に関する/〜について」等はにが宛先格でなく
+# 連体化のため除く。
+_DATIVE_NON_ADDRESSEE_RE = re.compile(r"^(関する|関し|対する|対し|ついて|つき|おける|おいて)")
+
+
+def _dm_dative_marker_hit(q, resolved_name):
+    """解決した人名の直後の格助詞が に/へ(宛先格)であるかを見る。"""
+    if not resolved_name:
+        return False
+    for m in re.finditer(re.escape(str(resolved_name)) + r"\s*(に|へ)", q, re.I):
+        if not _DATIVE_NON_ADDRESSEE_RE.match(q[m.end():]):
+            return True
+    return False
+
+
+def _turn_is_send_intent(user_query, exclude_uid=None):
+    """cmd_510第1便(実害A止血・層1): このturnがユーザーの送信依頼か否かを、ユーザーの発話
+    (user_query)のみから一度だけ判定する。qwenの応答行を見て判定しない
+    (話題がDMである限り応答にも「DM」が現れるのは当然で、判定材料として腐っている——実害Aの真因)。
+    語彙は既存の_DM_INTENT_RE(送信意図の単一ソース)を流用し、新しい語彙表は作らない。
+    ★安全側設計(軍師裁定): 判定に迷えば必ずTrue(送信turn=従来動作)へ倒す。読取と断ずるのは
+    送信意図語彙が一つも無い時、または在ってもすべて話題語(DM等)に尽きる時だけ。
+    不快(誤って物乞い文が出る)より嘘(誤って完了詐称が通る)の方が重い。
+    ★cmd_511第2便是正: 話題語(DM等)・両義語(報告/納品/校了)いずれも、依頼接尾辞
+    (「して」等)で動詞化されている場合はTrueへ倒す(_DM_TOPIC_WORD_AS_VERB_RE/
+    _DM_AMBIGUOUS_WORD_AS_VERB_RE)。接尾辞が無い裸の名詞出現(「〜の報告だと思う」等の
+    地の文)は残存判定から除外し、他に送信語彙が無ければFalseのまま保つ
+    (実ログ12:37:44の赤化で発覚・軍師戦略review point_c)。
+    ★cmd_511追加便2是正(軍師QC4全数検査): 活用済み動詞語彙(伝え/届け/投げ/送って/送る/
+    送っといて/渡し/渡す/渡して)は、直後に依頼として成立する続きのみを伴っていれば
+    依頼形と認めTrueへ倒す(_dm_verb_word_as_request)。それ以外の続き(〜てきた/〜た/〜物等)
+    が来ていれば残存判定からも除外し、他に送信語彙が無ければFalseのまま保つ
+    (「Timが送ってきたDMを見せて」「Timからの届け物ある？」が誤ってTrueになっていた実害の是正)。
+    ★cmd_511第1便(補集合設計): roster人名が解け(_resolve_person(q, exclude=exclude_uid))、
+    _DM_INTENT_REが一致し、読取意図(_EXIST_Q_RE)が無く、差出人マーカー(_DM_SENDER_MARKER_RE)も
+    無ければ、接尾辞語彙が何であれTrueへ倒す(丁寧語形「〜をお願い」「〜ていただけますか」等、
+    接尾辞表に無い依頼形も拾う)。roster人名が解けない場合(「あの人に送っておいて」等の
+    指示語宛先)は、従来の接尾辞判定へフォールバックし「迷えば送信側」の既定を保つ
+    (軍師risks: rosterの痩せ対策)。
+    ★cmd_512第3便(手当4・門の構造是正): 上記の補集合設計は、_DM_INTENT_RE(語彙表)が
+    ★冒頭で絶対の門になっていたため、語彙表に無い語(送付/転送/展開/回覧/提出/申し送り/
+    打診/差し替え/上申/周知/配信等)は宛先が解けていても一度も適用されなかった
+    (病五=「二層のうち上の層に居残っていた」)。よって門の順序を入れ替え、
+    (1)roster人名が解ける ∧ (2)読取意図(_EXIST_Q_RE)が無い ∧ (3)差出人マーカーが無い ∧
+    (4)依頼形である(_QUESTION_FORM_RE/_REQUEST_FORM_RE・既存の単一ソース) の4条件が
+    揃えば、_DM_INTENT_REに一語も当たらずとも送信へ倒す。新しい語彙表は作らず、既に在る
+    解決器(roster)と既存の形式判定を組み替えるだけである。
+    ★リスク対応: 条件(1)〜(4)だけでは「kiyotomoに今日の予定を教えて」のような、宛先が
+    解けるだけの読取turnまで送信へ倒しかねない——「教えて」は_EXIST_Q_REの語彙に無く
+    通らない。そこで(4)をさらに「依頼形 ∧ 述語が読取語(教え/どう等)でない」まで絞る。
+    読取述語は_SEND_GATE_READ_PREDICATE_RE(教え|どう(です)?|どうな)で判定する——これは
+    cmd_508第3便で既に定義済みの_ANCHOR_PREDICATE_WORD_REの★部分集合であり新しい語彙表
+    ではない(「お願い/ください/くれ/知りたい」は読取・送信いずれの依頼文にも付く丁寧さの
+    標識に過ぎずread/send判別に使えないため除外した——全語をそのまま流用すると送信の
+    丁寧語形「〜をお願いします」まで読取側へ誤って倒れる実害があった・軍師実測)。
+    (軍師実測・AC-S2読取形6種×全語＋丁寧語形の複数文型で退行0件を確認済)。
+    ★cmd_512第4便(手当4の依頼形3種の穴是正・軍師戦略review済案D): 条件(4)は
+    _QUESTION_FORM_RE/_REQUEST_FORM_REのいずれにも当たらない「してほしい」「よろしく」
+    「願います」の3形を通さず、11語すべてがこの3形で読取へ誤って倒れていた(軍師QC2で発見)。
+    軍師は当初、条件(4)を補集合側へ寄せる案(案B)を実装・実測したが、名詞句読取6件が新規に
+    送信誤判定される退行(「kiyotomoは元気」等)を発見して自ら棄却し、代わりに案D(宛先格判定・
+    _dm_dative_marker_hit)を採用した。人名直後の格助詞が「に/へ」(宛先格)であればORで
+    条件(4)を満たす——「〜に関する/〜について」等の連体化は除く。"""
+    q = user_query or ""
+    if not q:
+        return True                          # 迷えば送信turn側(安全側)
+    _uid, _name = _resolve_person(q, exclude=exclude_uid)
+    if (_uid is not None and not _EXIST_Q_RE.search(q)
+            and not _dm_sender_marker_hit(q, _name)
+            and not _SEND_GATE_READ_PREDICATE_RE.search(q)
+            and (_QUESTION_FORM_RE.search(q) or _REQUEST_FORM_RE.search(q)
+                 or _dm_dative_marker_hit(q, _name))):
+        return True                          # 手当4(cmd_512第4便案D): 語彙表(_DM_INTENT_RE)を経由せず送信へ倒す
+    if not _DM_INTENT_RE.search(q):
+        return False                         # 送信意図語彙が一つも無い→読取と断じてよい
+    if _uid is not None and not _EXIST_Q_RE.search(q) and not _dm_sender_marker_hit(q, _name):
+        return True                          # 補集合設計: 宛先が解け読取意図も差出人マーカーも無い→送信
+    if _DM_TOPIC_WORD_AS_VERB_RE.search(q):  # 話題語が依頼接尾辞で動詞化されている→送信依頼そのもの
+        return True
+    if _DM_AMBIGUOUS_WORD_AS_VERB_RE.search(q):  # 両義語が依頼接尾辞で動詞化されている→送信依頼そのもの
+        return True
+    if _dm_verb_word_as_request(q):          # 活用済み動詞語彙が依頼として成立する続きを伴って現れている→依頼形そのもの
+        return True
+    stripped = _DM_STRIP_FOR_RESIDUAL_RE.sub("", q)  # 話題語・両義語・動詞語彙の裸出現を除いても送信語彙が残るか
+    return bool(_DM_INTENT_RE.search(stripped))
+
+
 _PW_RE = re.compile(r"(?:🔑|パス(?:ワード)?|ぱす|pw|password|ＰＷ)\s*(?:は|=|＝|:|：)?\s*"
                     r"([A-Za-z0-9][A-Za-z0-9!-/:-@\[-`{-~]{2,})", re.I)   # PWは英数字始まり(散文『パスワードで共有』を拾わない)
 # 文脈参照(『このファイル/これ/上記/先ほどの』)。発火は別途『URL無し＋DM意図＋宛先解決＋直前にURL有り』で厳重ゆえ広めで安全。
@@ -1020,6 +2643,43 @@ def _file_delivery_dm(user_msg, who, convo=None):
         args["actor_id"] = who["uid"]
     reply = (f"**{name}** 宛に、下記のDM下書きを作成しました（まだ送っておりませぬ）。↓の承認カードで確認・編集し、"
              "ボタンを押すと送信されまする。\n\n> " + body.replace("\n", "\n> "))
+    return {"tool": "send_message", "args": args, "reply": reply}
+
+
+# cmd_508 第3便(病三・E01): 『この内容をryojiに共有しておいて』——指示語(_FILE_REF_RE語彙)の指す先が
+# ファイル/URLでなく「直前の自分の応答本文」である場合の配信。_file_delivery_dmはURLの有無で
+# 分岐するため、_NOT_FILE_REF_RE(「この内容」「この話」等)に該当する語はそもそも_file_delivery_dmの
+# 対象外(意図的な設計・L1994の注記どおり)。ここがその空白を埋める——カード機構自体は正しく働いていた
+# (Fableの補正)。直すべきは「空本文でカードを立てる」ことではなく「この内容」→直前の自分の応答本文、
+# という接地の欠如。★空本文でカードを立ててはならぬ(holdout NG条件の自作)ゆえ、本文が空/取得不能なら
+# 何もせず通常経路(qwenの聞き返し)へ委ねる。
+def _own_response_delivery_dm(user_msg, who, convo=None):
+    q = user_msg or ""
+    if not _DM_INTENT_RE.search(q):
+        return None
+    if not _NOT_FILE_REF_RE.search(q):
+        return None                                       # 「この内容/この話」等でなければ本機構の対象外(通常のFILE_REF等は_file_delivery_dmへ)
+    if _URL_RE.search(q) or _DM_QUOTED_BODY_RE.search(q):
+        return None                                       # 新素材(URL/鉤括弧本文)が明示されているならそちらが正(通常経路に譲る)
+    if _looks_declarative(q) or _ASK_INTENT_RE.search(q) or _NOT_DELIVERY_RE.search(q):
+        return None                                       # 定義の共有/問いを立てる依頼/誤送訂正は別筋(_file_delivery_dmと同じ除外)
+    last_body = _clean_dm_body(_last_assistant(convo or []))
+    if not last_body.strip():
+        return None                                       # 直前に自分の応答が無い/空→空本文でカードを立てぬ(NG条件の自作を避ける)
+    q_norest = re.sub(r"(この内容|この話|その内容|その話|上記の内容|前の内容|今の内容)", " ", q)
+    uid, name = _resolve_person(q_norest, exclude=None)
+    if not uid:
+        uid, name = _fuzzy_person(q_norest)
+    if not uid:
+        return {"_choices": True,
+                "reply": "内容は把握しました。**どなた宛にお送りしましょう？** お名前を教えてくだされ"
+                         "（例: てつお／tetsuo／寺島さん 等）。"}
+    body = last_body
+    args = {"to_user_id": str(uid), "body": body}
+    if who.get("uid"):
+        args["actor_id"] = who["uid"]
+    reply = (f"**{name}** 宛に、直前の内容を下記のDM下書きとして作成しました（まだ送っておりませぬ）。"
+             "↓の承認カードで確認・編集し、ボタンを押すと送信されまする。\n\n> " + body.replace("\n", "\n> "))
     return {"tool": "send_message", "args": args, "reply": reply}
 
 
@@ -1204,25 +2864,164 @@ _NAKED_CHOICE_RE = re.compile(
     r"(送信|承認|却下|破棄)(するか|を)(選択|お選び|決め))",
     re.I)
 
+# cmd_499: 語彙を足さず「問いかけ＋列挙＋選択肢の中身の薄さ」の三条件で裸の列挙選択を構造的に捉える。
+# _NAKED_CHOICE_REが言い回し(「選択してください」等)のみを見て、「いたしますか？+①②」の列挙形を
+# 素通ししていた穴(kiyotomo殿実害2026-08-05)への手当。_NAKED_CHOICE_REは残し両輪とする。
+_ENUM_LINE_RE = re.compile(r"^\s*(?:[①-⑳]|[0-9]{1,2}\s*[.)、]|[a-zA-Z]\s*[.)])\s*(?P<body>\S.*)$")
+# 行頭のマーカー＋本文という構造で捉える(丸数字/数字ドット/英字を一網に)
 
-def _validate_choices(text, pending_actions, choices=None):
+_ASK_RE = re.compile(r"(いたしますか|しますか|ましょうか|でしょうか|いかがいたし|"
+                     r"どちら|どれ|よろしいですか)[\s　]*[？?]?\s*$", re.M)
+# 行末で問うている形(疑問符の有無を問わぬ)。行末に錨を打つことで文中の「〜しますが」等を拾わぬ
+
+_THIN_OPTION_RE = re.compile(r"^(はい|いいえ|する|しない|不要|結構|"
+                             r"お願い|やめ|中止|キャンセル)")
+# 選択肢の本文が行動の可否だけで中身を持たぬか。
+# 「はい、内容を確認して…」は"はい"で始まる=中身が無い側→捉える対象。
+# 「黒丸クロマル(Animator/Maya…)」は該当せぬ=中身を持つ側→消さぬ(候補提示は保護)。
+
+
+# ★cmd_508病四是正: 引用資料内の列挙(a)(b)(c)等)を「Casperが裸の選択を迫った」と誤認する事故への
+# 手当。列挙行の本文が注入素材(sysadd等・vault/検索結果の引用元)に文字n-gramでfuzzy一致するなら、
+# それは「引用内容」であって「選択装置」ではない——検問対象から外す。fewshot_digestの_bg型と同じ
+# 文字bigram重なりで判定する(日本語は空白無しゆえ語分割でなくn-gram)。
+_QUOTE_NGRAM_MIN_OVERLAP = 4
+
+
+def _bg(s):
+    s = re.sub(r"[\s、。・！？]", "", str(s or ""))
+    return set(s[i:i + 2] for i in range(len(s) - 1))
+
+
+def _enum_line_is_quoted(body, injected_grams):
+    if not injected_grams:
+        return False
+    bg = _bg(body)
+    if not bg:
+        return False
+    return len(bg & injected_grams) >= _QUOTE_NGRAM_MIN_OVERLAP
+
+
+def _bare_enum_choice(text, injected=""):
+    """裸の列挙選択(装置なしで①②を並べて選ばせる形)を構造で捉える。
+    三条件すべてを満たす時のみTrue:
+      ① 問いかけの行が在る(_ASK_RE)
+      ② その直後3行以内に列挙行が2件以上(_ENUM_LINE_RE)
+      ③ 列挙の本文が中身を持たぬ(_THIN_OPTION_REが過半に当たる)
+    ③が過剰検出を防ぐ要。候補提示(人名+役割等)は③で落ちるゆえ消えぬ。
+    列挙の直後性(問いかけ行から3行以内に最初の列挙行が来ること)も条件に含む。
+    ★cmd_508: 列挙本文が注入素材(injected)にfuzzy一致すれば引用とみなし、その列挙行は
+    列挙数に数えぬ(装置なし選択の判定から除外)。"""
+    if not text:
+        return False
+    injected_grams = _bg(injected) if injected else set()
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if not _ASK_RE.search(ln):
+            continue
+        enum_lines = []
+        for j in range(i + 1, min(i + 4, len(lines))):
+            m = _ENUM_LINE_RE.match(lines[j])
+            if m:
+                if _enum_line_is_quoted(m.group("body"), injected_grams):
+                    continue                            # 引用行は列挙数に数えぬ(選択装置ではない)
+                enum_lines.append(m.group("body"))
+            elif enum_lines:
+                break                                    # 列挙の連続が途切れたらそこで打ち切り
+        if len(enum_lines) < 2:
+            continue
+        thin = sum(1 for b in enum_lines if _THIN_OPTION_RE.match(b.strip()))
+        if thin * 2 >= len(enum_lines):                  # 過半が中身の薄い選択肢
+            return True
+    return False
+
+
+def _validate_choices(text, pending_actions, choices=None, injected=""):
     """【選択の出口検問=Fable Q2・不変条件①】『選択してください』等の選択要求を書くなら、必ず選択装置
     (承認カード or choices)が随伴していること。裸の選択要求(装置なし)は該当文を削除し中立な誘導へ差し替える。
-    弱モデルが『選べ』と言うだけで選択手段を出さぬ事故(殿指摘)を出口で機械的に封じる最終防壁。"""
+    弱モデルが『選べ』と言うだけで選択手段を出さぬ事故(殿指摘)を出口で機械的に封じる最終防壁。
+    cmd_499: _NAKED_CHOICE_RE(言い回し)に加え_bare_enum_choice(構造)も検問対象とする(両輪)。
+    ★cmd_508病四是正:
+      ① 列挙行が注入素材(injected)にfuzzy一致するなら引用であって選択装置ではない
+        ——_bare_enum_choiceへ渡し検問対象から外す(裸選択カウントに数えぬ)。
+      ② kept構築での導入文(_ASK_RE行)削除をやめる(箇条書きの孤児化を是正)。
+         削るのは_NAKED_CHOICE_RE該当文と、引用でない列挙行(_ENUM_LINE_RE・非引用)のみ。
+      ③ 非空の成功本文への失敗文appendを廃止。『お出しできませなんだ』は空出口専用。"""
     if not text:
         return text
     if pending_actions or choices:                          # 選択装置が随伴→正当な選択要求。素通し
         return text
-    if not _NAKED_CHOICE_RE.search(text):
+    _enum_hit = _bare_enum_choice(text, injected=injected)
+    if not (_NAKED_CHOICE_RE.search(text) or _enum_hit):
         return text
-    # 裸の選択要求: その文を落とし、選べぬ理由/次の一手へ中立に差し替える(delete+redirect)
+    injected_grams = _bg(injected) if injected else set()
+
+    def _is_naked_enum_line(p):
+        m = _ENUM_LINE_RE.match(p.strip())
+        if not m:
+            return False
+        if _enum_line_is_quoted(m.group("body"), injected_grams):
+            return False                                    # 引用行は削らぬ(孤児化防止)
+        return True
+
+    # 裸の選択要求: 該当文(_NAKED_CHOICE_RE)・引用でない列挙行(_ENUM_LINE_RE)のみ落とす。
+    # ★導入文(_ASK_RE行)はもう削らぬ——列挙が引用として保護された場合に導入だけ消えて
+    # 箇条書きが孤児化する事故(F01)を断つ。
     parts = re.split(r"(?<=[。\n])", text)
-    kept = [p for p in parts if not _NAKED_CHOICE_RE.search(p)]
+    kept = [p for p in parts
+            if not _NAKED_CHOICE_RE.search(p) and not _is_naked_enum_line(p)]
     out = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
-    if not out or len(out) < 8:
+    if not out:
         out = ("お選びいただける項目が今はございませぬ。『下書きを見せて』等とお申し付けあらば、"
                "中身つきの選択肢（承認/破棄ボタン）を機構でお出しいたす。")
     return out
+
+
+_NUM_ONLY_RE = re.compile(r"^\s*(?P<n>[①-⑳]|[0-9０-９]{1,2})\s*[.)、]?\s*$")
+_ENUM_FRESH_SEC = 30 * 60              # 鮮度: 30分以内の列挙のみ番号を突合する
+
+_CIRCLED_NUM = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def _enum_num_to_index(raw):
+    """①②③.../全角数字/半角数字いずれの表記でも1-based indexへ正規化する。不正なら None。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw in _CIRCLED_NUM:
+        return _CIRCLED_NUM.index(raw) + 1
+    try:
+        return int(raw.translate(_FULLWIDTH_DIGITS))
+    except ValueError:
+        return None
+
+
+def _resolve_number_reply(query, thr, who):
+    """直前turnの応答に列挙が在った時のみ、番号を選択とみなす(cmd_499論点c)。
+    条件(すべて満たす時のみ):
+      ① 入力が数字のみ(_NUM_ONLY_RE)
+      ② 直前turnの自分の応答が_LAST_ENUM[thr]に控えてある(30分以内・同一uid)
+      ③ 番号が列挙の範囲内
+    該当行の本文を返し、検索語でなく前turnの文脈に接ぐ指示として扱う。
+    該当せねばNoneを返し通常処理へ流す(threadを跨いで持ち越さぬ・cmd_492教訓)。"""
+    m = _NUM_ONLY_RE.match(str(query or ""))
+    if not m:
+        return None
+    idx = _enum_num_to_index(m.group("n"))
+    if not idx:
+        return None
+    rec = _LAST_ENUM.get(thr)
+    if not rec:
+        return None
+    if rec.get("uid") != (who or {}).get("uid"):          # 別人の列挙は引き継がない
+        return None
+    if time.time() - float(rec.get("ts") or 0) > _ENUM_FRESH_SEC:   # 鮮度切れ
+        return None
+    lines = rec.get("lines") or []
+    if idx < 1 or idx > len(lines):                        # 範囲外
+        return None
+    return lines[idx - 1]
 
 
 def _validate_report_html(html):
@@ -2317,7 +4116,7 @@ def verify_digest(who, query):
             subj_note = (f"\n・この問いの主語は人物『{subj_name}』。上の {subj_name} の live のみを状態の根拠にせよ。"
                          "**live に無い断定(完了/未完了/🔴/『◯◯氏の癖で〜』等の人格由来の結論化)は禁止**。"
                          "traitは読み方の手がかりであって結論ではない。裏取り材料が無ければ『現時点では未確認』と述べよ。")
-            # 主語×PJ の交差(Q3): 「marukomeでの寺島の進捗」型は、主語のそのPJ内割当を機構で確定し、
+            # 主語×PJ の交差(Q3): 「<PJ名>での寺島の進捗」型は、主語のそのPJ内割当を機構で確定し、
             # 0件なら『当該PJに未アサイン』と明言させる(『記録なし→①②③どれ?』のメニュー逃げを封じる)。
             _pst, _pnames, _ = _pj_resolve(query)
             if _pst == "unique":
@@ -2388,8 +4187,101 @@ def existence_digest(who, query):
         block = "\n".join(f"- {h}" for h in rag[:5]) if rag else "(台帳・RAG共にヒットなし)"
         return ("\n\n## 【存在確認ゲート】資料/データの有無を問う問い\n"
                 "資産台帳を引いたが該当ファイルは0件。参考(RAG):\n" + block +
-                "\n・別名(TKP↔Nina等)を変えて再照会せよ。それでも無ければ『確認できた範囲では見当たらぬ』と"
+                "\n・別名(略称↔正式名等)を変えて再照会せよ。それでも無ければ『確認できた範囲では見当たらぬ』と"
                 "留保付きで述べよ——**存在せぬファイル名を推測で書くな**。")
+    except Exception:
+        return ""
+
+
+# cmd_510第2便(実害B機構化=retrieve-then-render・existence_digestと同型): DM読取意図turnで
+# dm_threads(L3198)相当の決定的取得結果を注入する。BASE_SYSの【DM取扱い】(丙=服従命令)はFable
+# 「丙=凍結せよ」に従い残す(消せば退行の恐れ)——本digestが甲(決定的機構)として先に材料を渡すことで、
+# 丙は無害な重複指示になる(掟「服従でなく機構で強制」)。
+#
+# ゲート発火条件(二つの独立した経路・軍師戦略review point_b):
+#   経路1(人物指定つき): roster閉集合に当たる人名 ∧ DM語(_DM_WORD_RE) ∧ 読取意図(_EXIST_Q_RE)
+#   経路2(人物指定なし): DM語(_DM_WORD_RE) ∧ 読取意図(_EXIST_Q_RE・一覧要求)
+# 読取意図は既存の_EXIST_Q_RE(存在確認ゲートの疑問形判定=「ある/見せて/来てる」等)を流用し新設しない
+# ——DM読取「Timから来てると思うけど見せて」は構造的に存在確認「資料はある?」と同形の問いである。
+# 人名は必ず_resolve_person経由(roster→_person_alias_index()の順で閉集合から引く・綴りを直書きしない)。
+# rosterに無い名は経路1として解決させず経路2相当へ落ちる(cmd_508 AC2の出口検問=_guard_unrostered_person_claim
+# に人物主語化を委ねる・既存機構の再利用)。
+def dm_threads_digest(who, query):
+    """【DM読取=retrieve-then-render】dm_threadsの決定的取得結果をDM読取turnへ注入。
+    ★母集合ヘッダを機構が書く: 「DMスレッド全N件を照会。うち貴殿宛の1:1はM件。本日分はK件。」
+    ★「届いておりません」は母集合を示した後でのみ言える構造(母集合なき不在断言の禁・
+    Calendar/vault二軸で確立済の掟をDMにも適用)。
+    ★3者以上のスレッドは暫定は含める方針(殿の御意向確定待ち・dashboard 0-v参照)だが、
+    除外へ切り替える場合の構造(EXCLUDE_MULTIPARTY)を先に用意しておく。"""
+    try:
+        q = query or ""
+        if not q or not _DM_WORD_RE.search(q) or not _EXIST_Q_RE.search(q):
+            return ""
+        if not (who.get("authed") and who.get("uid") and WRITE_TOKEN and casper_mcp):
+            return ""
+        uid = who.get("uid")
+        # 経路1判定(参考記録のみ・母集合の絞り込みには使わない=1:1一覧はどの経路でも同じ全件を見せる)。
+        target_uid, target_name = _resolve_person(q, exclude=uid)
+
+        raw = casper_mcp.call_tool("get_messages", {"actor_id": int(uid)}, token=WRITE_TOKEN, actor=uid)
+        data = json.loads(raw) if (raw or "").strip().startswith("{") else {}
+        all_threads, seed_n = _partition_dm_threads(data.get("threads") or [], uid)
+        total_n = len(all_threads)
+
+        EXCLUDE_MULTIPARTY = False   # ★殿御意向確定まで暫定=含める(切替はここ一箇所)
+        onetoone, multiparty = [], []
+        for t in all_threads:
+            peers = [p for p in (t.get("participants") or []) if str(p.get("user_id")) != str(uid)]
+            (multiparty if len(peers) >= 2 else onetoone).append(t)
+        shown = onetoone if EXCLUDE_MULTIPARTY else all_threads
+        excluded_n = len(multiparty) if EXCLUDE_MULTIPARTY else 0
+
+        today = datetime.date.today().isoformat()
+        today_n = sum(1 for t in shown if str(t.get("updated_at") or "").startswith(today))
+
+        import concurrent.futures as _cf
+
+        def _chk(t):
+            try:
+                r = casper_mcp.call_tool("get_messages", {"actor_id": int(uid), "thread_id": int(t.get("thread_id"))},
+                                         token=WRITE_TOKEN, actor=uid)
+                md = json.loads(r) if (r or "").strip().startswith("{") else {}
+                return (t, md.get("messages", []))
+            except Exception:
+                return (t, [])
+        with _cf.ThreadPoolExecutor(max_workers=10) as _ex:
+            checked = list(_ex.map(_chk, shown))
+
+        header = (f"DMスレッド全{total_n}件を照会。うち貴殿宛の1:1は{len(onetoone)}件。本日分は{today_n}件。")
+        if EXCLUDE_MULTIPARTY:
+            header += f" 3者以上のスレッド{excluded_n}件は本一覧から除いた。"
+        if seed_n:
+            header += f"(うちseed/テスト投稿{seed_n}件は除外済)"
+
+        rows = []
+        for t, msgs in sorted(checked, key=lambda x: str(x[0].get("updated_at") or ""), reverse=True)[:20]:
+            peers = [p for p in (t.get("participants") or []) if str(p.get("user_id")) != str(uid)]
+            peer_names = "、".join(str(p.get("name") or p.get("user_id")) for p in peers[:3]) or "(自分)"
+            newest = max(msgs, key=lambda m: str(m.get("created_at") or m.get("ts") or ""), default={})
+            unread = _thread_is_new(uid, msgs)
+            last = str(t.get("last_message") or (newest.get("body") or newest.get("content") or ""))[:80]
+            ts = str(t.get("updated_at") or "")[:19]
+            tag = "【未読】" if unread else ""
+            rows.append(f"- {tag}{peer_names}（{ts}）: {last}")
+
+        if not rows:
+            return ("\n\n## 【DM読取=決定的照会結果(唯一の真実源)】\n" + header +
+                    "\n上記の母集合の範囲内で、該当スレッドは0件であった。"
+                    "\n・**この母集合(全" + str(total_n) + "件照会済)を示した上でのみ『届いておりません』と述べてよい**"
+                    "——母集合を示さずに不在を断ずるな。")
+
+        return ("\n\n## 【DM読取=決定的照会結果(唯一の真実源)】\n" + header + "\n"
+                + "\n".join(rows) +
+                "\n──\n・**上記のスレッド一覧だけが真実源**。ここに無いスレッドを推測で語るな。\n"
+                "・本文の詳細を問われたら get_messages で当該スレッドを取得して答えよ(このヘッダの"
+                "last行は要約であり全文ではない)。\n"
+                "・**母集合を示した後でなければ『届いておりません』とは言えぬ**——実在するスレッドを"
+                "『届いておりません』と断ずるな。")
     except Exception:
         return ""
 
@@ -2410,7 +4302,7 @@ def projects_digest(query):
             return ""
         items = json.load(open("/tmp/cal_projects.json")).get("items", [])
         online = [p for p in items if str(p.get("display_status") or "online") == "online"]
-        # 発火: 一般PJ語(_PROJ_Q_RE) or online PJ名を直接含む問い(『marukomeは今どうなってる?』等の個別PJ照会=
+        # 発火: 一般PJ語(_PROJ_Q_RE) or online PJ名を直接含む問い(『<PJ名>は今どうなってる?』等の個別PJ照会=
         # ツール呼びの漏れを防ぐ・データを注入して一覧から答えさせる)
         _name_hit = bool(_match_online_pj(query))        # 表記ゆれ耐性(カタカナ⇄ローマ字)でPJ名照合
         if not (_PROJ_Q_RE.search(query) or _name_hit):
@@ -2442,7 +4334,7 @@ def projects_digest(query):
 def entity_digest(query):
     """【実体アイデンティティ=unique解決の出口に中身を配線(Fable処方3-B)】名前解決器が unique に解けたPJの
     Calendar実レコード(正規名/期間/状態/概要)を『このPJの正体』として注入。名前から社名/意味を推測する真空を埋め、
-    marukome→丸亀製麺 の幻覚展開を断つ。閉集合(解決済み実体のみ)ゆえ軽い。unique でなければ空。"""
+    PJ名→無関係な同音語 の幻覚展開を断つ。閉集合(解決済み実体のみ)ゆえ軽い。unique でなければ空。"""
     try:
         if not query:
             return ""
@@ -2708,22 +4600,28 @@ def phase_schedule_digest(query):
         return ""
 
 
-# NINA/撮影の機材・ギアリストの問いを検知(殿指示2026-07-10)。機材語＋NINA/LED/撮影文脈のAND条件で発火。
+# 特定機材群/撮影の機材・ギアリストの問いを検知(殿指示2026-07-10)。機材語＋当該機材語/LED/撮影文脈のAND条件で発火。
 _GEAR_Q_RE = re.compile(
     r"(ギアリスト|機材|機器|装置|セットアップ|(gear|equipment).?list|"
     r"(撮影|現場|設営|施工|セット).{0,6}(必要|準備|道具|もの|物))", re.I)
 
 
 def gear_digest(query):
-    """【NINA機材=retrieve-then-render(殿指示2026-07-10)】機材/ギアリストの問いに、ops_spatial_tech.md の
+    """【特定機材群=retrieve-then-render(殿指示2026-07-10)】機材/ギアリストの問いに、ops_spatial_tech.md の
     機材節(デバイス/制御スペック＋技術スタック)を決定的に注入し、qwenが一般知識で製品名(Canon等)を上乗せするのを断つ。
-    撮影機材はiPhone/insta360/depthであってCanon等ではない=vault記載に無い機材を足させない。機材問い＋NINA文脈でなければ空。"""
+    撮影機材はiPhone/insta360/depthであってCanon等ではない=vault記載に無い機材を足させない。機材問い＋当該機材文脈でなければ空。"""
     try:
         if not query or not _GEAR_Q_RE.search(query):
             return ""
-        # Fable P2: 誤ドメイン注入回避——NINA/空間演出系の固有文脈に限定(汎用の『撮影機材』にNINA機材を真実源として被せない)
-        if not (re.search(r"(nina|ニーナ|art-?net|aurora|LED|空間演出|プロジェクションマッピング|プロマッピング|ドローンショー)", query, re.I)
-                or _pj_resolve(query)[0] == "unique"):
+        # Fable P2: 誤ドメイン注入回避——当該機材/空間演出系の固有文脈に限定(汎用の『撮影機材』に当該機材を真実源として被せない)
+        try:
+            import pack_config as _pc
+            _spatial_triggers = _pc.get("domain_triggers", {}).get("spatial_tech", []) or []
+        except Exception:
+            _spatial_triggers = []
+        _spatial_hit = bool(_spatial_triggers) and re.search(
+            "(" + "|".join(str(w) for w in _spatial_triggers) + ")", query, re.I)
+        if not (_spatial_hit or _pj_resolve(query)[0] == "unique"):
             return ""
         p = os.path.join(pack_paths.VAULT, "30_culture_rules", "ops_spatial_tech.md")
         txt = open(p, encoding="utf-8").read()
@@ -2737,7 +4635,7 @@ def gear_digest(query):
             return ""
         body = "\n\n".join(picked)[:2600]
         # 製品名はコードに書かない(vaultが真実源・掟)。指示は「上記vault記載外の製品名を足すな」の汎用形のみ(Fable P2)。
-        return ("\n\n## 【NINA/空間演出 機材の真実源(vault: ops_spatial_tech.md・確定)】\n"
+        return ("\n\n## 【特定機材群/空間演出 機材の真実源(vault: ops_spatial_tech.md・確定)】\n"
                 + body +
                 "\n──\n**機材リストは上記vault記載の機材だけで答えよ。ここに載っていない製品名(カメラ/PC/スイッチ等)を"
                 "一般知識で補完・上乗せするな(=捏造)。** 正典の詳細ファイル(SMB/X:等)がある旨は添えてよいが、機材の実体は上記が真実源。")
@@ -2812,7 +4710,7 @@ def active_tasks_digest(query):
             lines.append(f"- **{nm}**: {len(ts)}件 | 担当 {', '.join(who_names[:6])} | 締切 {due or '—'}{od}")
         return (f"\n\n## 【現在進行中(wip/工程)のタスク一覧(Calendar・確定)】\n"
                 f"全プロジェクトで進行中のタスクは計 {len(act)}件。**この一覧を根拠に答えよ。"
-                "get_today_tasks(本日締切のみ)や特定PJ(marukome等)に狭めず、全PJの進行中を示せ。"
+                "get_today_tasks(本日締切のみ)や特定PJ(<PJ名>等)に狭めず、全PJの進行中を示せ。"
                 "『動いているタスク』の問いには本一覧が答え(本日締切とは別物)。"
                 "**③提示: 曖昧な問い(『タスクは?』等)には件数・担当・締切を1つの表で併記し、"
                 "推測で1属性に絞るな。表の後に『期限順で見ますか/担当別に束ねますか』と切り口を一言添えよ**:\n"
@@ -2884,7 +4782,7 @@ def availability_digest(query):
         return ""
 
 
-# ── PJ名の表記ゆれ耐性(カタカナ⇄ローマ字): 「マルコメ」が正規名「marukome」と一致せず迷子になる綻びの汎用解 ──
+# ── PJ名の表記ゆれ耐性(カタカナ⇄ローマ字): 「カタカナ表記」が正規名「ローマ字表記」と一致せず迷子になる綻びの汎用解 ──
 _KANA2ROMA = {
     'ア': 'a', 'イ': 'i', 'ウ': 'u', 'エ': 'e', 'オ': 'o', 'カ': 'ka', 'キ': 'ki', 'ク': 'ku', 'ケ': 'ke', 'コ': 'ko',
     'サ': 'sa', 'シ': 'shi', 'ス': 'su', 'セ': 'se', 'ソ': 'so', 'タ': 'ta', 'チ': 'chi', 'ツ': 'tsu', 'テ': 'te', 'ト': 'to',
@@ -2920,6 +4818,7 @@ def _canonical(s):
     """正準スケルトン(Fable): 両側を同じ空間へ射影し、カタカナ⇄ローマ字・ヘボン/訓令・長音/促音/記号の揺れを吸収。"""
     import unicodedata
     s = unicodedata.normalize("NFKC", s or "").lower()
+    s = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)  # ひらがな→カタカナ折り畳み(病五即効分・cmd_508): 「まるこめ」がカナ/ローマ字と同一skeletonへ落ちぬ穴を塞ぐ
     s = _translit_kana_runs(s)                            # カタカナ→ローマ字(ー は除去済)
     for a, b in [("shi", "si"), ("chi", "ti"), ("tsu", "tu"), ("sha", "sya"), ("shu", "syu"),
                  ("sho", "syo"), ("cha", "tya"), ("chu", "tyu"), ("cho", "tyo"), ("ji", "zi"), ("fu", "hu")]:
@@ -3025,7 +4924,7 @@ _PERSON_COLS = ["カット", "タスク", "プロジェクト", "工程", "状�
 _NEG_EXIST_RE = re.compile(r"登録され(ていません|ておりません)|1件も(無|な)い|存在しません|見当たりません|"
                            r"(タスク|task)[^。]{0,16}(ありません|ございません)")
 # ② 部分集合への限定 = その否定は真でありうる(『未着手のタスクはありません』はmk=0なら正しい)。
-#    ①だけで撃つと、正しい文に「全49件ある」と的外れな訂正を付す(実測2026-07-27 marukome)。
+#    ①だけで撃つと、正しい文に「全49件ある」と的外れな訂正を付す(実測2026-07-27・あるPJで発生)。
 _NEG_SCOPE_RE = re.compile(r"未完了|未着手|進行中|作業中|残務|確認待ち|承認待ち|レビュー中|"
                            r"遅延|超過|本日|今日|今週|期限切れ|wip|mk|qc", re.I)
 
@@ -3107,7 +5006,7 @@ def _corpus_only_name(query):
     for tok in _name_tokens(query):
         if _pj_resolve(tok)[0] != "none":                     # Calendar に解ける名は対象外(PJ経路が正)
             continue
-        # PJ名の一部をなす語は「Calendar に無し」ではない(『ドローン』⊂『ドローン R&D  GS/NINA連携』)。
+        # PJ名の一部をなす語は「Calendar に無し」ではない(『ドローン』⊂『ドローン R&D  GS/<略称>連携』)。
         # ここを見落とすと、在るものを無いと告げる注記を自ら注入することになる。
         if any(tok.lower() in nm.lower() or _canonical(tok) in _canonical(nm) for nm in _pj_names):
             continue
@@ -3133,7 +5032,10 @@ def _corpus_only_note(query):
 
 
 def _pj_task_choices(query):
-    """特定PJのタスク要求だが名前解決が unique でない時、候補PJを選択カードで提示(無言None落ちさせない・3値のnone/ambiguous出口)。"""
+    """特定PJのタスク要求だが名前解決が unique でない時、候補PJを選択カードで提示(無言None落ちさせない・3値のnone/ambiguous出口)。
+    cmd_508第3便(病三・B02是正): 「名前らしきトークン」から依頼語彙(_PJ_TASK_RE/_STATUS_Q_RE)を差し引く。
+    依頼語彙自体がカタカナ(『タスク』『ステータス』)ゆえ、差し引かねば発話者が一度も口にしていないPJ名を
+    誤って想定し、的外れな『名前不一致』を宣告してしまう(実測B02)。残余ゼロ=引数なしの分岐を新設。"""
     if not _PJ_TASK_RE.search(query or ""):
         return None
     st, names, _ = _pj_resolve(query)
@@ -3142,8 +5044,11 @@ def _pj_task_choices(query):
     if st == "ambiguous":
         cands, prompt = names, "どのプロジェクトのタスクでしょう？下から選んでくだされ。"
     else:                                                 # none: 名前らしきトークンがある時のみ近傍候補
-        if not re.search(r"[゠-ヿA-Za-z]{2,}", query or ""):
-            return None                                   # 名前らしきものが無い=一般タスク問い→通常経路へ
+        if not _pj_name_like_residual(query):
+            return None                                   # 残余ゼロ=「引数なし」(依頼語彙のみで名前トークンが無い)。
+                                                            # ★『名前不一致』の文言は名前トークンが実在する時にしか出さぬ
+                                                            # (brief要件)ゆえ、ここは選択カードを出さず _table_card の
+                                                            # block⓪(anchorのPJ→_active_tasks_table_c)へ委ねる。
         if _corpus_only_name(query):
             return None                                   # Calendarに無くとも資料に在る名→選択カードで断ち切らず
         cands = _pj_near_candidates(query)                #   通常経路へ落とす(呼び側が _corpus_only_note を注入)
@@ -3153,6 +5058,22 @@ def _pj_task_choices(query):
     opts = [{"id": f"pjtask_{nm}", "label": f"{nm} のタスク", "preview": f"{nm} の未完了タスク一覧を表示",
              "say": f"{nm}のタスクを見せて"} for nm in cands[:6]]
     return {"prompt": prompt, "options": opts}
+
+
+def _pj_name_like_residual(query):
+    """『名前らしきトークン』のうち、依頼語彙(_PJ_TASK_RE/_STATUS_Q_RE)の一致範囲に含まれる文字を
+    差し引いた残余を返す(stoplist手書き禁止・単一ソース導出)。残余が空=名前トークンは実在しない
+    (依頼語彙自体がカタカナで名前らしく見えていただけ)。"""
+    q = query or ""
+    _covered = set()
+    for _re in (_PJ_TASK_RE, _STATUS_Q_RE):
+        for m in _re.finditer(q):
+            _covered.update(range(m.start(), m.end()))
+    out = []
+    for m in re.finditer(r"[゠-ヿA-Za-z]{2,}", q):
+        if not any(i in _covered for i in range(m.start(), m.end())):
+            out.append(m.group(0))
+    return out
 
 
 # ④ table card(Fable設計): 表は機構が真実源からテンプレ描画=LLMは表を書かず継ぎ目の修辞だけ。
@@ -3171,6 +5092,23 @@ _STATUS_Q_RE = re.compile(
     r"(タスク|作業|task).{0,10}(は\?|ある|残|何件|一覧|教え|見せ|どれ|進|担当|状況|やること)|"
     r"(残り|あと|未(完|着手)).{0,6}(タスク|作業|は|何)|何件|残件|件数|"
     r"(担当|アサイン).{0,8}(状況|一覧|は\?|誰|空き|負荷)", re.I)
+
+# cmd_501: 社内ツールが既にscopeを持つ検索(自社Vimeoライブラリ等)を、外部Web検索の発火判定から除外する。
+# 「Vimeoの動画を探して」は"外の事を尋ねる形"に見えるが、実際は既存vimeo_search tool(qwen呼出)が担うべき
+# 内部検索であり、外部Web検索(casper_web)が横取りすべきでない(実測2026-08-07で誤発火を確認)。
+# ★cmd_508病五: 手書き語彙(vimeo等)から道具台帳(casper_tool_ledger)の名詞導出へ変更。
+# 台帳未読込(import失敗)時のみ旧来の固定語彙にfail-soft(挙動を壊さぬ)。
+def _build_internal_tool_scope_re():
+    try:
+        vocab = casper_tool_ledger.self_scoped_search_vocab() if casper_tool_ledger else set()
+    except Exception:
+        vocab = set()
+    if not vocab:
+        vocab = {"vimeo", "ヴィメオ", "ビメオ"}                     # fail-soft: 台帳不在時の既定挙動を維持
+    return re.compile("(" + "|".join(re.escape(w) for w in sorted(vocab)) + ")", re.I)
+
+
+_INTERNAL_TOOL_SCOPE_RE = _build_internal_tool_scope_re()
 
 _STALL_LIST_RE = re.compile(
     r"(停滞|滞留|止ま(って|った)|溜ま(って|った)|たまって).{0,8}(FB|ＦＢ|確認|チェック|検収|レビュー)|"
@@ -3542,8 +5480,80 @@ def _minutes_card(query, who):
             "fb_ready": True}                           # 末端①開通(2026-07-23): FB→SHOTスレッド投稿はCalendar経路(get_project_tasks→thread_id→/api/thread/post)で稼働
 
 
-def _table_card(query, who):
-    """一覧意図(進行中タスク/PJ)を機構で表カード化。返り=table dict or None。個別PJ照会(marukomeは?)は散文ゆえ対象外。"""
+def _active_tasks_table_c(items, due_note_fn):
+    """全PJ横断の進行中タスクtable_card(母集合つき・retrieve-then-render)。
+    cmd_508第3便(病三・B02): 元は _ACTIVE_TASK_Q_RE 一致時のみ呼ばれていたが、PJ名を伴わない
+    タスク一覧要求(『各タスクのステータスを見せて』等・名前トークン残余ゼロ)からも呼べるよう
+    共有関数として抜き出した(単一機構の再利用・新規ロジックの発明ではない)。"""
+    try:
+        tasks = [t for t in _all_tasks() if _task_is_moving(t)]
+    except Exception:
+        tasks = []
+    if not tasks:
+        return None
+    pm = {p.get("id"): p.get("name") for p in items}
+    due_m = {p.get("id"): str(p.get("end_date") or "")[:10] for p in items}
+    st_m = {p.get("id"): p.get("status") for p in items}     # PJ status(超過判定にstatusを渡す為)
+    try:
+        um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+              for u in casper_tools._get("/users?limit=200").get("items", [])}
+    except Exception:
+        um = {}
+    import collections
+    byp = collections.defaultdict(list)
+    for t in tasks:
+        byp[t.get("project_id")].append(t)
+    rows = []
+    for pid, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
+        who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
+        due = due_m.get(pid, "")
+        rows.append([pm.get(pid, pid or "?"), len(ts), ", ".join(who_names[:6]), due, due_note_fn(due, st_m.get(pid))])
+    return {"title": f"進行中タスク（全社 計{len(tasks)}件）", "columns": ["プロジェクト", "件数", "担当", "締切", "状況"],
+            "rows": rows, "sortable": True, "numeric_cols": [1], "name_col": 0,
+            "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
+
+
+def _one_pj_tasks_table_c(nm, online):
+    """単一PJ(nm)のタスク一覧table_card(母集合つき)。元は block⓪のunique分岐に直書きだったが、
+    cmd_508第3便(病三・B02)のanchor経由(『引数なし』時にanchorのPJを引き継ぐ)からも呼べるよう
+    共有関数として抜き出した(単一機構の再利用)。返り=table dict or None(該当PJにタスクが無ければNone)。"""
+    pid = next((p.get("id") for p in online if p.get("name") == nm), None)
+    try:
+        tks = [t for t in _all_tasks() if t.get("project_id") == pid]
+    except Exception:
+        tks = []
+    if not tks:
+        return None
+    try:
+        um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
+              for u in casper_tools._get("/users?limit=200").get("items", [])}
+    except Exception:
+        um = {}
+    act = [t for t in tks if _task_is_moving(t)]   # 完了判定はハードコードせず _task_is_moving に寄せる(API単一ソース)
+    shown = act or tks                        # 未完了優先・無ければ全件
+    shown = sorted(shown, key=lambda t: str(t.get("due_date") or "9999"))
+    rows = []
+    for t in shown[:60]:
+        due = str(t.get("due_date") or "")[:10]
+        rows.append([t.get("name") or t.get("title") or "?", t.get("type") or "",
+                     um.get(t.get("assigned_to"), "未割当"),
+                     t.get("status_label") or t.get("status") or "", due,
+                     _due_note_c(due, t.get("status"), datetime.date.today(), "task", t.get("status_category"))])
+    _hidden = (len(tks) - len(act)) if act else 0    # footerの嘘を断つ: 全件表示時は非表示0
+    _foot = "Calendar 確定データ。列見出しクリックで並べ替え。"
+    if _hidden:
+        _foot += f" 完了 {_hidden}件は非表示。"
+    if len(shown) > 60:
+        _foot += "（多いため上位60件）"
+    _tl = (f"{nm} のタスク（未完了 {len(act)}件 / 全{len(tks)}件）" if act
+           else f"{nm} のタスク（全{len(tks)}件）")
+    return {"title": _tl, "columns": ["タスク", "工程", "担当", "状態", "締切", ""],
+            "rows": rows, "sortable": True, "numeric_cols": [], "footer": _foot}
+
+
+def _table_card(query, who, thr=None):
+    """一覧意図(進行中タスク/PJ)を機構で表カード化。返り=table dict or None。個別PJ照会(<PJ名>は?)は散文ゆえ対象外。
+    thr: cmd_508第3便(病三・B02)の無引数分岐(anchorのPJ有無)にのみ使う(省略可・後方互換)。"""
     q = query or ""
     try:
         items = json.load(open("/tmp/cal_projects.json")).get("items", [])
@@ -3595,7 +5605,7 @@ def _table_card(query, who):
     # ⓪-b 人物の手持ち(『Timは今なにしてる？』『鈴木の担当タスク』) — 人が解ければ assignee×未完了 を機構で描く。
     #    殿ログ2026-07-27 16:33 の実害: roster に tim=uid42 が在るのに人物ファセットの経路が無く、RAGへ流れて
     #    出口で全消し→「うまくお答えできませなんだ」。集合判断(誰が何を持つか)はLLMでなく機構の仕事(Fable)。
-    #    問いが PJ に unique 解決する時は PJ 側を優先(『marukomeのタスク』を人と読み違えぬ)。
+    #    問いが PJ に unique 解決する時は PJ 側を優先(『<PJ名>のタスク』を人と読み違えぬ)。
     # URLは人物解決の毒(実測2026-07-27: 資料URL '/doc/casper/…' の 'casper' を人物と解いて
     # 「Casper の手持ち」表を出した)。既存の作法どおり URL を除いてから人を解く。
     # 定義/資料の共有は問いではないゆえ、宣言に見える本文では表を出さぬ。
@@ -3636,73 +5646,27 @@ def _table_card(query, who):
                         "columns": _PERSON_COLS,
                         "rows": rows, "sortable": True, "numeric_cols": [], "footer": _foot}
 
-    # ⓪ 特定PJのタスク一覧(『マルコメのタスク見せて』等) — 名前解決器で unique に解けた時のみ表を描く
+    # ⓪ 特定PJのタスク一覧(『<PJ名>のタスク見せて』等) — 名前解決器で unique に解けた時のみ表を描く
     #    (曖昧/不在は None を返し、呼び側が選択カード/近傍候補で拾う=無言None落ちさせない・Fable)
     if _PJ_TASK_RE.search(q):
         st, _pjs, _path = _pj_resolve(q)
         if st == "unique":
-            nm = _pjs[0]
-            pid = next((p.get("id") for p in online if p.get("name") == nm), None)
-            try:
-                tks = [t for t in _all_tasks() if t.get("project_id") == pid]
-            except Exception:
-                tks = []
-            if tks:
-                try:
-                    um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
-                          for u in casper_tools._get("/users?limit=200").get("items", [])}
-                except Exception:
-                    um = {}
-                act = [t for t in tks if _task_is_moving(t)]   # 完了判定はハードコードせず _task_is_moving に寄せる(API単一ソース)
-                shown = act or tks                        # 未完了優先・無ければ全件
-                shown = sorted(shown, key=lambda t: str(t.get("due_date") or "9999"))
-                rows = []
-                for t in shown[:60]:
-                    due = str(t.get("due_date") or "")[:10]
-                    rows.append([t.get("name") or t.get("title") or "?", t.get("type") or "",
-                                 um.get(t.get("assigned_to"), "未割当"),
-                                 t.get("status_label") or t.get("status") or "", due,
-                                 _due_note(due, t.get("status"), "task", t.get("status_category"))])
-                _hidden = (len(tks) - len(act)) if act else 0    # footerの嘘を断つ: 全件表示時は非表示0
-                _foot = "Calendar 確定データ。列見出しクリックで並べ替え。"
-                if _hidden:
-                    _foot += f" 完了 {_hidden}件は非表示。"
-                if len(shown) > 60:
-                    _foot += "（多いため上位60件）"
-                _n = len(act) if act else len(tks)
-                _tl = (f"{nm} のタスク（未完了 {len(act)}件 / 全{len(tks)}件）" if act
-                       else f"{nm} のタスク（全{len(tks)}件）")
-                return {"title": _tl, "columns": ["タスク", "工程", "担当", "状態", "締切", ""],
-                        "rows": rows, "sortable": True, "numeric_cols": [], "footer": _foot}
+            _t = _one_pj_tasks_table_c(_pjs[0], online)
+            if _t:
+                return _t
+        elif st == "none" and not _pj_name_like_residual(q):
+            # cmd_508第3便(病三・B02): 依頼語彙(_PJ_TASK_RE/_STATUS_Q_RE)を差し引いた残余が空=
+            # 名前トークンは実在しない(=引数なし)。anchorのPJがあればそれを、無ければ全PJ横断を描く。
+            _anc = _LAST_ANCHOR.get(thr) if thr else None
+            if _anc and _anc.get("kind") == "project" and _anc.get("label"):
+                _t = _one_pj_tasks_table_c(_anc["label"], online)
+                if _t:
+                    return _t
+            return _active_tasks_table_c(items, _due_note)
 
     # ① 進行中タスク一覧(件数/担当/締切) — retrieve-then-render を表カードに
     if _ACTIVE_TASK_Q_RE.search(q):
-        try:
-            tasks = [t for t in _all_tasks() if _task_is_moving(t)]
-        except Exception:
-            tasks = []
-        if not tasks:
-            return None
-        pm = {p.get("id"): p.get("name") for p in items}
-        due_m = {p.get("id"): str(p.get("end_date") or "")[:10] for p in items}
-        st_m = {p.get("id"): p.get("status") for p in items}     # PJ status(超過判定にstatusを渡す為)
-        try:
-            um = {u["id"]: (u.get("username") or u.get("name") or u["id"])
-                  for u in casper_tools._get("/users?limit=200").get("items", [])}
-        except Exception:
-            um = {}
-        import collections
-        byp = collections.defaultdict(list)
-        for t in tasks:
-            byp[t.get("project_id")].append(t)
-        rows = []
-        for pid, ts in sorted(byp.items(), key=lambda x: -len(x[1])):
-            who_names = sorted({um.get(t.get("assigned_to"), "未割当") for t in ts})
-            due = due_m.get(pid, "")
-            rows.append([pm.get(pid, pid or "?"), len(ts), ", ".join(who_names[:6]), due, _due_note(due, st_m.get(pid))])
-        return {"title": f"進行中タスク（全社 計{len(tasks)}件）", "columns": ["プロジェクト", "件数", "担当", "締切", "状況"],
-                "rows": rows, "sortable": True, "numeric_cols": [1], "name_col": 0,
-                "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"}
+        return _active_tasks_table_c(items, _due_note)
 
     # ② 進行中PJ一覧(状態/締切) — リスト意図の時のみ(個別PJ名照会は除外)
     if _PROJ_LIST_RE.search(q) and not _name_hit and online:
@@ -3766,6 +5730,14 @@ _TOOL_NARRATION_RE = re.compile(
     r"update_task|bulk_[a-z_]+|import_[a-z_]+|vimeo_[a-z_]+|aurora_[a-z_]+|ai_import_parse)\s*\(.*$",
     re.I)
 
+# cmd_492 4便: 行頭一致(_TOOL_NARRATION_RE)は「前置きの文＋同じ行に道具呼出」を取りこぼす
+# (例『Zenithの…を取得します。calendar_lookup(kind=...)』)。道具呼出はどこにあっても実行構文であり
+# 本文として残してよい文章ではないため、行内の出現位置に関わらず断片を剥ぐ(前後の地の文は残す)。
+_TOOL_NARRATION_INLINE_RE = re.compile(
+    r"[`*_]*\b(calendar_lookup|search_vault|get_[a-z_]+|send_message|create_[a-z_]+|"
+    r"update_task|bulk_[a-z_]+|import_[a-z_]+|vimeo_[a-z_]+|aurora_[a-z_]+|ai_import_parse)\s*\([^\n]*\)[`*_]*",
+    re.I)
+
 
 def _strip_tool_narration(text):
     """【出口・道具実況ガード(Fable処方2の副作用ゼロ版)】qwenがツールを"呼ばず"生の関数呼び構文だけを本文に
@@ -3774,17 +5746,94 @@ def _strip_tool_narration(text):
     try:
         if not text:
             return text
-        # ```tool ... ``` フェンス除去
-        t = re.sub(r"```(?:tool|json)?\s*(?:calendar_lookup|search_vault|get_[a-z_]+|send_message)[^`]*```", "", text, flags=re.I | re.S)
+        # ```tool ... ``` フェンス除去(中身が既知の道具名を含む場合、または空/空白のみの場合)
+        t = re.sub(r"```(?:tool|json)\s*(?:(?:calendar_lookup|search_vault|get_[a-z_]+|send_message)[^`]*|\s*)```", "", text, flags=re.I | re.S)
         kept = [ln for ln in t.splitlines() if not _TOOL_NARRATION_RE.match(ln)]
         out = "\n".join(kept)
+        # cmd_492 4便: 行頭一致で取れなかった「前置き文＋同一行の道具呼出」断片を剥ぐ(地の文は残す)
+        out = _TOOL_NARRATION_INLINE_RE.sub("", out)
+        out = re.sub(r"[ \t]+\n", "\n", out)          # 断片除去後に残る行末の空白を掃除
         return re.sub(r"\n{3,}", "\n\n", out).strip()
     except Exception:
         return text
 
 
+# cmd_492 4便 追補(実地再現で判明): 道具呼出構文そのものは書かず、「〜を取得します/確認します」で
+# 約束するだけの一文だけを吐いて自然終了する形も同型の「言うただけ」欠陥(実測: streaming強制→改善後もなお発生)。
+# 短文かつ retrieval を約束する動詞で終わり、表(|)や実データ(数字+単位語)が続かない場合のみ対象とする
+# (長い/データを伴う正常回答を誤って握り潰さぬよう、条件は狭く保つ)。
+_TOOL_PROMISE_ONLY_RE = re.compile(
+    r"^[^\n]{0,40}(を)?(取得|確認|検索|照会|参照)(します|中です|いたします)[。.\s]*$")
+# 表の体裁だけ整え、データ行がプレースホルダのみ(実測: 「(データ取得中)」「-」等)の形も同型
+_PLACEHOLDER_CELL_RE = re.compile(r"^[\s\-—―・/]*$|^\W*(データ)?取得中\W*$|^\W*準備中\W*$|取得できませ")
+# 道具名を関数呼び構文でなく地の文で言うだけの残骸(実測: 「calendar_lookupでZenithの最新タスクを取得して…」)
+_TOOL_NAME_MENTION_RE = re.compile(
+    r"(calendar_lookup|search_vault|get_[a-z_]+|send_message|create_[a-z_]+|"
+    r"update_task|bulk_[a-z_]+|import_[a-z_]+|vimeo_[a-z_]+|aurora_[a-z_]+|ai_import_parse)"
+    r"(で|を用いて|により)[^\n]*(取得|確認|検索|照会|回答)[^\n]*[。.]?", re.I)
+
+
+def _table_rows_are_placeholder_only(text):
+    """Markdownテーブルのデータ行(ヘッダ・区切り行を除く)が全てプレースホルダのみか判定。
+    1行もテーブルが無ければ False(対象外=このチェックでは判定不能)。"""
+    table_lines = [ln for ln in text.splitlines() if ln.strip().startswith("|")]
+    data_rows = [ln for ln in table_lines if not re.match(r"^\s*\|[\s\-:|]+\|\s*$", ln)]
+    if len(data_rows) < 2:            # ヘッダ行のみ(データ行0)ならプレースホルダ判定できぬ=対象外
+        return False
+    data_rows = data_rows[1:]         # 先頭はヘッダ行として除く
+    if not data_rows:
+        return False
+    for row in data_rows:
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if any(c and not _PLACEHOLDER_CELL_RE.match(c) for c in cells):
+            return False              # プレースホルダでない実データセルが1つでもあれば対象外
+    return True
+
+
+def _is_promise_only_no_data(text):
+    """道具呼出は書かれていないが、実データを伴わず retrieval の約束文だけで終わっている(=実行未完了)かを判定。
+    表(|)があってもデータ行が全プレースホルダなら対象(実データではない)。
+    数字+単位(日/時間/件 等)・実質的な複数行内容があれば実データありとみなし対象外(過検出防止)。"""
+    try:
+        if not text or not text.strip():
+            return False
+        t = text.strip()
+        if "|" in t and not _table_rows_are_placeholder_only(t):
+            return False                                 # 実データを伴う表があれば対象外
+        if re.search(r"\d+\s*(日|時間|人日|件|%|ヶ月|週間)", t):   # 実数値があれば対象外
+            return False
+        # 表(プレースホルダのみ)・約束文・道具名の地の文言及、いずれかの残骸だけで構成されていれば対象
+        stripped = _TOOL_NAME_MENTION_RE.sub("", t)
+        lines = [ln.strip() for ln in stripped.splitlines()
+                 if ln.strip() and not ln.strip().startswith("|")]
+        if not lines:
+            return True
+        return all(_TOOL_PROMISE_ONLY_RE.match(ln) for ln in lines)
+    except Exception:
+        return False
+
+
+def _strip_tool_narration_chunk(text):
+    """【cmd_492 4便: ストリーム送出専用・改行/空白を保つ版】_strip_tool_narrationは全文一括処理向けに
+    末尾.strip()や空行畳込みを行うため、改行区切りで逐次送出するストリームにそのまま使うと行区切りが壊れる
+    (既送信済みの行と結合して表示が乱れる)。ここでは道具呼出断片だけを除去し、改行/空白構造は保つ。"""
+    try:
+        if not text:
+            return text
+        t = re.sub(r"```(?:tool|json)\s*(?:(?:calendar_lookup|search_vault|get_[a-z_]+|send_message)[^`]*|\s*)```", "", text, flags=re.I | re.S)
+        lines = t.split("\n")
+        # 単独の ```tool / ```json フェンス開始行(閉じフェンスが後続チャンクで来る場合、行内一致では拾えない)
+        # も本文として不要ゆえ、フェンス標識行自体は落とす(道具実況フェンスの残骸を出さない)。
+        out_lines = ["" if (_TOOL_NARRATION_RE.match(ln) or re.match(r"^\s*```(?:tool|json)\s*$", ln, re.I))
+                     else ln for ln in lines]
+        out = "\n".join(out_lines)
+        return _TOOL_NARRATION_INLINE_RE.sub("", out)
+    except Exception:
+        return text
+
+
 def _strip_name_gloss(text, sysadd, query):
-    """【出口・gloss検問(Fable処方3)】応答中の"既知の実在PJ名"の直後の括弧展開『marukome（丸亀製麺）』は、
+    """【出口・gloss検問(Fable処方3)】応答中の"既知の実在PJ名"の直後の括弧展開『<PJ名>（無関係な同音語）』は、
     括弧内が注入コンテキスト(sysadd)に無ければ推測=剥がす。閉集合(Calendarのonline PJ名のみ)照合ゆえ軽い。
     クエリのタイポ(maukome等)で名前解決がnoneでも、応答に現れた実在名を直接掴むので発火する。"""
     try:
@@ -3811,24 +5860,62 @@ def _strip_name_gloss(text, sysadd, query):
         return text
 
 
-def _pj_status_fallback(query):
+# 病二(鏡)人物スロット検問(AC2・cmd_508第1便): ファイル名幹(profile_u_30等・観測層の内部識別子)が
+# roster/人物別名索引(閉集合)を通らぬまま「人」として主語に立つ文を差し止める。
+# corpus分割(_EXCLUDE_SRC)とは独立に効く二重の壁——分割が万一漏れても
+# 実害A02(「このアカウントは名簿上profile_u_30という仮称」)をここで止める(軍師review point_c)。
+# ★\b は CJK文字を \w 扱いする(Python re既定)ため「上profile_u_30」で境界が働かない。
+# 識別子自体が英数アンダースコアの連続で十分弁別的ゆえ、\b無しの直接一致で足りる。
+_UNROSTERED_SLOT_RE = re.compile(r"profile_u_\d+|(?<![a-z0-9_])u_\d{1,6}(?![a-z0-9_])", re.I)
+
+
+def _guard_unrostered_person_claim(text):
+    """応答中に現れる観測層ファイル名幹(profile_u_*/u_\\d+)が、roster(_ROSTER_MAP)にも
+    人物別名索引(_person_alias_index)にも無い=閉集合の外なら、その言及を中立文へ差し替える。
+    正当な人物(roster在籍)への言及は一切妨げない(閉集合の外だけを狙い撃つ)。"""
+    try:
+        if not text:
+            return text
+        hits = set(m.group(0) for m in _UNROSTERED_SLOT_RE.finditer(text))
+        if not hits:
+            return text
+        roster_vals = {str(v).lower() for v in _ROSTER_MAP.values()}
+        alias_vals = {str(a).lower() for a in _person_alias_index().keys()}
+        out = text
+        for h in hits:
+            if h.lower() in roster_vals or h.lower() in alias_vals:
+                continue                                        # 閉集合内=正当な言及(手を入れない)
+            out = re.sub(re.escape(h) + r"(という仮称|は名簿上|というアカウント)?",
+                          "（名簿に無い内部識別子ゆえ人物としては述べぬ）", out)
+        return out
+    except Exception:
+        return text
+
+
+def _pj_status_fallback(query, vault_src=None, vault_fulltext=None):
     """出口検問で全消し(qwenがナレーションだけ吐いた等)の救済: 問いが指す online PJ の状態を
-    Calendarデータから決定的に答える(retrieve-then-render・LLM非依存)。無ければ空。"""
+    Calendarデータから決定的に答える(retrieve-then-render・LLM非依存)。無ければ空。
+    cmd_492 4便再送: Calendar側に該当が無い(例: 工数等 status以外の問い)場合でも、この turn で
+    既に取得済のvault資料(top_source)があればそれを提示する(取得済の材料を捨てて汎用謝罪へ
+    倒すより、実際に手元にある一次資料を返す方が「実行に繋げる」に近い・新規の推測機構は追加しない)。"""
     try:
         st, names, _ = _pj_resolve(query)                # 名前解決器へ統一(生substring照合を残さない・Fable)
-        if st != "unique":
-            return ""
-        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
-        today = datetime.date.today().isoformat()
-        for p in items:
-            nm = str(p.get("name") or "")
-            if nm == names[0] and str(p.get("display_status") or "online") == "online":
-                due = str(p.get("end_date") or "")[:10]
-                late = bool(due) and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled")
-                line = f"**{nm}** の現状:\n・ステータス: {p.get('status')}"
-                if due:
-                    line += f"\n・納期: {due}" + ("（🔴 納期超過）" if late else "（予定内）")
-                return line
+        if st == "unique":
+            items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+            today = datetime.date.today().isoformat()
+            for p in items:
+                nm = str(p.get("name") or "")
+                if nm == names[0] and str(p.get("display_status") or "online") == "online":
+                    due = str(p.get("end_date") or "")[:10]
+                    late = bool(due) and due < today and str(p.get("status") or "") not in ("completed", "done", "cancelled")
+                    line = f"**{nm}** の現状:\n・ステータス: {p.get('status')}"
+                    if due:
+                        line += f"\n・納期: {due}" + ("（🔴 納期超過）" if late else "（予定内）")
+                    if vault_fulltext:
+                        line += f"\n\n併せて社内記録（{vault_src}）に次の記載がござる:\n" + vault_fulltext[:1500]
+                    return line
+        if vault_fulltext:                    # PJ側が不成立(st!=unique/online不一致)でも、既取得のvault資料はそのまま提示
+            return f"社内記録（{vault_src}）に次の記載がござる:\n" + vault_fulltext[:1500]
         return ""
     except Exception:
         return ""
@@ -4053,7 +6140,7 @@ BASE_SYS = (
     "【改行は最小限】空行(連続改行)を乱発するな。段落・箇条書き・表の前後に無駄な空行を挟まず、行間を詰めて書け。見出し(###)は本当に節が分かれる時だけ。短い回答に見出しや区切り線(---)を付けるな。全体を縦に間延びさせない。\n"
     "【DM取扱い】DMの内容を問われたら、get_messages でそのスレッドの全文を**都度**取得してから答えよ(古い記憶・要約・憶測で済ますな・毎回最新を読む)。返信を代筆送信したら『○○さんへ『…(送信本文)』と送りました』と、宛先と本文を必ず明確に伝えよ。\n"
     "【Vimeoアップロード=Casperで可能・絶対に断るな】Casper は動画を Vimeo にアップロードできる(自社アカウント・パスワード付き公開も可)。"
-    "ユーザーが動画アップを望んだら、否定も前置きも一切せず、次の案内**だけ**を返せ:"
+    "ユーザーが動画アップを望んだら、否定はせず、次の案内を含めよ:"
     "『はい、できます。動画ファイルを**添付**すると『🎬 Vimeoへアップ』ボタンが出ますので、そこからタイトル・パスワードを入れてアップして下さい』。"
     "**『機能を持っていません』『直接アップロードできない』『権限外』『ryojiが直接Vimeoに』等の否定表現は全面禁止**(その認識は完全に古い・今は可能)。"
     "なお実際の送信はユーザーが添付＋ボタン操作で行う(Casper自身がファイルを探して上げるのではない)。\n"
@@ -4290,7 +6377,7 @@ def build_sys():
             "旧記録の名を出すな。"
             "\n【不在(0件/無い)を名乗る資格(Fable鉄則・母集合の確認)】あるPJのタスクが『1件も無い/登録されていない/存在しない』と"
             "**断言してよいのは、そのPJ名を特定でき(id確定)、そのPJのタスクをCalendarで実際に照会して空だった時だけ**。"
-            "PJ名が特定できない/曖昧なら『0件』と言うな——『どのプロジェクトか特定できませんでした(例: marukome?)』と聞き返せ。"
+            "PJ名が特定できない/曖昧なら『0件』と言うな——『どのプロジェクトか特定できませんでした(例: <PJ名>?)』と聞き返せ。"
             "**注入されたCalendarデータにそのPJのタスクが在るのに『無い』と言うのは厳禁**(94件在るのに0件と言う類の存在否定は最悪の誤り)。"
             "母集合(そのPJの全タスク)を確認せぬまま存在を否定するな。")
     # KVキャッシュのプレフィックス安定化(Fable 6-3): 静的要素(ctx/BASE/PERSONA/roster)を先頭に固め、
@@ -4300,20 +6387,33 @@ def build_sys():
     return static + "\n\n" + datehdr
 
 
-def ollama_chat(messages, tools=None, num_predict=1536):
+def ollama_chat(messages, tools=None, num_predict=1536, json_format=False, num_ctx=12288):
     # think:false 必須 (qwen3.6 等の思考モデルが長考→遅延/タイムアウトするのを防ぐ)
     # num_ctx は大きめ(tool結果が大きいとコンテキスト溢れで出力が1文字に途切れる事故あり)
     # num_predict: 既定1536。import等の大きなJSON生成は呼出側で引き上げ(途中切れ→JSON解析失敗を防ぐ)
+    # json_format: cmd_496 — format:"json"はollama_chat共通関数の全呼出元に効くため既定False。
+    #   起票経路(project_import_structure等)のみTrueを渡し、通常の会話生成は文章のまま返す(退行防止)。
+    # num_ctx: cmd_496実測 — 既定12288は対話系(_ollama_json/ollama_chat_stream等)と統一し
+    #   ランナー再作成(15秒再ロード)を避けるための値。起票(import)経路はbuild_sys()注入(実測約13KB)
+    #   ＋grid本文＋多行output(shot×task)で12288を超え出力が途中で切れる(format:"json"を機構強制
+    #   していても、予算超過の途中切れはJSON構文自体を破壊する)。起票のみ呼出側で引き上げる
+    #   (対話系のnum_ctxは不変=対話の温存・冷間回避コメントに抵触しない)。
     body = {"model": A.model, "messages": messages, "stream": False, "think": False,
             "keep_alive": -1,                              # モデルを温存(再ロードの15秒遅延を防ぐ・賢さは不変)
-            "options": {"num_ctx": 12288, "num_predict": num_predict,
+            "options": {"num_ctx": num_ctx, "num_predict": num_predict,
                         "temperature": 0.15, "top_p": 0.9}}   # tool呼出を安定化(非決定性を抑制)
+    if json_format:
+        body["format"] = "json"
     if tools:
         body["tools"] = tools
-    req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as r:
-        return json.load(r)
+
+    def _do():
+        req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.load(r)
+
+    return _llm_call_record("llm_text", A.model, _do)
 
 
 # ── DigestRegistry(Fable M1): 全digestを"1枚の宣言表"にし両バックエンド共通の単一ループで組む。
@@ -4330,6 +6430,10 @@ _DIGEST_REGISTRY = [
     ("team_vocab",       lambda who, q: team_vocab_digest(q)),
     ("fewshot",          lambda who, q: fewshot_digest(q)),
     ("existence",        lambda who, q: existence_digest(who, q)),
+    ("dm_threads",       lambda who, q: dm_threads_digest(who, q)),
+    ("casper_howto",     lambda who, q: casper_howto_digest(q)),
+    ("aurora_list",      lambda who, q: aurora_list_digest(who, q)),
+    ("aurora_exists",    lambda who, q: aurora_exists_digest(who, q)),
     ("open_loop",        lambda who, q: open_loop_digest(who)),
     ("attention",        lambda who, q: attention_digest(who, q)),
     ("context_sections", lambda who, q: context_sections_digest(q)),
@@ -4352,8 +6456,9 @@ _DIGEST_REGISTRY = [
 _DIGEST_CEILING = int(os.environ.get("CASPER_DIGEST_CEILING", "18000"))   # 注入ブロックの文字上限(≈ num_ctx 12288 の内数)
 _TRIM_FIRST = ["activity", "context_sections", "calendar", "meeting", "cross",   # 低優先(先に落とす)…
                "open_loop", "team_vocab", "portfolio", "user_profile", "fewshot"]
-#  ↑に無い digest(verify/projects/entity/active_tasks/availability/existence/gear/phase_sched/fb_log/
-#    future_assign/traits/shot_assignee/image_asset/attention)は接地・安全の一次ゆえ予算超過でも落とさない。
+#  ↑に無い digest(verify/projects/entity/active_tasks/availability/existence/dm_threads/gear/phase_sched/
+#    fb_log/future_assign/traits/shot_assignee/image_asset/attention)は接地・安全の一次ゆえ予算超過でも落とさない
+#    (cmd_510第2便: dm_threadsは母集合なき不在断言の禁を担う接地系ゆえexistenceと同格で保護)。
 
 
 def build_digests(who, q, trace=None):
@@ -4471,43 +6576,98 @@ def trace_stats(limit=5000):
 def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, temperature=0.15):
     """本物のストリーミング版(B・Fable指摘の最大の一手): Ollama stream:True(NDJSON)を読み、content片を
     emit_fn(chunk)で即クライアントへ→TTFT短縮。返り=組み立てたレスポンス({message:{content,tool_calls}, done_reason})。
-    tool_call応答はcontentが空ゆえ何も流れない(=text応答だけがストリームされる)。"""
+    tool_call応答はcontentが空ゆえ何も流れない(=text応答だけがストリームされる)。
+    cmd_519黒匣: chat_serverの唯一の実配線対象(軍師戦略)。inflight登録は「重い呼出」のみ
+    (inflight_should_record・probe/短文除外)・TTFT+load/eval内訳は全呼出(record_call_timing)。"""
     body = {"model": A.model, "messages": messages, "stream": True, "think": False,
             "keep_alive": -1,
             "options": {"num_ctx": 12288, "num_predict": num_predict, "temperature": temperature, "top_p": 0.9}}
     if tools:
         body["tools"] = tools
-    req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
-    content = ""
-    tcs = None
-    done_reason = None
-    with urllib.request.urlopen(req, timeout=300) as r:
-        for line in r:
-            if not line.strip():
-                continue
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            mm = o.get("message") or {}
-            c = mm.get("content") or ""
-            if c:
-                content += c
-                if emit_fn:
+
+    prompt_chars = sum(len(m.get("content") or "") for m in (messages or []))
+    _handle = None
+    if casper_llm_client:
+        try:
+            if casper_llm_client.inflight_should_record(prompt_chars, "ollama_chat_stream"):
+                _handle = casper_llm_client.inflight_start(
+                    "ollama_chat_stream", A.model, _ENDPOINT_HOSTPORT, prompt_chars)
+        except Exception:
+            _handle = None
+
+    def _do():
+        req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        content = ""
+        tcs = None
+        done_reason = None
+        total_duration = eval_duration = None
+        done_line = None
+        t0 = time.time()
+        ttft_sec = None
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                for line in r:
+                    if not line.strip():
+                        continue
                     try:
-                        emit_fn(c)
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    mm = o.get("message") or {}
+                    c = mm.get("content") or ""
+                    if c:
+                        if ttft_sec is None:
+                            ttft_sec = round(time.time() - t0, 3)
+                        content += c
+                        if emit_fn:
+                            try:
+                                emit_fn(c)
+                            except Exception:
+                                pass
+                    if mm.get("tool_calls"):
+                        tcs = mm["tool_calls"]
+                    if o.get("done"):
+                        done_reason = o.get("done_reason")   # "stop"=自然終了 / "length"=上限で截ち切れ(継続要)
+                        total_duration = o.get("total_duration")
+                        eval_duration = o.get("eval_duration")
+                        done_line = o
+                        break
+        except Exception as e:
+            if casper_llm_client:
+                try:
+                    casper_llm_client.record_call_timing(
+                        "ollama_chat_stream", A.model, _ENDPOINT_HOSTPORT, ttft_sec, None)
+                except Exception:
+                    pass
+                if _llm_is_timeout_error(e):
+                    try:
+                        ttft_info = {"ttft_sec": ttft_sec} if ttft_sec is not None else None
+                        casper_llm_client.record_incident(
+                            "ollama_chat_stream", A.model, _ENDPOINT_HOSTPORT, ttft_info)
                     except Exception:
                         pass
-            if mm.get("tool_calls"):
-                tcs = mm["tool_calls"]
-            if o.get("done"):
-                done_reason = o.get("done_reason")   # "stop"=自然終了 / "length"=上限で截ち切れ(継続要)
-                break
-    msg = {"role": "assistant", "content": content}
-    if tcs:
-        msg["tool_calls"] = tcs
-    return {"message": msg, "done_reason": done_reason}
+            raise
+        finally:
+            if casper_llm_client:
+                try:
+                    casper_llm_client.inflight_end(_handle)
+                except Exception:
+                    pass
+        if casper_llm_client:
+            try:
+                casper_llm_client.record_call_timing(
+                    "ollama_chat_stream", A.model, _ENDPOINT_HOSTPORT, ttft_sec, done_line)
+            except Exception:
+                pass
+        msg = {"role": "assistant", "content": content}
+        if tcs:
+            msg["tool_calls"] = tcs
+        return {"message": msg, "done_reason": done_reason,
+                "total_duration": total_duration, "eval_duration": eval_duration}
+
+    resp = _llm_call_record("ollama_chat_stream", A.model, _do)
+    return {"message": resp["message"], "done_reason": resp["done_reason"]}
 
 
 def strip_think(s):
@@ -4646,8 +6806,10 @@ def anthropic_agent(client_msgs, extra_system=""):
     return final or "(応答を得られませなんだ)"
 
 
-def llm_text(system, user, num_predict=1536):
-    """ツール無しの単発生成 (backend 透過)。num_predict で出力上限を調整(大きなJSON生成用)。"""
+def llm_text(system, user, num_predict=1536, json_format=False, num_ctx=12288):
+    """ツール無しの単発生成 (backend 透過)。num_predict で出力上限を調整(大きなJSON生成用)。
+    json_format=True で ollama backend のみ format:"json" を機構強制(cmd_496)。
+    num_ctx 既定12288(対話系と統一)。起票等の大入出力は呼出側で引き上げ(cmd_496)。"""
     if BACKEND == "claude_cli":
         return strip_think(claude_cli_text(system + "\n\n" + user))
     if BACKEND == "anthropic" and ANTHROPIC_KEY:
@@ -4655,7 +6817,7 @@ def llm_text(system, user, num_predict=1536):
                             "system": system, "messages": [{"role": "user", "content": user}]})
         return "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
     r = ollama_chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
-                    num_predict=num_predict)
+                    num_predict=num_predict, json_format=json_format, num_ctx=num_ctx)
     return strip_think(r.get("message", {}).get("content", ""))
 
 
@@ -4882,6 +7044,7 @@ def record_answer(question, answer):
         if casper_rag:
             casper_rag.build_index()
             casper_rag._CACHE = None
+        if casper_embed: casper_embed.reindex_async("knowledge_write")   # cmd_498: 意味索引も非同期で追従
     except Exception:
         pass
     return routed
@@ -5036,32 +7199,141 @@ def _import_llm(system, user):
         if out and not out.lstrip().startswith("[claude-cli"):
             return out
         _import_log({"fn": "_import_llm", "note": "cloud失敗→localへ退避", "cloud_out": (out or "")[:200]})
-    return llm_text(system, user, num_predict=8000)   # importは大JSON→出力上限を大きく(途中切れ防止)
+    # importは大JSON→出力上限を大きく(途中切れ防止)。json_format=True で qwen に format:"json" を機構強制
+    # (cmd_496: 文章依頼のみでは長い出力の途中で区切り記号を落とし解析が破れる=前例_ollama_jsonに倣う)。
+    # num_ctx も引き上げる(cmd_496実測): build_sys()注入(実測約13KB)+grid本文+多行output(shot×task)
+    # が既定12288を超え、format:"json"下でも予算超過の途中切れが発生する実例を確認(実ファイルSB_estimate…
+    # _tesで再現)。qwenモデルは262144まで対応(実測)。起票のみランナー再ロード(約15秒)を受け入れる。
+    return llm_text(system, user, num_predict=8000, json_format=True, num_ctx=32768)
+
+
+def _brace_balance_truncated(text):
+    """cmd_496第2便 AC6: 出力が『途中で切れた』かを波括弧/角括弧の均衡で判定する。
+    文字列リテラル内の { } は無視(素朴なカウントだと壊れる)。エスケープも考慮。
+    戻り値: True=不均衡(途中切れの疑い) / False=均衡(切れていない=構文エラーなら別要因)。"""
+    depth, in_str, esc = 0, False, False
+    for ch in text or "":
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    # 文字列を開いたまま終わった(値の途中で切断)場合も途中切れ。depth<0は稀だが均衡外として扱う。
+    return in_str or depth != 0
 
 
 def _import_json(label, system, user, ctx=""):
-    """LLM 呼出→JSON抽出→ログ。失敗時は {"error":..,"raw":..} を返し raw もログに残す。"""
+    """LLM 呼出→JSON抽出→ログ。失敗時は {"error":..,"raw":..} を返し raw もログに残す。
+    cmd_496第2便 AC6: JSON構文エラー(parse_err)と出力途中切れ(truncated)を別分岐で判定・記録する。"""
     try:
         out = _import_llm(system, user)
     except Exception as e:
         out = f"[exc] {e}"
     m = re.search(r"\{.*\}", out or "", re.S)
-    d, ok = None, bool(m)
+    d, ok, truncated = None, bool(m), False
     if ok:
         try:
             d = json.loads(m.group(0))
         except Exception as e:
             ok, d = False, {"_parse_err": str(e)}
-    _import_log({"fn": label, "llm": IMPORT_LLM, "ok": ok, "ctx": str(ctx)[:300], "out": (out or "")[:1000]})
+    else:
+        # 冒頭の "{" すら出力にあるが末尾 "}" が来ない(正規表現が非貪欲マッチできない)ケースも途中切れ。
+        truncated = "{" in (out or "") and not (out or "").rstrip().endswith("}")
+    if not ok and m is not None:
+        # m はあった(先頭"{"〜最後の"}"を貪欲マッチ)がjson.loadsが失敗 → 括弧均衡で切断か構文エラーかを判別。
+        truncated = _brace_balance_truncated(m.group(0))
+    # cmd_496 AC3: 成功時は1000字で軽量化、解析失敗時は全文を残す(将軍が誤読しかけた観測の穴を是正・失敗箇所を隠さない)。
+    _import_log({"fn": label, "llm": IMPORT_LLM, "ok": ok, "truncated": truncated, "ctx": str(ctx)[:300],
+                 "out": (out or "") if not ok else (out or "")[:1000]})
     if not ok:
-        err = "JSON抽出不可(LLMがJSONを返さず)" if d is None else f"JSON解析失敗: {d.get('_parse_err')}"
-        return {"error": err, "raw": (out or "")[:500]}
+        if truncated:
+            # cmd_496第3便 AC12: 分割起票(AC8)導入により単一呼出は_IMPORT_CHUNK_ROWS行以下でしか
+            # 発生しなくなった(project_import_structureが超過分を先に分割するため)。ゆえにこの分岐へ
+            # 来る途中切れは「行数」でなく「1行の記述量」が原因。旧文言「行数を分けて」は既に満たして
+            # おる条件を繰り返すのみで次の一手にならぬ(tetsuo殿の「何度試しても同じ」の再来・軍師進言)。
+            err = ("1行あたりの記述が長すぎるようです。お手数ですが、制作指示など長い列を短くして"
+                   "お試しくだされ。")
+        else:
+            # cmd_496 AC4: 社員へは読める日本語で返す(機械のエラー文言は_import_logへ・隠さず全文=AC3)。
+            err = "起票案の生成に失敗しました。お手数ですが、もう一度お試しくだされ(繰り返す場合は担当へご連絡を)。"
+        return {"error": err, "raw": (out or "")[:500], "truncated": truncated}
     d.setdefault("project", {}); d.setdefault("shots", []); d.setdefault("tasks", [])
     return d
 
 
+# cmd_496第2便 AC8: 分割起票の1チャンクあたり行数。憶測でなく実測で決定(N境界測定・192.168.44.139固定):
+# 30/40行は複数回連続で安定 ok:true、70行は同一条件で成功/途中切れが揺れ(70行=不安定境界)、
+# 85/100行は再現して途中切れ(truncated:true)。実データは合成データより1行の記述が長くなり得るため
+# 安定圏(30〜40)からさらに余裕を取り、30行=25行の下限余裕を持たせてN=25とした。
+_IMPORT_CHUNK_ROWS = 25
+
+
+def _split_grid_rows(grid_text, chunk_rows=_IMPORT_CHUNK_ROWS):
+    """グリッド(TSV/CSV相当)をヘッダー行+chunk_rows行ずつに分割する。
+    ヘッダー行(先頭行)は各チャンクに複製して付け、LLMが列の意味を毎回解釈できるようにする。"""
+    lines = (grid_text or "").splitlines()
+    if not lines:
+        return [grid_text or ""]
+    header, body = lines[0], lines[1:]
+    if len(body) <= chunk_rows:
+        return [grid_text]
+    chunks = []
+    for i in range(0, len(body), chunk_rows):
+        part = body[i:i + chunk_rows]
+        chunks.append("\n".join([header] + part))
+    return chunks
+
+
+def _merge_import_proposals(results):
+    """cmd_496第2便 AC8: 分割起票の結果を機構で結合する。
+    project は最初に取れたものを採用(先頭チャンクにヘッダー相当の情報が集まりやすい)。
+    shots は code で重複排除、tasks は単純連結(行が主体でありチャンク跨ぎの重複は起きない)。
+    cmd_496第3便 AC11(欠陥A是正): 旧実装は `if not any_ok` — 一つでも成功すれば成功扱いとなり、
+    一部チャンクが途中切れで失敗しても errors が握り潰され、社員には「N件の起票案」が何事もなく
+    提示されていた(軍師実測: 30行を2分割し2番目が失敗→tasks=25件・欠落5件が画面に現れず)。
+    失敗チャンクが1つでもあれば merged["_partial"] を必ず載せ、呼出側(preview)で握り潰せぬようにする。"""
+    merged = {"project": {}, "shots": [], "tasks": []}
+    seen_shot_codes = set()
+    any_ok = False
+    errors = []
+    for r in results:
+        if not isinstance(r, dict) or "error" in r:
+            errors.append((r or {}).get("error", "unknown error"))
+            continue
+        any_ok = True
+        if not merged["project"]:
+            merged["project"] = r.get("project") or {}
+        for s in (r.get("shots") or []):
+            code = s.get("code")
+            if code and code in seen_shot_codes:
+                continue
+            if code:
+                seen_shot_codes.add(code)
+            merged["shots"].append(s)
+        merged["tasks"].extend(r.get("tasks") or [])
+    if not any_ok:
+        # 全チャンク失敗 → 単一呼出時と同じ形({"error":...})で返す(呼出側の分岐を増やさない)。
+        return {"error": errors[0] if errors else "起票案の生成に失敗しました。", "raw": ""}
+    if errors:
+        # 部分失敗: 一部チャンクは成功したが、これを黙って"成功"として返してはならぬ(欠陥A本丸)。
+        merged["_partial"] = {"failed_chunks": len(errors), "total_chunks": len(results),
+                               "errors": errors}
+    return merged
+
+
 def project_import_structure(grid_text, hint=""):
-    """Excel 由来グリッド → 新規PJ＋shot/task の構造化提案(JSON)。視認系と同じく Sonnet で精度を出す。"""
+    """Excel 由来グリッド → 新規PJ＋shot/task の構造化提案(JSON)。視認系と同じく Sonnet で精度を出す。
+    cmd_496第2便 AC8: グリッドが _IMPORT_CHUNK_ROWS 行を超える場合は分割起票(複数回LLM呼出→結合)する
+    (恒久策・途中切れの再発防止)。"""
     sysp = (build_sys() + "\n\nあなたは制作管理のデータ起票アシスタント。Excel(多くは見積書)由来のグリッドから "
             "Calendar 起票用に 新規プロジェクト＋shot(seq)＋task を構造化せよ。出力は厳密な JSON のみ(説明・コードフェンス禁止)。スキーマ:\n"
             '{"project":{"name":"","description":"","start_date":"","end_date":"","_inferred":[]},'
@@ -5080,8 +7352,18 @@ def project_import_structure(grid_text, hint=""):
             "原本から取れた値は _inferred に入れぬ。推測は『社内知識からの推定』に限り、根拠なき断定・捏造はするな(分からねば空＋_inferred に入れず空欄)。\n"
             "■担当者(assignee)は **username(氏名)**。type は推奨値: animation/layout/comp/fx/lighting/asset/programming/design/testing/documentation/shoot/gs/report/other。\n"
             "shot が無く task 主体なら shots は空配列で良い。")
-    user = f"ヒント(利用者記入): {hint}\n\n--- グリッド(Excel抽出) ---\n{grid_text[:12000]}"
-    return _import_json("structure", sysp, user, "hint=" + (hint or ""))
+    chunks = _split_grid_rows(grid_text)
+    if len(chunks) == 1:
+        user = f"ヒント(利用者記入): {hint}\n\n--- グリッド(Excel抽出) ---\n{chunks[0][:12000]}"
+        return _import_json("structure", sysp, user, "hint=" + (hint or ""))
+    results = []
+    for idx, chunk in enumerate(chunks):
+        user = (f"ヒント(利用者記入): {hint}\n"
+                f"(注: 元グリッドを{len(chunks)}分割した{idx+1}/{len(chunks)}番目。ヘッダー行は共通・分割内で完結して処理せよ)\n\n"
+                f"--- グリッド(Excel抽出・分割{idx+1}/{len(chunks)}) ---\n{chunk[:12000]}")
+        results.append(_import_json("structure", sysp, user,
+                                     f"hint={hint or ''} chunk={idx+1}/{len(chunks)}"))
+    return _merge_import_proposals(results)
 
 
 def project_import_refine(proposal, instruction):
@@ -5830,6 +8112,7 @@ def vimeo_kb_save(title, description, link, vid="", uploader="", extra=None):
     try:                                  # 即・検索可能にするため索引更新
         if casper_rag:
             casper_rag.build_index(); casper_rag._CACHE = None
+        if casper_embed: casper_embed.reindex_async("knowledge_write")   # cmd_498: 意味索引も非同期で追従
     except Exception:
         pass
     return path
@@ -5949,6 +8232,7 @@ def feed_save(saved_as, description, summary, qa, filename):
     try:
         if casper_rag:
             casper_rag.build_index(); casper_rag._CACHE = None
+        if casper_embed: casper_embed.reindex_async("knowledge_write")   # cmd_498: 意味索引も非同期で追従
     except Exception:
         pass
     return {"ok": True, "note": f"50_asset_shadows/asset_{slug}.md"}
@@ -6028,7 +8312,7 @@ def graph_data():
 
 def org_data():
     """会社の組織構造(指示系統)をネットワークで返す。
-    studio bokan → Visual Arts / Spatial Tech の2部門 → 各領域(hp6準拠) → 社員(役割で配属)。
+    自社 → 各部門(pack org 定義) → 各領域(hp6準拠) → 社員(役割で配属)。
     社員配属は名鑑(役割)からの推定。殿の訂正で ORG 定義を直すだけで反映される。"""
     # 組織図は pack から読む(M5: engine の構造焼き付けを解消)。pack に org 無ければ vault グラフのみ。
     import pack_config as _pc
@@ -6172,6 +8456,58 @@ def _m4_ledger_close(rec, ok, info):
         pass
 
 
+_ROUTE_X_GUARD_OVERRIDE_FILE = "/tmp/casper_gate_route_x_guard_override.json"
+_ROUTE_X_GUARD_OVERRIDE_MAX_AGE_SEC = 300  # 5分(cmd_488 subtask_488_impl4: 古いオーバーライドは無視)
+
+
+def _route_x_guard_enabled():
+    """経路X fail-closedガードの有効/無効(cmd_488 subtask_488_impl3・impl4)。
+    デフォルトはTrue(現状挙動・本番は常に有効)。/tmp配下のオーバーライドファイル
+    (scripts/ 配下ではないためsupervisorのmtime監視の対象外=書いても自動リロードを誘発しない)が
+    存在し {"disabled": true, "ts": <epoch>} の場合のみ無効化する。突然変異検証用の注入経路であり、
+    本番のchat_server.py自体は一切書き換えない。読めない/壊れている・tsが無い・古すぎる(5分超)場合は
+    安全側(有効)に倒す(掟: 緑ゲートに嘘は映らぬ——ゲートがSIGKILL等でfinallyに到達せず後始末に
+    失敗しても、本番のガードが外れたまま気付かれずに残らないようにする)。
+    無効化が成立した瞬間は必ず警告をstderrへ落とす(サイレントな無防備状態を残さない)。"""
+    try:
+        with open(_ROUTE_X_GUARD_OVERRIDE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not data.get("disabled", False):
+            return True
+        ts = data.get("ts")
+        age = time.time() - float(ts)
+        if age > _ROUTE_X_GUARD_OVERRIDE_MAX_AGE_SEC:
+            print(f"⚠ route-X guard override は古すぎる(age={age:.0f}s > "
+                  f"{_ROUTE_X_GUARD_OVERRIDE_MAX_AGE_SEC}s)ため無視し、ガードを有効側へ倒す。",
+                  file=sys.stderr)
+            return True
+        print(f"⚠ route-X fail-closedガードが無効化されている(override file={_ROUTE_X_GUARD_OVERRIDE_FILE}, "
+              f"age={age:.0f}s)。突然変異検証以外でこれが出ている場合は要調査。", file=sys.stderr)
+        return False
+    except Exception:
+        return True
+
+
+def _notifications_for(uid):
+    """/api/notifications の中身(cmd_505)。pending(uid)が空の時に限りcompute→storeを挟んでから
+    改めてpendingで読み直す(保険=案1改)。computeの戻りを直接返してはならない——
+    storeを経由しないとdedup_key重複防止/既読管理(pending側でread=Falseのみ返す造り)が効かない。
+    夜間巡回(_recent_uids拡張・案2)で大半は既にpending命中し、ここは「まだ一度も積まれておらぬ者が
+    初めて開いた時」だけ通る(AC5: 画面が待たされぬのはこの保険が滅多に走らぬから)。"""
+    if not casper_notify:
+        return []
+    items = casper_notify.pending(uid)
+    if items:
+        return items
+    try:
+        nt = casper_notify.compute(uid)
+        if nt:
+            casper_notify.store(uid, nt)
+    except Exception:
+        pass
+    return casper_notify.pending(uid)
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -6223,7 +8559,7 @@ class H(BaseHTTPRequestHandler):
             who = identify(self)
             uid = who.get("uid")
             try:
-                items = casper_notify.pending(uid) if (casper_notify and uid) else []
+                items = _notifications_for(uid) if uid else []
             except Exception:
                 items = []
             self._json({"items": items, "count": len(items)})
@@ -6424,7 +8760,12 @@ class H(BaseHTTPRequestHandler):
                 b = open(cp, "rb").read()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-x509-ca-cert")
-                self.send_header("Content-Disposition", "attachment; filename=casper-ca.crt")
+                # ★Content-Disposition: attachment を付けぬこと(殿御指摘 2026-08-07)。
+                # iOS は attachment を「ダウンロード」として扱い、★プロファイルとして取り込まぬ。
+                # 実害: kiyotomo 殿が「プロファイルをインストールできません」「許可するがエラー」と
+                # 20分ほど立ち往生された(実ログ 2026-08-07 15:03-15:16)。
+                # inline で返せば Safari が構成プロファイルとして受け取り、設定アプリへ渡る。
+                self.send_header("Content-Disposition", "inline; filename=casper-ca.crt")
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()
                 self.wfile.write(b)
@@ -6476,9 +8817,10 @@ class H(BaseHTTPRequestHandler):
             # 「未確認をtrueと名乗るな」(Fable): ファイル存在でなく、policy が実際に core へ載った sentinel で判定。
             # 在るが読めぬ時は "digest" に倒れ、build_brain_digest の fail-safe が policy を出し続ける=窓ゼロ。
             _pol = "engine" if "回答方針" in _ctx.get("core", "") else "digest"
+            _fresh = casper_embed.ensure_fresh() if casper_embed else {}   # cmd_498: 観測時に古ければその場で是正
             self._json({"ok": True, "model": active, "backend": BACKEND,
                         "policy": _pol, "ctx_sections": len(_ctx.get("sections", [])),
-                        "ctx_core_len": len(_ctx.get("core", ""))})
+                        "ctx_core_len": len(_ctx.get("core", "")), "index_freshness": _fresh})
         else:
             self.send_response(404); self.end_headers()
 
@@ -6653,8 +8995,26 @@ class H(BaseHTTPRequestHandler):
                 tags = [t.strip() for t in re.split(r"[,\s、]+", tags) if t.strip()]
             if not str(html).strip():
                 self._json({"ok": False, "error": "本文が空"}); return
+            # fail-closed(cmd_488): クライアント側で弾かれるはずのバイナリが万一届いた場合の防壁。
+            # f.text()のUTF-8デコードは不正バイトをU+FFFDへ置換するため、多数含む本文は
+            # 「バイナリを文字列として読んだ痕跡」であり、黙って保存せず正直に断る。
+            if str(html).count("�") >= 3 and _route_x_guard_enabled():
+                self._json({"ok": False, "error": "本文にデコード不能な文字が多数含まれるため保存を中止しました(バイナリ形式の可能性)"}); return
+            # cmd_488 subtask_488_impl4: 回帰ゲート専用のdry_run。ガード判定(上のif文)を通過した後、
+            # casper_aurora.create()へ到達する直前で止める(=本番Auroraへ書き込まない)。
+            # ガードで拒否される場合は上のreturnで既に抜けているため、dry_runでも「拒否される」ことは
+            # 通常経路と同じ挙動で検証できる。ここに到達した=「ガードで弾かれずに先へ進もうとした」の証明。
+            if bool(req.get("dry_run")):
+                self._json({"ok": True, "dry_run": True, "title": title}); return
             try:
-                res = casper_aurora.create(title, html, author_id=str(uid), project=project, tags=tags)
+                # 投稿者は数値uidでなく★ユーザー名を渡す(殿御下命 2026-07-30)。
+                # 数値のまま渡すと Aurora の一覧に "31" や、解決できぬ時は "9999999" と出て
+                # 誰が上げたか判らぬ(実害: 9999999 名義の資料が34件積まれた)。
+                # 他の3経路(報告書ビルダー L7442/L7461・承認カード実行 L7964/L7966)は既に
+                # uname を渡しており、本経路(ドロップ→Aurora)だけが数値のまま残っていた。
+                # 名前が引けぬ時のみ uid へ退避する(_uid_to_name は未知uidをそのまま返す)。
+                uname = _uid_to_name(uid) or str(uid)
+                res = casper_aurora.create(title, html, author_id=uname, project=project, tags=tags)
                 d = json.loads(res) if isinstance(res, str) and res.strip().startswith("{") else (res or {})
                 slug = (d.get("slug") or d.get("id") or "") if isinstance(d, dict) else ""
                 url = (casper_aurora.doc_base() + "/doc/" + slug) if slug else ""
@@ -6795,7 +9155,17 @@ class H(BaseHTTPRequestHandler):
                         f.write(json.dumps({**rec, "status": "submitted"}, ensure_ascii=False) + "\n")
                     if intent in ("daily", "memo", "record"):
                         # 右脳vault に即保存(Calendar 権限不要)
-                        out = feed_save(fn, note or "(daily 記録)",
+                        # resolve が ASSETS_DIR/upl_{sid}{ext} に保存済の実体を、feed_save が参照する
+                        # ASSET_FILES/{safe_filename} へ複製する(両者はディレクトリもファイル名も別物ゆえ、
+                        # 複製せねば feed_save は本文抽出できず「保存した」と偽の成功報告になる)。
+                        ext = os.path.splitext(fn)[1].lower()
+                        src = os.path.join(ASSETS_DIR, "upl_" + who["sid"] + ext)
+                        safe_fn = re.sub(r"[^\w.\-]", "_", os.path.basename(fn))[:60] or fn
+                        if os.path.exists(src):
+                            os.makedirs(ASSET_FILES, exist_ok=True)
+                            with open(src, "rb") as _sf, open(os.path.join(ASSET_FILES, safe_fn), "wb") as _df:
+                                _df.write(_sf.read())
+                        out = feed_save(safe_fn, note or "(daily 記録)",
                                         (req.get("recognized") or note or "")[:1500], [], fn)
                         self._json({"ok": True, "written": True, "dest": "vault",
                                     "message": "✅ 右脳(vault)に記録しました（daily/メモはCalendar権限不要）"})
@@ -6822,10 +9192,18 @@ class H(BaseHTTPRequestHandler):
                 else:
                     grid = req.get("grid", "")
                 prop = project_import_structure(grid, req.get("hint", ""))
-                self._json({"ok": "error" not in prop, "proposal": prop,
-                            "counts": {"shots": len(prop.get("shots", []) or []),
-                                       "tasks": len(prop.get("tasks", []) or [])},
-                            "grid_preview": (grid or "")[:600]})
+                partial = prop.get("_partial") if isinstance(prop, dict) else None
+                resp = {"ok": ("error" not in prop) and not partial, "proposal": prop,
+                        "counts": {"shots": len(prop.get("shots", []) or []),
+                                   "tasks": len(prop.get("tasks", []) or [])},
+                        "grid_preview": (grid or "")[:600]}
+                if partial:
+                    # cmd_496第3便 AC11(欠陥A是正): 一部成功を黙って"成功"として返してはならぬ。
+                    # ok:false とし、欠落を社員へ明示する文言を message に載せる。
+                    resp["message"] = (f"{partial['total_chunks']}分割中{partial['failed_chunks']}個が失敗し、"
+                                        "一部の行が欠けております。お手数ですが、失敗箇所の行数を減らして"
+                                        "お試しくだされ。")
+                self._json(resp)
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
@@ -7672,6 +10050,7 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path != "/api/chat":
             self.send_response(404); self.end_headers(); return
+        _llm_call_turn_reset()   # cmd_515手当2: このturn(=このスレッド)の推論機呼出記録を空にする
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
         msgs = req.get("messages", [])
@@ -7705,10 +10084,31 @@ class H(BaseHTTPRequestHandler):
             # 応答をhangさせる為 hot pathから外す(存在確認は台帳が担う)。索引の高速化(binary)は別課題。
             hits = (casper_embed.hybrid(last_user, k=8) if (casper_embed and last_user)   # M2: 意味検索復活(sqlite再ランク・内部で字面フォールバック)
                     else (casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []))
+            _canon_turn = (_asks_about_casper(last_user) is True)   # cmd_498穴B手当1: 既存機構の再利用
+            if _canon_turn:
+                hits = _inject_canon(_prioritize_canon(hits))   # cmd_498第2便穴A手当2: 並べ替えで足りねば直接差し込む
             src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
-            fullnote = ("\n\n## 該当資料の全文 (" + src + ")\n" + fulltext[:7000]) if fulltext else ""
+            _gstate = _grounding_state(hits, fulltext, last_user)   # cmd_497: 材料の構造の齟齬(hits=0なのにfulltext在り)を検知
+            fullnote = _build_grounding_block(_gstate, src, fulltext)   # cmd_497第2便: 注意書きをfulltext有無から独立させて注入(欠陥B是正)
             cal = build_digests(who, last_user)       # Fable M1: Ollama経路と同一の単一表から(entity/availability/gear/phase/fb_log/future_assign 欠落の解消)
             diag_hint = DIAG_HINT
+            # cmd_501 L9009裏口対応: WebSearch/WebFetchの許可自体を機構が判ずる(文言だけに頼らぬ)。
+            # ollama経路と同一のshould_search/build_queryを通し、通らねばallowへ含めぬ
+            # (claude CLI自身がWebSearchを呼べる余地そのものを消す=新しい門と同じ検問をこの裏口にも通す)。
+            # ★module級のcasper_webを使う(ここでlocal importすると同一関数do_POST内の他分岐にまで
+            # 'casper_web'がローカル変数として扱われUnboundLocalErrorを起こす・cmd_501実測で発見)。
+            _pj_st = _pj_resolve(last_user)[0]
+            _casper_q = (_asks_about_casper(last_user) is True)
+            _web_ok = casper_web.should_search(last_user, pj_status=_pj_st, asks_about_casper=_casper_q)
+            _web_query, _web_reason = casper_web.build_query(last_user) if _web_ok else (None, "should_search=False")
+            _cli_allow = ["WebSearch", "WebFetch"] if _web_query else []
+            if _web_query:
+                _web_hint = ("外の事について調べたい場合はWebSearchを使ってよい。検索語は必ず次の語だけを使え: "
+                             f"『{_web_query}』(これ以外の語・社内固有名詞を検索語に混ぜるな)。"
+                             "Web由来は『(Web: <URL>)』と出所を明記せよ。")
+            else:
+                _web_hint = ("**WebSearch/WebFetchは今回のturnでは許可されておらぬ(ツールが与えられていない)。"
+                             "外部情報が要ると思っても、検索はできぬ旨と代わりの言い方を促す文だけを述べよ。**")
             prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
                       + fullnote
                       + "\n\n## ユーザーの今回の発言:\n" + last_user
@@ -7717,14 +10117,25 @@ class H(BaseHTTPRequestHandler):
                       "(裏で取得済を注入してある)。注入データに答えが無い時のみ『記録に無い』と述べよ。"
                       "その内容で答えられる限りユーザーに追加共有を求めるな(『ファイルを共有すれば〜』等の条件付け・保留は禁止)。"
                       "**ローカルのファイルを直接読もうとするな**(その手段は無い・注入分だけで判断・『ファイルが見つからない』とは言うな)。"
-                      "社内に無い外部情報が要る時のみ WebSearch/WebFetch を使う(Web由来は『(Web)』明記・機密は検索語に含めぬ)。"
-                      "**【捏造厳禁】社内固有の事実(制作実績・作品名・人物・案件・クライアント・数値)は、"
+                      "\n\n## 【外部Web検索について(機構が判定済)】\n" + _web_hint
+                      + "\n\n**【捏造厳禁】社内固有の事実(制作実績・作品名・人物・案件・クライアント・数値)は、"
                       "上の注入データ(Calendar/RAG/資料)に明記された物だけを述べよ。"
                       "自分の一般知識・記憶から『それっぽい有名作』を補完・推測するな**"
                       "(例: データに無い映画/ゲーム/CM名を勝手に足さない)。"
                       "データに該当が無ければ『記録にあるのは〜』と在る分だけ挙げ、無い旨を正直に言え。"
                       "Casper として簡潔に答えよ。")
-            raw = claude_cli_text(prompt, allow=["WebSearch", "WebFetch"])
+            raw = claude_cli_text(prompt, allow=_cli_allow)
+            if _web_query:
+                try:
+                    casper_web._assert_query_subset(_web_query, last_user)   # AC5機械保証(このバックエンドでも同一機構を通す)
+                    _urls = casper_web._URL_RE.findall(raw or "")
+                    casper_web._log_search(who.get("uid"), None, last_user, _web_query,
+                                           "claude_cli_backend", None, _urls, 0.0)
+                except Exception:
+                    pass
+            else:
+                casper_web._log_search(who.get("uid"), None, last_user, None, "claude_cli_backend",
+                                       (_web_reason if not _web_ok else "should_search=False"), [], 0.0)
             thinking = ""
             tm = re.search(r"<think>(.*?)</think>", raw or "", re.S)
             if tm:
@@ -7732,6 +10143,9 @@ class H(BaseHTTPRequestHandler):
             ans = strip_think(raw)
             ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
             ans = _validate_assets(ans)                           # 出口検問: 捏造/asset URLを除去
+            ans = _guard_unrostered_person_claim(ans)             # 出口検問(AC2・cmd_508): claude_cli経路でも同一機構を通す
+            if _web_query:                                        # cmd_501: WebSearchを許可したturnのみ札付け出口検問
+                ans = casper_web.grounding_gate(ans, {"ok": True, "urls": casper_web._URL_RE.findall(raw or "")})
             ans, diagram = render_diagram(ans)
             log_convo(who, "user", last_user)                     # 文脈=流れ を順序記録
             log_convo(who, "casper", ans, {"diagram": bool(diagram)})
@@ -7767,6 +10181,20 @@ class H(BaseHTTPRequestHandler):
         # --- Ollama(local) backend (qwen3.6:27b 等・自律 tool-calling) ---
         ll_user = next((m.get("content", "") for m in reversed(msgs)
                         if m.get("role") == "user"), "")
+        # cmd_499(c): 番号のみの返答は、直前turnで機構が示した列挙(_LAST_ENUM)と突合する。
+        # 突合できれば検索語でなく前turnの選択として本文へ接ぐ。数字のみの入力で突合できなければ、
+        # 見当違いの検索(実害: 「1件のプロジェクトはありません」)へ流さず正直な行き止まり回避文を返す。
+        if who and _NUM_ONLY_RE.match(str(ll_user or "")):
+            _num_resolved = _resolve_number_reply(ll_user, thr, who)
+            if _num_resolved:
+                ll_user = _num_resolved
+            else:
+                self._emit("先ほどの番号でのお答えを受け取れませなんだ。お手数ながら内容でお申し付けくだされ。")
+                try:
+                    self.wfile.write(b'{"done":true}\n')
+                except Exception:
+                    pass
+                return
         # ③ 選択カードの選択を検知(say型再投入=直前カードのoptionと一致)→教師信号として記録(カードが自らを減らす学習)
         if casper_person_gate:
             _lc = _LAST_CHOICES.pop(thr, None)
@@ -7796,7 +10224,10 @@ class H(BaseHTTPRequestHandler):
             sysadd += _gate["digest"]
         _au_note = aurora_url_digest(ll_user)            # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
         sysadd += _au_note
+        _au_resolved = "これが一次資料" in _au_note        # cmd_493: 一次資料が確定した turn か(取得失敗時は False=vault併用を妨げぬ)
         sysadd += deixis_table_digest(ll_user, msgs)      # 『この表』→直前の自分の応答の表を機構が名指して渡す
+        sysadd += anchor_digest(thr, who, ll_user)        # cmd_508(病三): 継続形の短文→直前の錨(資料/案件/人物)を機構が名指して渡す
+        sysadd += retry_fallback_digest(thr, who, ll_user)  # cmd_510第3便: 60秒内の再打鍵/言い換えを検知→生の材料へ落とす
         _dx_rows = _deixis_table_rows(ll_user, msgs)      # 同じ表を DM本文の接地にも使う(単一機構)
         sysadd += dm_writing_digest(ll_user, _dx_rows)    # DMは宛先の目で書く(指示語禁・材料同梱・取次禁)
         thread_rules_observe(thr, ll_user)                # 殿が述べた規則を控える(履歴予算から溢れても失わぬ)
@@ -7839,13 +10270,13 @@ class H(BaseHTTPRequestHandler):
                                     else "（起票の実行はリード／PM以上が行えまする。下は確認用にござる。）"))
             else:
                 minutes_reply = minutes.get("clarify")
-        table_card = None if (assign_card or mine_prose or resched or mtg_adv or status_res or minutes) else _table_card(ll_user, who)   # ④ 一覧意図→表カード
+        table_card = None if (assign_card or mine_prose or resched or mtg_adv or status_res or minutes) else _table_card(ll_user, who, thr=thr)   # ④ 一覧意図→表カード
         if table_card:
             # 弱qwenは「表カードとして描画済み・再現するな」というメタ指示をそのまま鸚鵡返しし、ユーザーへ
             # 「表示装置が既に描画済み・重複して再現しません」と漏らす(殿指摘2026-07-17: 機械臭く分かりづらい)。
             # → 注記を"要約の作り方"に反転し、画面/自分の制約に触れる語を明示的に禁止(下段6915で機構除去も併走)。
             # 【件数と一覧は同一関数(掟)】内訳を機構が数えて渡す。渡さねば弱qwenは context 中の別物
-            # (全社統計等)を当該PJの数として述べる——実測2026-07-27: marukome(実 ap40/qc_fb9)を
+            # (全社統計等)を当該PJの数として述べる——実測2026-07-27: あるPJ(実 ap40/qc_fb9)を
             # 「wip13件・mk8件」と作文した。それは全社の in_progress/todo の数であった。
             _cols = table_card.get("columns") or []
             _brk = ""
@@ -7879,16 +10310,75 @@ class H(BaseHTTPRequestHandler):
         # legacy/過去知識/捏造を拾う「一つの病」を入口で断つ。table_card等のCalendar機構が発火済ならその母集合が答え。
         # knowledge/文脈の問いのみ vault を引く(現・過去とも・時間除外は不要=legacyも知識としてなら許容)。
         _status_q = bool(table_card or _sched or _STATUS_Q_RE.search(ll_user or ""))
+        hits = []   # cmd_492検証中発見: status経路はhits未定義のままtrace emit(L8805)のisinstance判定に到達しNameError→trace全体が握り潰される既存不具合。空リストで安全側初期化のみ(挙動非変更・trace観測を復旧)
+        # cmd_493: 貼られたAurora資料URLが一次資料として確定した turn は vault(RAG)を併走させぬ。
+        # 実測2026-07-31 20:35: URL解決成功(material 4508字)後もvault top_source(無関係な他人の資料
+        # ARKitLedScan…)が並走注入され、弱qwenが後者を『提供された資料』と誤認して答えた
+        # (rag_hits=5・ctx_len=14248を実再現で確認)。_status_q(Calendar既存軸)とは別軸ゆえ混ぜぬ
+        # (下段L9017の存在否定ガードはCalendar専用の掟であり、Aurora資料には無関係)。
         try:
-            if not _status_q:                             # knowledge経路のみ vault を引く
+            if not (_status_q or _au_resolved):           # knowledge経路のみ vault を引く(Aurora一次資料が有る turn は除く)
                 hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)
                         else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
+                _canon_turn = (_asks_about_casper(ll_user) is True)   # cmd_498穴B手当1: 既存機構の再利用
+                if _canon_turn:
+                    hits = _inject_canon(_prioritize_canon(hits))   # cmd_498第2便穴A手当2: 並べ替えで足りねば直接差し込む
                 if hits:
                     sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
                 src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
                 if fulltext:
                     sysadd += ("\n\n## 該当資料(右脳vault・" + src + ") — サムネ等の画像URL `![](/asset/..)` は"
                                "ここから一字一句コピーせよ。これに無い画像URLは創作するな:\n" + fulltext[:7000])
+        except Exception:
+            pass
+        # cmd_501: 一般の調べ物のためのネット検索。qwenのtool呼出には委ねぬ——機構が発火を判ずる
+        # (「外の事を尋ねる形」かつ「社内対象が解決せぬ」turnのみ・軍師設計の2条件そのまま)。
+        # ★hits/fulltextはゲートに使わぬ(実測で判明した罠): casper_embed.hybrid(k=6)は字面trigram
+        # 候補(casper_rag.candidates、閾値sc>0.02という極めて緩い足切り)を土台とするため、無関係語
+        # (例:「バルセロナオリンピック」「OpenUSD」)でもほぼ毎回 k件 埋まって返る——「hitsが空でない」は
+        # 「社内に関連記録がある」を意味しない(既存コードの hits 利用はすべて『見つかった物を引用表示』
+        # 用途であり、本cmdのような『検索要否のゲート』用途には転用不可だった)。
+        # ゆえ軍師が明記した2条件(_pj_resolve/_asks_about_casper)に加え、実測で発見した第3条件
+        # (自社Vimeoライブラリ検索の意図)も除外する——「Vimeoの動画を探して」は_pj_resolve/_asks_about_casper
+        # いずれにも掛からず(社外Web検索と誤判定・実測2026-08-07)、既存のvimeo_search tool(qwen呼出)が
+        # 本来担うべき内部検索を機構が横取りしてしまっていた。vault由来の断り文言
+        # (「社内記録には見当たりませなんだ」)は_gstate系の出口検問が別途担っており、ここでの二重ゲートは不要。
+        _web_search_result = None
+        try:
+            _web_internal_tool = bool(_INTERNAL_TOOL_SCOPE_RE.search(ll_user or ""))
+            if casper_web and not (_status_q or _au_resolved or _web_internal_tool):
+                _asks_form = bool(_QUESTION_FORM_RE.search(ll_user or "") or _REQUEST_FORM_RE.search(ll_user or ""))
+                _web_pj_st = _pj_resolve(ll_user)[0]
+                _web_casper_q = (_asks_about_casper(ll_user) is True)
+                if casper_web.should_search(ll_user, pj_status=_web_pj_st, asks_about_casper=_web_casper_q, asks_form=_asks_form):
+                    _web_search_result = casper_web.search(ll_user, uid=who.get("uid"), thread=thr, cli_text_fn=claude_cli_text)
+                    if _web_search_result.get("ok"):
+                        sysadd += casper_web.format_result_block(_web_search_result) + casper_web.WEB_PROMPT_RULE
+                    else:
+                        sysadd += ("\n\n## 【外部Web検索について(機構が判定済)】"
+                                   f"今回は検索を実行しなかった({_web_search_result.get('reason')})。"
+                                   "その理由をそのまま丁寧に伝え、別の言い方で尋ね直すよう促せ(黙って諦めるな)。")
+                        _web_search_result = None   # blocked時は出口検問の対象にしない(grounding_gateはok=Trueのみ見るが明示)
+        except Exception:
+            pass
+        # cmd_492 第2便: ゼロ照応の引き継ぎ(5条件すべて満たす時のみ・機構が対象を確定的に注入)。
+        # sysadd が working(system message)へ凍結される直前(本行の前)に置くこと——この後段の
+        # sysadd 追記(_corpus_only_note 等)は working 凍結後ゆえ LLM プロンプトへ届かぬ既存の構造
+        # (choices_obj/_snz/_assign_short もこの時点では未定義)。5条件を満たさぬ場合(鮮度切れ/
+        # 別人/話題なし/None判定不能)は引き継がず、qwenが自然に聞き返す(新たな聞き返し文言は作らぬ・2-4)。
+        # snooze/M4即応(_assign_short)等は後段で routed が立ち ollama_chat_stream 自体を短絡するため、
+        # ここで注入しても無害(その turn の system は生成に使われない)。
+        _handoff_topic = None            # cmd_492第3便: ここで一度だけ判定した結果を後段(L8863附近)へ持ち回り、
+                                          # _needs_prior_context/_topic_handoffのLLM classifier二重呼出を避ける。
+        _pq_new_topic = None              # cmd_492第3便: 聞き返し合成が成立した時の新topic(後段で_LAST_TOPICを
+                                          # これに更新する・そうしないと後段の再解決でnoiseに埋もれ得るため)。
+        try:
+            _handoff_topic = _topic_handoff(thr, who, ll_user)
+            if _handoff_topic:
+                sysadd += topic_handoff_digest(thr, who, ll_user, topic=_handoff_topic)
+            else:
+                _pq_digest, _pq_new_topic = _pending_question_synthesis(thr, who, ll_user)
+                sysadd += _pq_digest
         except Exception:
             pass
         # 会話履歴が長いと入力が num_ctx(12288) を埋め、出力(表等)が途中で切れる=文脈オーバーフロー。
@@ -7955,8 +10445,16 @@ class H(BaseHTTPRequestHandler):
         tools = tools or None
         final = ""
         pending_actions = []                        # Stage2: 副作用操作の承認待ちキュー
+        _dm_body_incomplete_hit = False             # cmd_494 2便: MCP tool_calls経路でpid None(中身欠如)が起きたら真実値で最終応答を機構が強制上書きする
+        # cmd_501: _web_search_result は上段(sysadd構築時)で機構が既に確定させている(qwenのtool呼出には委ねぬ設計)。
+        # ここでリセットせぬ——tool_calls経路(web_search)は保険として残すが、上段の判定を上書きしない。
         MAXIT = 6
         _t0 = time.time()                           # トレース: 生成時間計測の起点
+        try:                                         # cmd_509第2便: 実トラフィックの心拍(supervisorの無通信窓判定・AC6条件③用)
+            with open(os.path.join(HERE, "casper_traffic.heartbeat"), "w") as _hb:
+                _hb.write(str(_t0))
+        except Exception:
+            pass
         # Q4 snooze: 『今日は流す』の say型sentinel(__attn_snooze__ <ref> <name>)を決定的に処理(副作用ゼロ・qwen非経由)。
         _snz = re.match(r"^__attn_(snooze|dismiss)__\s+(\S+)(?:\s+(.*))?$", (ll_user or "").strip())
         attn_cards = []
@@ -7999,7 +10497,8 @@ class H(BaseHTTPRequestHandler):
             routed = {"_assign": True, "reply": _rep}
         # Q1(Fable 選択カード): 曖昧な指示語(それ/あの件…)＋action意図で対象候補が複数→qwenに推測(捏造)
         # させず選択カードで人に決めさせる。routerより優先(推測の芽を潰す)。say型ゆえ副作用起票はしない。
-        _fdm = None if (_snz or _assign_short) else _file_delivery_dm(ll_user, who, convo=msgs)   # 最優先: 文脈の共有リンク→DM(『これtetsuoに送っといて』の deixis で選択カードに横取りされぬよう choices より先)
+        _fdm = None if (_snz or _assign_short) else (_file_delivery_dm(ll_user, who, convo=msgs)
+                                                      or _own_response_delivery_dm(ll_user, who, convo=msgs))   # 最優先: 文脈の共有リンク→DM(『これtetsuoに送っといて』の deixis で選択カードに横取りされぬよう choices より先)。URL文脈が無ければcmd_508(病三E01): 直前の自分の応答本文→DM
         choices_obj = None if (_snz or _fdm or _assign_short) else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定
         if not choices_obj and not _snz and not _fdm and not _assign_short:    # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
             choices_obj = _pj_task_choices(ll_user)
@@ -8028,35 +10527,85 @@ class H(BaseHTTPRequestHandler):
                 summary = _action_summary(routed["tool"], routed["args"])
                 pid = _register_pending(routed["tool"], routed["args"], who.get("uid"), summary,
                                         origin="user", query=str(ll_user)[:400], trace_id=_tid)
-                try:
-                    PENDING_ACTIONS[pid]["thread"] = thr
-                except Exception:
-                    pass
-                pending_actions.append({"id": pid, "tool": routed["tool"], "args": routed["args"], "summary": summary})
-                final = routed["reply"]
+                if pid is None:                     # cmd_494: 中身欠如→起票せず聞き返す(fail-closed)
+                    final = _DM_BODY_INCOMPLETE_MSG
+                    routed = None
+                else:
+                    try:
+                        PENDING_ACTIONS[pid]["thread"] = thr
+                    except Exception:
+                        pass
+                    pending_actions.append({"id": pid, "tool": routed["tool"], "args": routed["args"], "summary": summary})
+                    final = routed["reply"]
             except Exception:
                 routed = None                       # 起票失敗→通常経路へフォールバック
         # B) 本物のストリーミング(Fable最大の一手・TTFT短縮): text応答をトークン単位でクライアントへ即送出。
         # tool_call応答はcontentが空ゆえ流れない。routed(P2アクション)時はカード返信ゆえストリームせず。
+        # cmd_494 3便(軍師案(3)採用・行単位の保留に変更): 完了断定検問(_guard_completion_claims)は
+        # 「カードが立っているか」を見て判定するが、それはturn終了時(pid確定)にしか定まらない。
+        # ★当初はquery先読み(_looks_like_action)でturn全体の非ストリーム化を試みたが、実測で
+        # 「先ほど話した内容と同じものをtetsuoに共有しておいて」等、query自体には送信語彙が一切無い
+        # (qwenがtool_callすら呼ばず素のテキストで完了主張だけ書く)場合に検知が漏れることが判明した
+        # (query先読み・tool_call検知のいずれの前兆シグナルも存在しない偽陰性)。
+        # ★cmd_494 5便(至急差戻・軍師案(2)採用): 3便まではここで_completion_claim_line_hit(語彙表・
+        # 完了主張の"形")を使っていたが、軍師実測(8回)で「とDMします」等の意志表明型が除外語を含まず
+        # 素通しされたまま弾かれ続ける(AC3退行)ことが判明した。除外語を積み増す方向は次の語彙で同じ穴が
+        # 開く(cmd_485で6巡した轍)ため採らない。判定を「語彙の形」から「カードの有無」へ移す——
+        # 送信(送る/DM等)に言及する行は完了断定であれ意志表明であれ一様にその場で保留し(_send_mention_line_hit、
+        # 誤検出があってもよい広い一次判定)、turn終了時に_register_pendingの結果(pid確定/None)を見て
+        # ①カード成立→正直な下書き告知文 ②カード不成立→正直な聞き返し文、のいずれかへ機械的に差し替える。
+        # qwenが生成した原文(意志表明であれ完了断定であれ)は画面に一切出さない。
         _sbuf = [""]; _did_stream = [False]
         _cont = 0                                   # 截ち切れ自動継続の回数(トレース用・routed時も定義)
         _pend = [""]                                # 穴1(Fable): 行バッファ。末尾の不完全行は保留し、截ち切れ時に破棄できる
+        _held_claims = []                            # cmd_494 5便: 送信言及行(turn終了までクライアントへ出さず、確定文へ差し替える)
+        # cmd_510第1便(実害A止血・層3=門): このturn単位で一度だけ送信意図を判定する(層1)。
+        # 層2(_send_mention_line_hit・下記ループ)は一行も変更しない——読取turn(False)の時だけ
+        # 判定結果を無視させず「そもそも保留対象にしない」ことで、読取turnでは送信検問ごと眠らせる。
+        # 送信turn(True)なら従来通りすべて動く(殺していない)。
+        _send_intent_gate = _turn_is_send_intent(ll_user, exclude_uid=who.get("uid"))
         def _semit(c):
-            _sbuf[0] += c; _did_stream[0] = True     # _sbuf=全生チャンク(replace比較用)
+            _sbuf[0] += c                            # _sbuf=全生チャンク(replace比較用)
             _pend[0] += c
             if "\n" in _pend[0]:                     # 完成した行(改行まで)だけクライアントへ→壊れた行を画面に出さない
                 cut = _pend[0].rfind("\n") + 1
                 emit_now = _pend[0][:cut]; _pend[0] = _pend[0][cut:]
-                try:
-                    self._emit(emit_now)
-                except Exception:
-                    pass
-        def _flush_pend():                           # 自然終了時: 保留中の完成分をクライアントへ
+                # cmd_492 4便: ストリーム送出は _strip_tool_narration(final一括処理)より先に外へ出る
+                # ため、完成行の道具実況/道具呼出断片はここで剥がしてから送る(既送信分は取り消せぬ)。
+                # 改行/空白構造を壊さぬ専用版(_strip_tool_narration_chunk)を使う。
+                emit_now = _strip_tool_narration_chunk(emit_now)
+                if not emit_now:
+                    return
+                _kept_lines = []
+                for _ln in emit_now.splitlines(keepends=True):
+                    if _send_intent_gate and _send_mention_line_hit(_ln):   # cmd_494 5便: 送信言及行はここで止め、final確定後に確定文へ差し替える
+                        _held_claims.append(_ln)
+                    else:
+                        _kept_lines.append(_ln)
+                emit_now = "".join(_kept_lines)
+                if emit_now:
+                    _did_stream[0] = True
+                    try:
+                        self._emit(emit_now)
+                    except Exception:
+                        pass
+        def _flush_pend():                           # 自然終了時: 保留中の完成分をクライアントへ(送信言及行は_held_claimsへ)
             if _pend[0]:
-                try:
-                    self._emit(_pend[0])
-                except Exception:
-                    pass
+                _tail = _strip_tool_narration_chunk(_pend[0])   # cmd_492 4便: 末尾の未完成行(改行なし終端)も同様に検問
+                if _tail:
+                    _kept_lines = []
+                    for _ln in _tail.splitlines(keepends=True):
+                        if _send_intent_gate and _send_mention_line_hit(_ln):
+                            _held_claims.append(_ln)
+                        else:
+                            _kept_lines.append(_ln)
+                    _tail = "".join(_kept_lines)
+                    if _tail:
+                        _did_stream[0] = True
+                        try:
+                            self._emit(_tail)
+                        except Exception:
+                            pass
                 _pend[0] = ""
         def _drop_pend():                            # 截ち切れ時: 未送出の不完全行を破棄(継続が書き直す)
             _pend[0] = ""
@@ -8088,11 +10637,16 @@ class H(BaseHTTPRequestHandler):
                                 summary = _action_summary(fn, args)
                                 pid = _register_pending(fn, args, who.get("uid"), summary,
                                                         origin="user", query=str(ll_user)[:400], trace_id=_tid)
-                                pending_actions.append({"id": pid, "tool": fn, "args": args, "summary": summary})
-                                result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
-                                          "⚠️ **まだ実行しておらぬ**。ユーザーが画面下の承認ボタンを押すまで送信/実行されぬ。"
-                                          "**絶対に『送信しました/送りました/実行しました/作成しました』等の完了報告をするな**(嘘になる)。"
-                                          "正しくは『○○を下書きしました。下の承認ボタンを押すと実行されます』と案内せよ。同じ操作を再呼出するな。")
+                                if pid is None:                        # cmd_494 2便: 中身欠如→起票せず(phantom pending_actions登録も禁止・_guard_completion_claimsを無力化させぬ)
+                                    _dm_body_incomplete_hit = True
+                                    result = ("[未登録] 中身が欠けているため下書きを起票しなかった。"
+                                              "**完了報告は一切するな**。次のユーザー入力を待て。")
+                                else:
+                                    pending_actions.append({"id": pid, "tool": fn, "args": args, "summary": summary})
+                                    result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
+                                              "⚠️ **まだ実行しておらぬ**。ユーザーが画面下の承認ボタンを押すまで送信/実行されぬ。"
+                                              "**絶対に『送信しました/送りました/実行しました/作成しました』等の完了報告をするな**(嘘になる)。"
+                                              "正しくは『○○を下書きしました。下の承認ボタンを押すと実行されます』と案内せよ。同じ操作を再呼出するな。")
                             else:                                      # 読取系(get_messages 等)= write token+actor で実行
                                 result = casper_mcp.call_tool(fn, args, token=(WRITE_TOKEN or None),
                                                               actor=who.get("uid"))
@@ -8172,10 +10726,30 @@ class H(BaseHTTPRequestHandler):
         if not final:
             final = "(応答を得られませなんだ)"
         final = re.sub(r"\n{3,}", "\n\n", final).strip()
+        if _dm_body_incomplete_hit:                 # cmd_494 2便(主たる手当て): pid None(中身欠如)が起きたturnは
+            # qwenがどんな文面を書こうと(「送信します」等の虚偽断定含め)一切信用せず、最終応答を機構が完全に差し替える。
+            # retrieve-then-renderと同じ筋——材料(pid)が無ければ機構が正直な文を出す。regexの網羅性に依存しない。
+            final = _DM_BODY_INCOMPLETE_MSG
         _pre = final
-        final = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid,
-                                       table_md=_dx_rows)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
+        # ★cmd_494 5便: _salvage_text_toolcall(qwenが送信をテキストで表明しただけの行から宛先/本文を
+        # 抽出し実カードへ起票する救済)は、_resolve_send_mentionsより必ず先に走らせる。逆順だと
+        # _held_claims相当の文(「〇〇さんへ…送信しました\n> 本文」等)が確定文に差し替わった後の
+        # finalしか見えず、salvageが宛先/本文を抽出できずカード成立の芽そのものを摘んでしまう
+        # (AC14の「意志表明/完了断定いずれの文言でもカードが成立する」を構造的に阻害する)。
+        final, _au_choices = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid,
+                                       table_md=_dx_rows, choices_obj=choices_obj)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
+        if _au_choices and not choices_obj:      # ★既にchoices_objが埋まっている場合(下書き選択が先行)は既存を優先し、本カードは出さぬ(安全側)
+            choices_obj = _au_choices
+            routed = {"_choices": True, "reply": choices_obj["prompt"]}
         _salv = final != _pre; _pre = final
+        if not _dm_body_incomplete_hit and _held_claims and not _salv:   # cmd_494 5便: salvage後のpending_actionsを見て確定文へ差し替え
+            # ★salvageが既に自前の正直な下書き告知文(下書きしました…)へ書き換えた(_salv=True)場合は
+            # その文言をそのまま採用する——ここで重ねて_resolve_send_mentionsを通すと、salvage自身の
+            # 告知文(「送信されます」等)がまた_send_mention_line_hitに拾われ、二重差替で文末の句読点
+            # 断片だけが残る事故になる(実測)。_salvが立っていない(salvageは何もできず、カード成立/不成立が
+            # 別経路——MCP tool_calls等——で決まった)時のみ、ここで送信言及行を確定文へ差し替える。
+            final = _resolve_send_mentions(final, _held_claims, pending_actions)
+            _pre = final
         try:                                                         # DM本文が指示語で済ませ材料を欠くなら、機構が当の表を添える
             for _a in pending_actions:
                 if _a.get("tool") == "send_message" and _a.get("args", {}).get("body"):
@@ -8194,26 +10768,79 @@ class H(BaseHTTPRequestHandler):
             pass
         final = _validate_assets(final)                              # 出口検問: 捏造/asset URLを除去(qwen経路の主戦場)
         _val = final != _pre; _pre = final
+        if _web_search_result is not None and casper_web:            # cmd_501: Web検索を実行したturnのみ札付け出口検問(過剰注入回避)
+            final = casper_web.grounding_gate(final, _web_search_result)
         final = _strip_name_gloss(final, sysadd, ll_user)            # 出口検問: 解決済みPJ名の推測括弧展開(丸亀製麺等)を剥ぐ(Fable処方3)
         _gloss = final != _pre; _pre = final
+        final = _guard_unrostered_person_claim(final)                # 出口検問(AC2・cmd_508): roster外のファイル名幹(profile_u_*)が人として主語に立つ文を差し止め
+        _person_slot_guarded = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
         _grd = final != _pre; _pre = final
-        final = _validate_choices(final, pending_actions, choices=(choices_obj or attn_cards))   # Q2: 裸の選択要求(装置なし)を削除+中立誘導(不変条件①)
+        _enum_src = final                                            # cmd_499(記録用): 検問前の列挙行を控える(検問が削っても番号突合は生かす)
+        final = _validate_choices(final, pending_actions, choices=(choices_obj or attn_cards), injected=sysadd)   # Q2: 裸の選択要求(装置なし)を削除+中立誘導(不変条件①)
         _vch = final != _pre; _pre = final
+        # cmd_499(c記録側): この turn の応答に列挙行が2件以上あれば、次turnの番号返答突合用に控える
+        # (_LAST_TOPICと同型の作法・thread単位・鮮度30分・uid一致。cmd_492の_LAST_TOPIC本体には手を入れない独立機構)。
+        try:
+            _enum_lines = [m.group("body") for m in
+                           (_ENUM_LINE_RE.match(_ln) for _ln in _enum_src.split("\n")) if m]
+            if len(_enum_lines) >= 2:
+                _LAST_ENUM[thr] = {"lines": _enum_lines, "ts": time.time(), "uid": who.get("uid")}
+                if len(_LAST_ENUM) > 200:
+                    for _k in list(_LAST_ENUM)[:-200]:
+                        _LAST_ENUM.pop(_k, None)
+        except Exception:
+            pass
+        _pre_narr = final
         final = _strip_tool_narration(final)                         # Q7: 道具実況(生の関数呼び構文だけで停止)を剥ぐ→空なら下でfallback救済
+        _leaked_toolcall = final != _pre_narr                        # cmd_492 4便: 剥いだ=道具が未実行のまま実況だけで止まった証跡
         final = _strip_context_echo(final, ll_user)                  # Q3B: 非該当セクション(Vimeo手順等)の滲出を出口で除去
         _ech = final != _pre
-        if not final.strip() and not pending_actions:                # 出口検問で全消し(ツール漏れ等)かつカード無し→PJ状態を救済 or graceful
-            final = _pj_status_fallback(ll_user) or "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。"
+        final = _guard_casper_howto_claims(final, ll_user)           # cmd_490手当2 B-4: Casper自身の使い方turnで捏造手順/誤った外部依頼提案を落とし正典へ差替
+        _promise_only = _is_promise_only_no_data(final)                 # cmd_492 4便追補: 道具呼出構文は無いが約束文だけで実データが無い形
+        if (not final.strip() or _leaked_toolcall or _promise_only) and not pending_actions:
+            # 出口検問で全消し、道具実況を剥いだ(=実行に繋がらず narration だけが残った)、
+            # または約束文だけで実データが無い場合はカード無き限り救済。
+            # narration の残骸だけを「回答した」ことにせず、実データ or 正直な不能表明のどちらかへ倒す(掟: 失敗とゼロを別出口へ)。
+            # cmd_492 4便再送: この turn で既にvault検索済(L8929附近)なら src/fulltext を fallback へ渡す
+            # (未計算=status経路等ではNameErrorを避けるためlocals()経由。新たな検索は起こさない)。
+            final = _pj_status_fallback(ll_user, vault_src=locals().get("src"), vault_fulltext=locals().get("fulltext")) \
+                or "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。"
         if _sched and _sched[0] not in final:                        # ① 決定的保証: 工程表CSVリンクがqwen応答から漏れたら機構が付す
             final = (final.rstrip() + f"\n\n{_sched[0]}\n"
                      f"（Excelで開けます。編集して取り込み直すことも可能です／Calendarへ直接反映も承認カードで行えます）")
         if casper_breaker:                          # z8a(qwen)の健全性を記録: 成功可否+レイテンシ→連続失敗でred=クラウド縮退の判断材料
-            try:
-                casper_breaker.record("z8a", ok=not final.startswith("[error]"),
+            try:                                     # cmd_509第2便: key を endpoint別(gen:host:port)へ改める(旧"z8a"固定は多義)
+                casper_breaker.record(casper_breaker.gen_key(*_ENDPOINT_HOSTPORT.split(":", 1)),
+                                      ok=not final.startswith("[error]"),
                                       latency_ms=int((time.time() - _t0) * 1000))
             except Exception:
                 pass
+        # cmd_492 第1便: _LAST_TOPIC記録(記録のみ・まだ判定/注入に使わない・挙動は変えない)。
+        # 既存の決定的解決器が既に解決した結果のみを拾う(新たな推測機構は追加しない・掟「接地の機構化」)。
+        try:
+            _topic = _resolve_turn_topic(ll_user, _handoff_topic, _pq_new_topic,
+                                          locals().get("_canon_turn"), locals().get("src"))
+            if _topic:
+                _topic["uid"] = who.get("uid")
+                _topic["ts"] = time.time()
+                _LAST_TOPIC[thr] = _topic
+                if len(_LAST_TOPIC) > 200:
+                    for _k in list(_LAST_TOPIC)[:-200]:
+                        _LAST_TOPIC.pop(_k, None)
+        except Exception:
+            pass
+        # cmd_508 第3便(病三): _LAST_ANCHOR記録。_resolve_turn_topicが既に計算した結果(_topic)を
+        # 横取りするのみで、新たな解決/推測は一切行わない(既存機構への非干渉・単一の解決結果を二機構で共有)。
+        try:
+            _record_anchor(thr, who, locals().get("_topic"))
+        except Exception:
+            pass
+        # cmd_510第3便(実害C): 次turnの型2(述語継承)判定材料として、本turnの述語らしき語を記録する。
+        try:
+            _record_predicate(thr, ll_user)
+        except Exception:
+            pass
         if casper_trace:                            # トレース: 判断点を1req=1行で記録(事後分析基盤・Fable #7-1)
             try:
                 _abstain = bool(re.search(r"(見当たら|確認できた範囲|わかりませ|分かりませ|存じませ|"
@@ -8226,18 +10853,26 @@ class H(BaseHTTPRequestHandler):
                         "asset": sorted(set(re.findall(r"/asset/([^\s\)\"'\]]+)", sysadd)))[:40]}
                 _resp_ids = {"vimeo": sorted(set(re.findall(r"vimeo\.com/(\d+)", final)))[:40],
                              "asset": sorted(set(re.findall(r"/asset/([^\s\)\"'\]]+)", final)))[:40]}
-                casper_trace.emit({"trace_id": _tid, "query": str(ll_user)[:200], "actor": who.get("uid"), "thread": thr,
-                                   "routed": bool(routed), "action": (routed or {}).get("tool"),
-                                   "fastpath": _fastpath, "echoed": _ech, "vch": _vch,   # 決定的fast path/echo検問/裸選択検問の発火
-                                   "injected_facts": _inj, "resp_ids": _resp_ids, "cont": _cont,   # 注入事実/応答ID/継続回数
-                                   "gate": {"intent": _gate.get("intent"), "facet": _gate.get("facet"),
-                                            "aliases": len(_gate.get("alias_refs") or [])} if _gate else None,
-                                   "pj": (lambda r: {"status": r[0], "n": len(r[1]), "path": r[2]})(_pj_resolve(ll_user)),   # 名前解決の3値/経路(観測)
-                                   "rag_hits": len(hits) if isinstance(hits, list) else 0, "ctx_len": len(sysadd),
-                                   "gen_sec": round(time.time() - _t0, 1), "salvaged": _salv, "validated": _val, "gloss": _gloss,
-                                   "guarded_claim": _grd, "abstained": _abstain,   # 棄権(Fable #3-5/7-5: 棄権率の定点観測)
-                                   "digests_fired": _dig_trace.get("digests_fired"),   # M1: 発火digest(M2観測の種)
-                                   "final_len": len(final), "cards": len(pending_actions), "fewshot_used": list(_FEWSHOT_USED)})
+                casper_trace.emit(_trace_payload(
+                    trace_id=_tid, query=str(ll_user)[:200], actor=who.get("uid"), thread=thr,
+                    routed=routed,
+                    fastpath=_fastpath, echoed=_ech, vch=_vch,   # 決定的fast path/echo検問/裸選択検問の発火
+                    injected_facts=_inj, resp_ids=_resp_ids, cont=_cont,   # 注入事実/応答ID/継続回数
+                    gate=({"intent": _gate.get("intent"), "facet": _gate.get("facet"),
+                           "aliases": len(_gate.get("alias_refs") or [])} if _gate else None),
+                    pj=(lambda r: {"status": r[0], "n": len(r[1]), "path": r[2]})(_pj_resolve(ll_user)),   # 名前解決の3値/経路(観測)
+                    topic=_topic,   # cmd_492第1便: _LAST_TOPIC記録の観測用
+                    rag_hits=(len(hits) if isinstance(hits, list) else 0), ctx_len=len(sysadd),
+                    gen_sec=round(time.time() - _t0, 1), salvaged=_salv, validated=_val, gloss=_gloss,
+                    guarded_claim=_grd, abstained=_abstain,   # 棄権(Fable #3-5/7-5: 棄権率の定点観測)
+                    digests_fired=_dig_trace.get("digests_fired"),   # M1: 発火digest(M2観測の種)
+                    final_len=len(final), cards=len(pending_actions), fewshot_used=list(_FEWSHOT_USED),
+                    stream_claim_held=len(_held_claims),   # cmd_494 3便: ストリームで保留した完了主張行数
+                    web_fired=bool(_web_search_result and _web_search_result.get("ok")),   # AC8(cmd_508): 実際に検索を実行し結果を得たか
+                    pending_actions=pending_actions,
+                    turn_start_ts=_t0,   # AC8(cmd_508): カードpid証跡・cmd_510第3便: turn_start_tsは降車ログの境界切出しに使う
+                    send_intent_gate=_send_intent_gate,   # cmd_511第2便AC10: 層1判定値の観測増設
+                    llm_calls=_llm_call_turn_records()))   # cmd_515手当2: このturnで推論機を叩いた記録(AC4/AC5)
             except Exception:
                 pass
         final, diagram = render_diagram(final)
@@ -8247,7 +10882,7 @@ class H(BaseHTTPRequestHandler):
         try:
             _neg_re = _NEG_EXIST_RE
             # 撃つ資格は「限定なしの存在否定」があること。『未着手のタスクはありません』は mk=0 なら真ゆえ、
-            # そこへ「全49件ある」と付すのは機構の側の的外れ(実測2026-07-27 marukome)。文単位で選り分ける。
+            # そこへ「全49件ある」と付すのは機構の側の的外れ(実測2026-07-27・あるPJで発生)。文単位で選り分ける。
             _sents = [s for s in re.split(r"(?<=[。\n])", final) if s.strip()]
             _bare = [i for i, s in enumerate(_sents)
                      if _neg_re.search(s) and not _NEG_SCOPE_RE.search(s)]
@@ -8316,6 +10951,8 @@ class H(BaseHTTPRequestHandler):
                 final = "下記の図に整理しました。ご確認くだされ。"
         if _sched and _sched[0] not in final:                # CSVリンクは render_diagram 後も最終保証(AURORA前置で消えても付す)
             final = final.rstrip() + f"\n\n{_sched[0]}"
+        if _dm_body_incomplete_hit:                          # cmd_494 2便: 最終送出直前の再強制(下流の一切の継ぎ足し・復元処理を上書きし、完全に差し替える)
+            final = _DM_BODY_INCOMPLETE_MSG
         log_convo(who, "user", ll_user)
         log_convo(who, "casper", final, {"diagram": bool(diagram)})
         dev_log(who, ll_user, final, {"model": A.model, "backend": "ollama"})
@@ -8628,10 +11265,50 @@ def _digest_refresh_loop():
 
 
 import threading as _threading
-_threading.Thread(target=_warm_model_loop, daemon=True).start()   # 起動直後からモデルを温め続ける
-_threading.Thread(target=_profile_worker, daemon=True).start()    # アイドル便乗で個性プロファイル育成
-_threading.Thread(target=_events_puller, daemon=True).start()     # 全社ログ集約(get_events 増分pull)
-_threading.Thread(target=_digest_refresh_loop, daemon=True).start()  # digest をライブ自動更新(RO非依存・恒久)
+# cmd_507症状②: import副作用で常駐スレッド+HTTP待受が起動し検証プロセスと本番が状態ファイル/portを奪い合う件の抑止口。
+# 既定は「起こす」(env未設定なら従来通り) — 検証側がimportより前にCASPER_NO_DAEMON=1をsetdefaultする。
+_NO_DAEMON = os.environ.get("CASPER_NO_DAEMON", "").strip() not in ("", "0", "false")
+# cmd_512第4便申し送り2是正: import副作用の恒久断ち。CASPER_NO_DAEMON未設定時の既定は
+# 従来通り「起こす」が生きるが、それは python3 chat_server.py として直接実行された時のみに限る
+# (__name__ == "__main__"の外側では、単純`import chat_server`だけでは何も起動しない)。
+if __name__ == "__main__" and not _NO_DAEMON:
+    _threading.Thread(target=_warm_model_loop, daemon=True).start()   # 起動直後からモデルを温め続ける
+    _threading.Thread(target=_profile_worker, daemon=True).start()    # アイドル便乗で個性プロファイル育成
+    _threading.Thread(target=_events_puller, daemon=True).start()     # 全社ログ集約(get_events 増分pull)
+    _threading.Thread(target=_digest_refresh_loop, daemon=True).start()  # digest をライブ自動更新(RO非依存・恒久)
+def _recent_uids(days=14):
+    """直近days日にconversation_log.jsonlへ人の端末(ip=172.17.0.1)から現れたuidの集合(list)。
+    cmd_505: 画面通知の巡回先を「既定uid+🔔購読者」だけでなく「実際に使っている者」へ広げる本命(案2)。
+    weekly_report.pyのHUMAN_IP抽出と同じ源(cmd_502実測済)を読むだけで新たな記録は作らない。
+    末尾一定行数のみ読む(ログは伸び続けるため全読みを避ける・brief記載の配慮)。"""
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).date().isoformat()
+    uids = []
+    seen = set()
+    try:
+        with open(CONVO_LOG, encoding="utf-8") as f:
+            lines = f.readlines()[-4000:]
+    except Exception:
+        return uids
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get("ip") != "172.17.0.1":
+            continue
+        u = str(r.get("uid") or "")
+        if not u or u in seen:
+            continue
+        ts = str(r.get("ts") or "")[:10]
+        if ts and ts >= cutoff:
+            seen.add(u)
+            uids.append(u)
+    return uids
+
+
 def _notify_scheduler():
     """M3 司令塔: 常駐して割り込み政策エンジンを定期実行(既定15分毎)。朝ブリーフ(1日1回)＋閾値割り込みを
     通知ストアへ積む。実送信はせず"積む"だけ(承認/配信は別)。対象uidは環境変数 or 既定[28](殿)。"""
@@ -8642,14 +11319,22 @@ def _notify_scheduler():
     interval = int(os.environ.get("CASPER_NOTIFY_INTERVAL", "900"))   # 秒(既定15分)
 
     def _targets():
-        """通知を配る対象uid(動的): 既定(殿)＋push購読のある全ユーザー。誰でも🔔購読すれば自分の通知が届く。
-        各uidの通知は compute(uid)/_dm_notify_check(uid) が本人のタスク/DMに絞って算出(帰属の混線なし)。"""
+        """通知を配る対象uid(動的): 既定(殿)＋push購読のある全ユーザー＋直近14日に実際に使った者(cmd_505)。
+        各uidの通知は compute(uid)/_dm_notify_check(uid) が本人のタスク/DMに絞って算出(帰属の混線なし)。
+        直近14日を加えるのが本命(案2): 🔔購読していない者でも夜間巡回でpendingへ積まれ、画面表示が
+        「積まれた物を読むだけ」で待たされない(AC5)。base_uids/push購読は従来通り残す(AC2/AC4)。"""
         u = list(base_uids)
         try:
             if casper_push:
                 for x in casper_push.subscribed_uids():
                     if x not in u:
                         u.append(x)
+        except Exception:
+            pass
+        try:
+            for x in _recent_uids(days=14):
+                if x not in u:
+                    u.append(x)
         except Exception:
             pass
         return u
@@ -8746,8 +11431,13 @@ def _notify_scheduler():
         threading.Thread(target=_dm_loop, daemon=True).start()
 
 
-print(f"Casper chat -> http://localhost:{A.port}  (model {A.model} @ {A.endpoint})", flush=True)
-_notify_scheduler()                                    # M3: 常駐スケジューラ起動(先回り通知)
+if __name__ == "__main__":
+    print(f"Casper chat -> http://localhost:{A.port}  (model {A.model} @ {A.endpoint})", flush=True)
+    if not _NO_DAEMON:
+        _notify_scheduler()                                    # M3: 常駐スケジューラ起動(先回り通知)
+    if not _NO_DAEMON and casper_embed:
+        try: casper_embed.ensure_fresh()                   # cmd_498: 起動時に索引の陳腐化を検知→古ければ非同期是正
+        except Exception: pass
 
 # HTTPS リスナー(別ポート・非破壊): Web Push の購読はセキュアコンテキスト必須ゆえ、携帯/別端末が https で入れるように。
 # 既存 http(8770)はそのまま。証明書(~/.config/casper/casper_cert.pem)が在る時だけ起動。
@@ -8773,5 +11463,50 @@ def _start_https():
         print(f"[https] 起動失敗: {_e}", flush=True)
 
 
-_start_https()
-ThreadingHTTPServer(("0.0.0.0", A.port), H).serve_forever()
+# cmd_509第1便: pidfile自己申告(新設)。supervisorの「自陣の前世代を畳む口」が
+# 五点検証の一つとして突合する自己申告情報。他者検証(cmdline/starttime/uid/cwd)
+# だけでは偽装/陳腐化に弱いため、chat_server自身が起動時に自分のpidを書き、
+# 終了時に消す(二重の担保・軍師point_c裁定)。
+_REPO_ROOT = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
+# CASPER_PIDFILE で差替可(検証側が本番と同じ既定パスを奪い合わぬための逃げ道)。
+PIDFILE = os.environ.get("CASPER_PIDFILE") or os.path.join(_REPO_ROOT, "queue", "casper_chat_server.pid")
+
+
+def _write_pidfile():
+    try:
+        os.makedirs(os.path.dirname(PIDFILE), exist_ok=True)
+        with open(PIDFILE, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "port": A.port}, f)
+    except Exception as _e:
+        print(f"[pidfile] 書出し失敗: {_e}", flush=True)
+
+
+def _remove_pidfile():
+    try:
+        with open(PIDFILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("pid") == os.getpid():   # 自分が書いたpidfileのみ消す(他世代のものを誤って消さぬ)
+            os.remove(PIDFILE)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__" and not _NO_DAEMON:
+    import atexit as _atexit
+    import signal as _signal
+    _write_pidfile()
+    _atexit.register(_remove_pidfile)
+
+    def _on_term_signal(signum, frame):
+        _remove_pidfile()
+        raise SystemExit(0)
+    _signal.signal(_signal.SIGTERM, _on_term_signal)
+    _signal.signal(_signal.SIGINT, _on_term_signal)
+
+    _start_https()
+    # cmd_510第3便(観測の機構・軍師addendum設計): 真の復帰時刻をchat_server自身に自己申告させる
+    # (pidfile自己申告=cmd_509第1便と同じ型)。HTTPで外から叩いて確認しない
+    # (観測のために本番へ負荷をかけては本末転倒・軍師addendum「retrieve-then-renderと同じ思想」)。
+    print(f"[{__import__('datetime').datetime.now().strftime('%F %T')}] listen開始 port={A.port} pid={os.getpid()}",
+          flush=True)
+    ThreadingHTTPServer(("0.0.0.0", A.port), H).serve_forever()

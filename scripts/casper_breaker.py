@@ -99,6 +99,16 @@ def allow(dep):
     return True                                         # half-open=試験を通す
 
 
+def gen_key(host, port):
+    """casper_failover.py用の生成系依存キー(host:port単位でbreakerを分ける)。"""
+    return f"gen:{host}:{port}"
+
+
+def emb_key(host, port):
+    """casper_failover.py用の埋め込み系依存キー(host:port単位でbreakerを分ける)。"""
+    return f"emb:{host}:{port}"
+
+
 def state(dep):
     return (_load().get(dep) or {}).get("state", "green")
 

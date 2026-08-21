@@ -33,6 +33,12 @@ MODEL = os.environ.get("CASPER_ACT_MODEL", "opus")          # 既定=Opus(深)�
 OLLAMA = os.environ.get("CASPER_ENDPOINT", "http://192.168.44.119:11434").rstrip("/") + "/api/chat"
 MIN_EVENTS = 4                                              # これ未満の活動しかないuidはskip
 
+try:
+    sys.path.insert(0, HERE)
+    import casper_llm_client                      # cmd_519第3便: 横断呼出台帳(inflight)配線・Fable第三診正典
+except Exception:
+    casper_llm_client = None
+
 NAMES = {"28": "ryoji", "31": "kiyotomo", "34": "hori", "30": "tetsuo", "40": "terajima", "29": "kohei"}
 
 
@@ -226,15 +232,45 @@ def distill(uid, material, prev="", asof=""):
     prev_blk = ("\n## 前回の帯(これを踏まえ更新):\n" + prev + "\n") if prev else ""
     prompt = PROMPT_TMPL.format(name=uname(uid), uid=uid, prev=prev_blk, material=material[:14000], asof=asof)
     if MODEL.startswith("qwen"):                       # 軽量=ローカルqwen
+        # ★cmd_519第3便: 横断呼出台帳(inflight)配線(足軽2号の単一クライアント口を踏襲・独自形式を作らない)
+        _prompt_chars = len(prompt)
+        _inflight_handle = None
+        if casper_llm_client:
+            try:
+                if casper_llm_client.inflight_should_record(_prompt_chars, "distill_activity"):
+                    _inflight_handle = casper_llm_client.inflight_start(
+                        "distill_activity", MODEL, OLLAMA, _prompt_chars)
+            except Exception:
+                _inflight_handle = None
         try:
             # num_ctx=12288・keep_alive=30m を対話と統一(Fable): 不一致/未指定はランナー積み直し→バッチ後に対話が冷える主犯
             body = {"model": MODEL, "think": False, "stream": False, "keep_alive": -1,
                     "messages": [{"role": "user", "content": prompt}],
                     "options": {"temperature": 0.2, "num_predict": 1400, "num_ctx": 12288}}
             req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-            return json.loads(urllib.request.urlopen(req, timeout=300).read()).get("message", {}).get("content", "").strip()
+            _resp = json.loads(urllib.request.urlopen(req, timeout=300).read())
+            result = _resp.get("message", {}).get("content", "").strip()
+            if casper_llm_client:
+                try:
+                    # ttft_sec=None: stream=Falseゆえfirst token到達時刻は未測定(構造上測れぬ・"未測定"であって"失敗"ではない)。
+                    # 成功/失敗の判別はollama_done(第5引数)経由のtotal_duration_ns等の有無で行う(瑕疵1是正・cmd_519最終確認)。
+                    casper_llm_client.record_call_timing("distill_activity", MODEL, OLLAMA, None, ollama_done=_resp)
+                except Exception:
+                    pass
+            return result
         except Exception as e:
+            if casper_llm_client:
+                try:
+                    casper_llm_client.record_incident("distill_activity", MODEL, OLLAMA)
+                except Exception:
+                    pass
             return f"(蒸留失敗 qwen: {e})"
+        finally:
+            if casper_llm_client and _inflight_handle:
+                try:
+                    casper_llm_client.inflight_end(_inflight_handle)
+                except Exception:
+                    pass
     try:                                               # 既定=Opus(claude CLI)
         r = subprocess.run([CLAUDE_BIN, "-p", "--model", MODEL], input=prompt,
                            capture_output=True, text=True, timeout=400, cwd="/tmp")

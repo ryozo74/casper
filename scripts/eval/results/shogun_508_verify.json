@@ -1,0 +1,972 @@
+{
+ "run_id": "shogun_508_verify",
+ "started_at": "2026-08-18T08:23:18",
+ "elapsed_sec": 371.1,
+ "holdout_sha256": "6650511ff3dd6bf0904c3a379a49a9af57e7cdd35cdde769a9645e939719bd3f",
+ "holdout_version": "v1",
+ "criteria_version": "v1",
+ "round2_enabled": false,
+ "interrupted_by_reload": false,
+ "summary": {
+  "by_type": {
+   "文脈引き継ぎ": {
+    "pass": 0,
+    "fail": 2,
+    "review": 2,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "A01",
+      "final": "review"
+     },
+     {
+      "id": "A02",
+      "final": "review"
+     },
+     {
+      "id": "A03",
+      "final": "fail"
+     },
+     {
+      "id": "A04",
+      "final": "fail"
+     }
+    ]
+   },
+   "文脈引き継ぎ・退行検査": {
+    "pass": 0,
+    "fail": 1,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "A05",
+      "final": "fail"
+     }
+    ]
+   },
+   "不在断言": {
+    "pass": 0,
+    "fail": 0,
+    "review": 2,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "B01",
+      "final": "review"
+     },
+     {
+      "id": "B02",
+      "final": "review"
+     }
+    ]
+   },
+   "不在断言・退行検査": {
+    "pass": 1,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "B03",
+      "final": "pass"
+     }
+    ]
+   },
+   "できません": {
+    "pass": 0,
+    "fail": 2,
+    "review": 1,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "C01",
+      "final": "review"
+     },
+     {
+      "id": "C02",
+      "final": "fail"
+     },
+     {
+      "id": "C03",
+      "final": "fail"
+     }
+    ]
+   },
+   "選択": {
+    "pass": 1,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "D01",
+      "final": "pass"
+     }
+    ]
+   },
+   "選択・退行検査": {
+    "pass": 0,
+    "fail": 1,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "D02",
+      "final": "fail"
+     }
+    ]
+   },
+   "DM代筆": {
+    "pass": 0,
+    "fail": 1,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "E01",
+      "final": "fail"
+     }
+    ]
+   },
+   "資料URL": {
+    "pass": 0,
+    "fail": 0,
+    "review": 1,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "F01",
+      "final": "review"
+     }
+    ]
+   },
+   "起票": {
+    "pass": 0,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 1,
+    "ids": [
+     {
+      "id": "G01",
+      "final": "untestable"
+     }
+    ]
+   }
+  },
+  "final_by_id": {
+   "A01": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "A02": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "A03": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "A04": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "A05": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "B01": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "B02": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "B03": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "C01": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "C02": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "C03": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "D01": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "D02": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "E01": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "F01": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "G01": {
+    "round1": "untestable",
+    "round2": null,
+    "final": "untestable"
+   }
+  },
+  "flaky_ids": [],
+  "counts": {
+   "pass": 2,
+   "fail": 7,
+   "review": 6,
+   "flaky": 0,
+   "untestable": 1,
+   "total": 16
+  },
+  "score_pass_over_pass_plus_fail": null,
+  "score_note": "review・untestable件数は分母(pass+fail)から除外している(点を高く見せぬため件数を併記)。reviewを合格扱いにしていない。untestableはholdoutのexpectを実際には測れておらぬ問(cmd_500第2便新設・G01)——fail確定にもpass水増しにもせず、測れておらぬと正直に申告する。"
+ },
+ "round1": [
+  {
+   "id": "A01",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_A01",
+   "prev": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_sent": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "工数を教えて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 44.0
+  },
+  {
+   "id": "A02",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_A02",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "作業工数も教えて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 40.0
+  },
+  {
+   "id": "A03",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_A03",
+   "prev": "キャスパーって携帯で見れるの？",
+   "prev_sent": "キャスパーって携帯で見れるの？",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "どうやってみることが出来るの？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must条件が本文に無い: ['8443']"
+   ],
+   "elapsed_sec": 44.5
+  },
+  {
+   "id": "A04",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_A04",
+   "prev": "コンバトラーの進捗は？",
+   "prev_sent": "コンバトラーの進捗は？",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "まるこめの進捗状況は？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_any条件をどれも満たさぬ: ['marukome', 'まるこめ', 'マルコメ']"
+   ],
+   "elapsed_sec": 17.9
+  },
+  {
+   "id": "A05",
+   "type": "文脈引き継ぎ・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_A05",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "marukomeの状況は？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_any条件をどれも満たさぬ: ['marukome', 'まるこめ', 'マルコメ']"
+   ],
+   "elapsed_sec": 24.5
+  },
+  {
+   "id": "B01",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_B01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "8/5がマルコメの試写ではなかったのでは？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "断定語が本文に無い(このstructural条件は不発火)",
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 7.0
+  },
+  {
+   "id": "B02",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_B02",
+   "prev": "遅れてるタスクはないってことかな？",
+   "prev_sent": "遅れてるタスクはないってことかな？",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "各タスクのステータスを見せて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [
+    {
+     "tool": "table",
+     "table": {
+      "title": "進行中タスク（全社 計8件）",
+      "columns": [
+       "プロジェクト",
+       "件数",
+       "担当",
+       "締切",
+       "状況"
+      ],
+      "rows": [
+       [
+        "Zenith",
+        3,
+        "miyake",
+        "2026-09-30",
+        ""
+       ],
+       [
+        "SORAFUNE",
+        3,
+        "tim",
+        "2026-08-26",
+        ""
+       ],
+       [
+        "AI動画生成",
+        1,
+        "hida",
+        "2026-08-28",
+        ""
+       ],
+       [
+        "AGL",
+        1,
+        "kuro",
+        "2026-08-21",
+        ""
+       ]
+      ],
+      "sortable": true,
+      "numeric_cols": [
+       1
+      ],
+      "name_col": 0,
+      "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"
+     }
+    }
+   ],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "断定語が本文に無い(このstructural条件は不発火)",
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 35.1
+  },
+  {
+   "id": "B03",
+   "type": "不在断言・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_B03",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "marukomeの状況は？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 3.0
+  },
+  {
+   "id": "C01",
+   "type": "できません",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_C01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Aurora内の今日アップデートした資料って何？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 22.6
+  },
+  {
+   "id": "C02",
+   "type": "できません",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_C02",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "携帯ではいりたいんだけど",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must条件が本文に無い: ['192.168.44.45:8443']"
+   ],
+   "elapsed_sec": 22.0
+  },
+  {
+   "id": "C03",
+   "type": "できません",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_C03",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "携帯で、キャスパーにはいりたいです。",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must条件が本文に無い: ['192.168.44.45:8443']"
+   ],
+   "elapsed_sec": 21.5
+  },
+  {
+   "id": "D01",
+   "type": "選択",
+   "decidable": "甲",
+   "uid": "31",
+   "thread": "eval_shogun_508_verify_D01",
+   "prev": "（Casperが本文に ①はい ②いいえ と列挙した直後）",
+   "prev_sent": null,
+   "prev_answer": null,
+   "q": "１",
+   "answer": "先ほどの番号でのお答えを受け取れませなんだ。お手数ながら内容でお申し付けくだされ。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 0.1
+  },
+  {
+   "id": "D02",
+   "type": "選択・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_D02",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Casperの使い方を手順で教えて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "箇条書き行数 0 本(<2) → 検問で削られた疑い"
+   ],
+   "elapsed_sec": 23.0
+  },
+  {
+   "id": "E01",
+   "type": "DM代筆",
+   "decidable": "丙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_E01",
+   "prev": "（Scoreのステータス説明を提示した直後）",
+   "prev_sent": "Scoreのステータスを説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "この内容をryojiに共有しておいて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "承認カードが立たなかった(needs_card条件不成立)"
+   ],
+   "elapsed_sec": 36.9
+  },
+  {
+   "id": "F01",
+   "type": "資料URL",
+   "decidable": "乙",
+   "uid": "36",
+   "thread": "eval_shogun_508_verify_F01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "http://nina_notepc_02:8100/doc/elvis/2026-07-30/hikou-fairu-kirikae-kinou-irai-shiyousho-hikou-tan-an-sekkan\nこの内容を簡単に教えてください",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 15.0
+  },
+  {
+   "id": "G01",
+   "type": "起票",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_G01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "（SB_estimate_invoice_DCRP_柳井氏_FQ_20260601_02_tes.xlsx を投入し）新規プロジェクトを起票",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "untestable",
+   "reasons": [
+    "untestable: 実Excelを投じておらぬ以上、測っておるのは『ファイルを読めぬ時に正直に返すか』であり、holdoutのexpect(構造化が通り承認カードまで到達する)を測っておらぬ(cmd_496実測: 起票の構造化は100〜270秒要し、/api/chatのテキスト経路のみでは承認カードまで到達しない=機械的に毎回fail)。fail確定にもpass水増しにもせず、測れておらぬと正直に申告する第四区分untestableとする(cmd_500第2便・軍師裁定+将軍許可)。実Excelを投じる経路の実装は次便以降の課題。"
+   ],
+   "elapsed_sec": 14.0
+  }
+ ],
+ "round2": [],
+ "fail_or_review_full_answers": [
+  {
+   "id": "A01",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_A01",
+   "prev": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_sent": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "工数を教えて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 44.0
+  },
+  {
+   "id": "A02",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_A02",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "作業工数も教えて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 40.0
+  },
+  {
+   "id": "A03",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_A03",
+   "prev": "キャスパーって携帯で見れるの？",
+   "prev_sent": "キャスパーって携帯で見れるの？",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "どうやってみることが出来るの？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must条件が本文に無い: ['8443']"
+   ],
+   "elapsed_sec": 44.5
+  },
+  {
+   "id": "A04",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_A04",
+   "prev": "コンバトラーの進捗は？",
+   "prev_sent": "コンバトラーの進捗は？",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "まるこめの進捗状況は？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_any条件をどれも満たさぬ: ['marukome', 'まるこめ', 'マルコメ']"
+   ],
+   "elapsed_sec": 17.9
+  },
+  {
+   "id": "A05",
+   "type": "文脈引き継ぎ・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_A05",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "marukomeの状況は？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_any条件をどれも満たさぬ: ['marukome', 'まるこめ', 'マルコメ']"
+   ],
+   "elapsed_sec": 24.5
+  },
+  {
+   "id": "B01",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_B01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "8/5がマルコメの試写ではなかったのでは？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "断定語が本文に無い(このstructural条件は不発火)",
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 7.0
+  },
+  {
+   "id": "B02",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_B02",
+   "prev": "遅れてるタスクはないってことかな？",
+   "prev_sent": "遅れてるタスクはないってことかな？",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "各タスクのステータスを見せて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [
+    {
+     "tool": "table",
+     "table": {
+      "title": "進行中タスク（全社 計8件）",
+      "columns": [
+       "プロジェクト",
+       "件数",
+       "担当",
+       "締切",
+       "状況"
+      ],
+      "rows": [
+       [
+        "Zenith",
+        3,
+        "miyake",
+        "2026-09-30",
+        ""
+       ],
+       [
+        "SORAFUNE",
+        3,
+        "tim",
+        "2026-08-26",
+        ""
+       ],
+       [
+        "AI動画生成",
+        1,
+        "hida",
+        "2026-08-28",
+        ""
+       ],
+       [
+        "AGL",
+        1,
+        "kuro",
+        "2026-08-21",
+        ""
+       ]
+      ],
+      "sortable": true,
+      "numeric_cols": [
+       1
+      ],
+      "name_col": 0,
+      "footer": "Calendar 確定データ。列見出しクリックで並べ替え。"
+     }
+    }
+   ],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "断定語が本文に無い(このstructural条件は不発火)",
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 35.1
+  },
+  {
+   "id": "C01",
+   "type": "できません",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_C01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Aurora内の今日アップデートした資料って何？",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 22.6
+  },
+  {
+   "id": "C02",
+   "type": "できません",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_C02",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "携帯ではいりたいんだけど",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must条件が本文に無い: ['192.168.44.45:8443']"
+   ],
+   "elapsed_sec": 22.0
+  },
+  {
+   "id": "C03",
+   "type": "できません",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_C03",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "携帯で、キャスパーにはいりたいです。",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must条件が本文に無い: ['192.168.44.45:8443']"
+   ],
+   "elapsed_sec": 21.5
+  },
+  {
+   "id": "D02",
+   "type": "選択・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_shogun_508_verify_D02",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Casperの使い方を手順で教えて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "箇条書き行数 0 本(<2) → 検問で削られた疑い"
+   ],
+   "elapsed_sec": 23.0
+  },
+  {
+   "id": "E01",
+   "type": "DM代筆",
+   "decidable": "丙",
+   "uid": "30",
+   "thread": "eval_shogun_508_verify_E01",
+   "prev": "（Scoreのステータス説明を提示した直後）",
+   "prev_sent": "Scoreのステータスを説明して",
+   "prev_answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "q": "この内容をryojiに共有しておいて",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "承認カードが立たなかった(needs_card条件不成立)"
+   ],
+   "elapsed_sec": 36.9
+  },
+  {
+   "id": "F01",
+   "type": "資料URL",
+   "decidable": "乙",
+   "uid": "36",
+   "thread": "eval_shogun_508_verify_F01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "http://nina_notepc_02:8100/doc/elvis/2026-07-30/hikou-fairu-kirikae-kinou-irai-shiyousho-hikou-tan-an-sekkan\nこの内容を簡単に教えてください",
+   "answer": "[error] <urlopen error [Errno 113] No route to host>",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 15.0
+  }
+ ],
+ "validity": "invalid_run",
+ "invalid_reason": "推論機(192.168.44.139)が実行中に停止し、全16問中15問の応答本文が [error] urlopen Errno 113 No route to host であった。実際に測れたのは1問のみ。score 22% は土台の故障をモデルの品質として 記録した偽の数字であり、比較にも傾向にも用いてはならぬ。エラー文字列に対して pass(B03・3.0秒) や review の判定が付いておるのも同因。",
+ "invalid_marked_by": "shogun",
+ "invalid_marked_at": "2026-08-18T09:18:26",
+ "unmeasured_ids": [
+  "A01",
+  "A02",
+  "A03",
+  "A04",
+  "A05",
+  "B01",
+  "B02",
+  "B03",
+  "C01",
+  "C02",
+  "C03",
+  "D02",
+  "E01",
+  "F01",
+  "G01"
+ ],
+ "score_pass_over_pass_plus_fail_INVALID": 0.2222
+}

@@ -1,0 +1,782 @@
+{
+ "run_id": "run_1786215602",
+ "started_at": "2026-08-09T04:00:02",
+ "elapsed_sec": 609.2,
+ "holdout_sha256": "6650511ff3dd6bf0904c3a379a49a9af57e7cdd35cdde769a9645e939719bd3f",
+ "holdout_version": "v1",
+ "criteria_version": "v1",
+ "round2_enabled": false,
+ "summary": {
+  "by_type": {
+   "文脈引き継ぎ": {
+    "pass": 1,
+    "fail": 2,
+    "review": 1,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "A01",
+      "final": "fail"
+     },
+     {
+      "id": "A02",
+      "final": "review"
+     },
+     {
+      "id": "A03",
+      "final": "pass"
+     },
+     {
+      "id": "A04",
+      "final": "fail"
+     }
+    ]
+   },
+   "文脈引き継ぎ・退行検査": {
+    "pass": 1,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "A05",
+      "final": "pass"
+     }
+    ]
+   },
+   "不在断言": {
+    "pass": 0,
+    "fail": 1,
+    "review": 1,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "B01",
+      "final": "fail"
+     },
+     {
+      "id": "B02",
+      "final": "review"
+     }
+    ]
+   },
+   "不在断言・退行検査": {
+    "pass": 1,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "B03",
+      "final": "pass"
+     }
+    ]
+   },
+   "できません": {
+    "pass": 2,
+    "fail": 0,
+    "review": 1,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "C01",
+      "final": "review"
+     },
+     {
+      "id": "C02",
+      "final": "pass"
+     },
+     {
+      "id": "C03",
+      "final": "pass"
+     }
+    ]
+   },
+   "選択": {
+    "pass": 1,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "D01",
+      "final": "pass"
+     }
+    ]
+   },
+   "選択・退行検査": {
+    "pass": 1,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "D02",
+      "final": "pass"
+     }
+    ]
+   },
+   "DM代筆": {
+    "pass": 0,
+    "fail": 1,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "E01",
+      "final": "fail"
+     }
+    ]
+   },
+   "資料URL": {
+    "pass": 0,
+    "fail": 0,
+    "review": 1,
+    "flaky": 0,
+    "untestable": 0,
+    "ids": [
+     {
+      "id": "F01",
+      "final": "review"
+     }
+    ]
+   },
+   "起票": {
+    "pass": 0,
+    "fail": 0,
+    "review": 0,
+    "flaky": 0,
+    "untestable": 1,
+    "ids": [
+     {
+      "id": "G01",
+      "final": "untestable"
+     }
+    ]
+   }
+  },
+  "final_by_id": {
+   "A01": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "A02": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "A03": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "A04": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "A05": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "B01": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "B02": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "B03": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "C01": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "C02": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "C03": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "D01": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "D02": {
+    "round1": "pass",
+    "round2": null,
+    "final": "pass"
+   },
+   "E01": {
+    "round1": "fail",
+    "round2": null,
+    "final": "fail"
+   },
+   "F01": {
+    "round1": "review",
+    "round2": null,
+    "final": "review"
+   },
+   "G01": {
+    "round1": "untestable",
+    "round2": null,
+    "final": "untestable"
+   }
+  },
+  "flaky_ids": [],
+  "counts": {
+   "pass": 7,
+   "fail": 4,
+   "review": 4,
+   "flaky": 0,
+   "untestable": 1,
+   "total": 16
+  },
+  "score_pass_over_pass_plus_fail": 0.6364,
+  "score_note": "review・untestable件数は分母(pass+fail)から除外している(点を高く見せぬため件数を併記)。reviewを合格扱いにしていない。untestableはholdoutのexpectを実際には測れておらぬ問(cmd_500第2便新設・G01)——fail確定にもpass水増しにもせず、測れておらぬと正直に申告する。"
+ },
+ "round1": [
+  {
+   "id": "A01",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_A01",
+   "prev": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_sent": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_answer": "vault に登録されている `ARKitLedScan_DesignSpec.pdf` の内容に基づき、要点をまとめます。\n\n**ARKitLedScan とは**\niOSデバイス（iPhone/iPad）のカメラとLiDARセンサーを用い、静止した物体や空間に対して高精度な3Dスキャン・計測を行う技術仕様です。\n\n**主な特徴・目的**\n1. **静物固定前提**: 動く対象ではなく、固定された物体や環境を対象としています。\n2. **高密度LED計測**: LEDの配置や輝度特性などを詳細に記録・解析することを目的としています。\n3. **ARKit活用**: Appleの拡張現実フレームワーク（ARKit）を基盤にし、デバイスのモーションデータと深度情報を統合して正確な空間把握を行います。\n\nこの仕様書は、主にLED関連の製品開発や展示物における精密な計測・検証プロセスを定義したものです。\n\n※上記のうちネット由来: https://en.wikipedia.org/wiki/ARKit, https://developer.apple.com/documentation/arkit/arkit-in-ios, https://en.wikipedia.org/wiki/LED_to_LED_communication, https://www.getapp.com/industries-software/a/designspec/, https://designspec.com/, https://www.arkscan.com/technical-support/download",
+   "q": "工数を教えて",
+   "answer": "tetsuo (uid 30) の現在の活動記録 `25_activity/u_30.md` には、具体的なタスクごとの工数（人時/人日）のデータは含まれていません。\n\n現在進行中のプロジェクトにおける tetsuo の担当タスクと期限を確認し、そこから工数を推計するか、あるいは過去の類似案件から基準値を算出するには、Calendar から最新データを取得する必要があります。\n\nどのプロジェクト（例: Zenith, marukome, AI動画生成 など）のどのタスクについて知りたいですか？特定できれば、そのタスクの締切と現在の日付(2026-08-09)から残り日数や想定工数を計算します。\n\n※上記のうちネット由来: https://ja.wikipedia.org/wiki/%E5%B7%A5%E6%95%B0, https://asana.com/ja/resources/what-is-man-hour, https://www.internetacademy.jp/it/design/web-design/system_development_effort.html, https://www.kaonavi.jp/dictionary/kosu/, https://biz.moneyforward.com/erp/basic/6170/, https://di-square.co.jp/tech_info/production_costs/, https://www.crowdlog.jp/blog/127144/, https://www.fdc-inc.co.jp/fapi/man-hour_calculation/",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_not条件に該当: ['どのプロジェクト']"
+   ],
+   "elapsed_sec": 102.6
+  },
+  {
+   "id": "A02",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_A02",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "1. **ARKitLedScan_DesignSpec.pdf** — 技術仕様書（設計詳細）\n2. **WorkEstimate_ARKitLedScan.xlsx** — 作業工数見積もり表\n\n具体的な内容（機能概要・実装方針・工数内訳等）はこれらのファイルに記載されています。どちらの資料の詳細を確認しますか？\n\n※上記のうちネット由来: https://en.wikipedia.org/wiki/ARKit, http://www.arkscan.com/, https://en.wikipedia.org/wiki/LED_to_LED_communication\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "q": "作業工数も教えて",
+   "answer": "profile_u_30 はスキルシート上の情報（得意・ソフト）が空欄であり、現在進行中のプロジェクトへのタスクアサインも確認できません。したがって、具体的な作業工数は算出できません。\n\n該当する人物の正式名称または担当プロジェクトを特定できれば、そのPJのタスクから工数を抽出します。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 53.2
+  },
+  {
+   "id": "A03",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_run_1786215602_A03",
+   "prev": "キャスパーって携帯で見れるの？",
+   "prev_sent": "キャスパーって携帯で見れるの？",
+   "prev_answer": "はい、見れます。アカウント作成や招待URLは不要です。\n\nブラウザで **https://192.168.44.45:8443** を開くだけです。\n\n**【通知を受け取るための必須手順】**\nCasperの「先回り通知」を端末に届けるには、以下の設定が必要です（iPhone/Android共通で証明書インストールが必要）。\n\n### 1. 証明書の信頼（最初に1回）\n1. ブラウザで **https://192.168.44.45:8443/casper-ca.crt** を開き、ダウンロード。\n2. ダウンロードした証明書を「信頼できる証明書」としてインストール。\n   - **iPhone**: 設定 → 一般 → 情報 → 証明書信頼設定 で「Casper Local CA」を**ON**。\n   - **Android**: 設定 → セキュリティ → 「証明書をインストール」→「CA 証明書」。\n\n### 2. iPhoneの場合（PWA化必須）\n1. Safariで **https://192.168.44.45:8443/** を開き、ログイン。\n2. 共有ボタン（□に↑）→ **「ホーム画面に追加」**。\n3. ホーム画面の「Casper」アイコンから開く（Safariタブでは通知が来ません）。\n4. ヘッダ右の **「🔔 通知」ボタン** をタップ → **許可**。\n\n### 3. Androidの場合\n1. Chromeで **https://192.168.44.45:8443/** を開き、ログイン。\n2. **「🔔 通知」ボタン** をタップ → **許可**。（PWA化は不要）\n\n**【注意点】**\n- 携帯とCasperサーバが**同じWiFi（同じネットワーク）**にいる必要があります。別ネットワークやゲストWiFiでは届きません。\n- iPhoneはiOS 16.4以上が必要です。",
+   "q": "どうやってみることが出来るの？",
+   "answer": "携帯（スマホ・iPhone・Android）からCasperを見るには、以下の手順でブラウザにアクセスしてください。\n\n### 共通（最初に1回）— 証明書を信頼する\n1. 携帯のブラウザで **https://192.168.44.45:8443/casper-ca.crt** を開く（自己署名の警告が出たら「詳細→アクセス」等で進んでダウンロード）。\n2. ダウンロードした証明書（Casper Local CA）を**信頼できる証明書としてインストール**する。\n   - **iPhone**: プロファイルを導入 → **設定 → 一般 → 情報 → 証明書信頼設定** で「Casper Local CA」を**ON**（この最後のトグルを忘れると信頼されない）。\n   - **Android**: 設定 → セキュリティ → 「証明書をインストール」→「CA 証明書」で選ぶ。\n\n### iPhone の場合\n1. Safari で **https://192.168.44.45:8443/** を開く（警告が出なければ証明書は信頼済み）。\n2. **ログインする**（ヘッダに自分の名前が出るまで）。※PC のログインは携帯には引き継がれないので、携帯で改めてログインが必要。\n3. Safari 下部の**共有ボタン（□に↑）** → アクション一覧を**下にスクロール** → **「ホーム画面に追加」** → 追加。\n4. **ホーム画面の「Casper」アイコンから開く**（Safari のタブではなく、アイコンから。全画面で開けば PWA＝通知可の状態）。\n5. **「🔔 通知」ボタン**をタップ（ヘッダ右、または画面内の「通知を有効にする」カード）→ **許可**。\n\n### Android の場合\n1. Chrome で **https://192.168.44.45:8443/** を開く。\n2. **ログインする**。\n3. **「🔔 通知」ボタン**をタップ → **許可**。（Android は Safari のような PWA 化は不要。ログインさえすれば通常の Chrome で動く。）\n\n## 完了の確認\n設定できると「🔔 通知ON ✓」になる。以後、自分あての先回り通知が端末に届く。\n\n## うまくいかない時\n- **「要ログイン」と出る** → その端末（その URL）でまだログインしていない。先にログインしてから 🔔 を押す。\n- **iPhone で 🔔 が反応しない／出ない** → Safari のタブから開いている。必ず**ホーム画面のアイコン（PWA）**から開く。iOS が 16.4 以上か確認。\n- **サイトに接続できない／タイムアウト** → 携帯が Casper と別ネットワークにいる。同じ WiFi に繋ぐ。同じ WiFi でも届かない場合は WiFi の「クライアント分離（AP isolation）」の可能性 → 分離のない WiFi に繋ぐか管理者に相談。\n- **証明書の警告が消えない** → 証明書のインストール後、iPhone は「証明書信頼設定」で ON にするまで信頼されない。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "must条件を充足: ['8443']",
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 56.8
+  },
+  {
+   "id": "A04",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_run_1786215602_A04",
+   "prev": "コンバトラーの進捗は？",
+   "prev_sent": "コンバトラーの進捗は？",
+   "prev_answer": "Calendarで「コンバトラーV プロモーション映像」のタスクを確認しました。\n\n| 状態 | タスク名 | 担当者 | 締切 | 備考 |\n|---|---|---|---|---|\n| **完了** | コンバトラーV プロモーション映像 | kiyotomo | 2026-07-31 | PJ自体は完了扱い |\n\nプロジェクト全体としては「完了」ステータスであり、現在進行中のタスクはありません。\n詳細なフィードバックやアーカイブが必要な場合はお知らせください。",
+   "q": "まるこめの進捗状況は？",
+   "answer": "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_any条件をどれも満たさぬ: ['marukome', 'まるこめ', 'マルコメ']"
+   ],
+   "elapsed_sec": 22.3
+  },
+  {
+   "id": "A05",
+   "type": "文脈引き継ぎ・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_run_1786215602_A05",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "1. **ARKitLedScan_DesignSpec.pdf**（設計仕様書）\n2. **WorkEstimate_ARKitLedScan.xlsx**（工数見積もり表）\n\nWeb検索では「ARKitLedScan」という名称の既存ライブラリやOSSはヒットせず、社内で独自に開発・定義されているプロジェクトまたはモジュールと判断されます。詳細な仕様や工数内訳が必要な場合は、該当ファイルを参照してください。\n\n※上記のうちネット由来: https://en.wikipedia.org/wiki/ARKit, https://developer.apple.com/augmented-reality/roomplan, https://github.com/TokyoYoshida/ExampleOfiOSLiDAR, https://github.com/xiongyiheng/ARKit-Scanner\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "q": "marukomeの状況は？",
+   "answer": "marukome は現在 **in-progress（進行中）** です。\n\n- **納期**: 2026年8月19日\n- **現状**: 予定内（納期超過ではありません）\n\n詳細なタスクや進捗状況を確認するには、Calendar から最新情報を取得する必要がありますが、現時点でのプロジェクトレベルのステータスは上記の通りです。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "must_any条件を充足: ['marukome']",
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 63.1
+  },
+  {
+   "id": "B01",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_B01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "8/5がマルコメの試写ではなかったのでは？",
+   "answer": "いいえ、8月5日はマルコメ（marukome）の試写日ではありません。\n\n記録にある「現場でのプロジェクターを使った確認」は**2026年5月27日**です。\n\nまた、現在のプロジェクト状況を確認すると：\n*   **marukome**: 納期は**2026-08-19**（予定内）\n*   **本日**: 2026-08-09\n\n8月5日は、他のプロジェクト（SORAFUNE、AIアニメレイアウト作成）の納期日でしたが、マルコメに関連する試写や確定日の記録はありません。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "母集合語(['件を確認', '件のうち', '件中', 'Calendar', 'calendar', '母集合'])を伴わず断定語['ありません']のみ"
+   ],
+   "elapsed_sec": 12.6
+  },
+  {
+   "id": "B02",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_run_1786215602_B02",
+   "prev": "遅れてるタスクはないってことかな？",
+   "prev_sent": "遅れてるタスクはないってことかな？",
+   "prev_answer": "はい、本日（2026-08-09）時点で**締切当日のタスクはありません**。\n\nただし、プロジェクトレベルでは**4件が納期超過**しています。\n- SORAFUNE\n- RND TKPプレヴィズ\n- GS（〆08/07）\n- AIアニメレイアウト作成\n\nこれらプロジェクト内のタスクが「進行中」かつ期限切れであれば、実質的に遅延しています。確認が必要であればお申し付けください。",
+   "q": "各タスクのステータスを見せて",
+   "answer": "そのプロジェクト名に一致がございませぬ。もしやこちらでは？（違えば具体名で仰せを）",
+   "cards": [
+    {
+     "tool": "choices",
+     "choices": {
+      "prompt": "そのプロジェクト名に一致がございませぬ。もしやこちらでは？（違えば具体名で仰せを）",
+      "options": [
+       {
+        "id": "pjtask_test",
+        "label": "test のタスク",
+        "preview": "test の未完了タスク一覧を表示",
+        "say": "testのタスクを見せて"
+       }
+      ]
+     }
+    }
+   ],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "断定語が本文に無い(このstructural条件は不発火)",
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 18.8
+  },
+  {
+   "id": "B03",
+   "type": "不在断言・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_run_1786215602_B03",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "marukomeの状況は？",
+   "answer": "marukome は現在 **進行中 (in-progress)** です。\n\n- **納期**: 2026年8月19日\n- **現状**: 予定内（納期超過ではありません）\n\n詳細なタスクや進捗状況を確認するには、Calendar のタスク一覧を照会する必要がありますが、現時点での基本情報は上記の通りです。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 3.2
+  },
+  {
+   "id": "C01",
+   "type": "できません",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_run_1786215602_C01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Aurora内の今日アップデートした資料って何？",
+   "answer": "本日（2026-08-09）にAurora内でアップロード・更新された資料は**0件**です。\n\n※上記のうちネット由来: https://blog.s-style.co.jp/2025/10/14798/, https://zenn.dev/lunarxlark/articles/aws-important-notice-aurora-upgrade, https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/AuroraUserGuide/Aurora.VersionPolicy.Upgrading.html, https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Updates.Upgrading.html, https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/WhatsNew.html, https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Updates.html, https://www.spaceweatherlive.com/, https://en.wikipedia.org/wiki/Aurora_(Ayumi_Hamasaki_song\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 59.7
+  },
+  {
+   "id": "C02",
+   "type": "できません",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_run_1786215602_C02",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "携帯ではいりたいんだけど",
+   "answer": "携帯（スマホ）から Casper にアクセス・利用するには、ブラウザで以下の URL を開くだけです。\n\n**https://192.168.44.45:8443**\n\nアカウント作成やアプリストアからのダウンロードは不要です。ただし、通知を受け取るためには「証明書の信頼設定」と「PWA化（ホーム画面への追加）」が必要です。手順は以下の通りです。\n\n### 1. 証明書を信頼する（初回のみ）\nまず、社内証明書をインストールしてサイトを安全な状態にします。\n1. ブラウザで **https://192.168.44.45:8443/casper-ca.crt** を開く。\n   - 警告が出たら「詳細→アクセス」等で進み、ファイルをダウンロードする。\n2. ダウンロードした証明書をインストールし、「信頼できる証明書」として設定する。\n   - **iPhone**: 設定 → 一般 → 情報 → 証明書信頼設定 で「Casper Local CA」を **ON** にする（ここが重要）。\n   - **Android**: 設定 → セキュリティ → 「証明書をインストール」→「CA 証明書」で選択。\n\n### 2. Casper にログイン・通知有効化\n\n#### iPhone の場合\n1. Safari で **https://192.168.44.45:8443/** を開き、ログインする。\n2. 画面下部の**共有ボタン（□に↑）**をタップ → **「ホーム画面に追加」** を選択してアイコンを作成する。\n3. **ホーム画面の「Casper」アイコン**からアプリを開く（Safari タブではなく、アイコンから）。\n4. ヘッダー右の **「🔔 通知」ボタン** をタップし、許可する。\n\n#### Android の場合\n1. Chrome で **https://192.168.44.45:8443/** を開き、ログインする。\n2. ヘッダー右の **「🔔 通知」ボタン** をタップし、許可する。（Android は PWA 化の手間なくそのまま使えます）\n\n### 注意点\n- **同じ WiFi にいること**: Casper サーバーと同じネットワーク（社内WiFi）に接続していないと届きません。\n- **iPhoneはPWA必須**: Safari のタブ画面では通知が来ません。必ず「ホーム画面に追加」したアイコンから起動してください。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "must条件を充足: ['192.168.44.45:8443']",
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 27.7
+  },
+  {
+   "id": "C03",
+   "type": "できません",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_run_1786215602_C03",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "携帯で、キャスパーにはいりたいです。",
+   "answer": "ブラウザで **https://192.168.44.45:8443** を開いてください。アカウント作成や招待URLは不要です。\n\n※上記アクションはまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "must条件を充足: ['192.168.44.45:8443']",
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 15.5
+  },
+  {
+   "id": "D01",
+   "type": "選択",
+   "decidable": "甲",
+   "uid": "31",
+   "thread": "eval_run_1786215602_D01",
+   "prev": "（Casperが本文に ①はい ②いいえ と列挙した直後）",
+   "prev_sent": null,
+   "prev_answer": null,
+   "q": "１",
+   "answer": "先ほどの番号でのお答えを受け取れませなんだ。お手数ながら内容でお申し付けくだされ。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 0.1
+  },
+  {
+   "id": "D02",
+   "type": "選択・退行検査",
+   "decidable": "甲",
+   "uid": "28",
+   "thread": "eval_run_1786215602_D02",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Casperの使い方を手順で教えて",
+   "answer": "Casper の使い方（携帯からの入り方・通知の受け取り方）\n\n## 携帯からCasperに入る方法\n\n携帯（スマホ・iPhone・Android）からCasperに入る・アクセスする・使うには、ブラウザで **https://192.168.44.45:8443** を開くだけです。アカウント作成や招待URLは不要で、一般公開・アプリストア配信も行っていません（社内環境への直接アクセスです）。「携帯では利用できません」ということはなく、今すぐ上記URLから使えます。iPhone の場合は開いた後にホーム画面に追加する（PWA化）と、通常のアプリのように使え、通知も受け取れるようになります。Android は追加操作なしで Chrome からそのまま使えます。\n\n## 何が届くか\nCasper を開いていなくても、次のことが端末に通知される（種類ごとに ON/OFF 可能）：\n- ☀️ 朝のブリーフ（本日の要点）（morning_brief）\n- 🔴 納期超過が新たに出た（new_overdue）\n- ⏳ FB／確認が停滞している（stalled_fb）\n- ✅ 約束が完了しました（open_loop・自分が依頼した/された「未了の約束」が完了した時）\n\n## 前提（重要）\n- **携帯と Casper サーバが同じ WiFi（同じネットワーク）にいること**。別ネットワークやゲスト WiFi では届かない。\n- **iPhone は「ホーム画面に追加した Casper（PWA）」からのみ通知が有効**（通常の Safari タブでは動かない・iOS 16.4 以降）。\n- 接続先 URL（社内環境）: **https://192.168.44.45:8443/** ／ 証明書配布: **https://192.168.44.45:8443/casper-ca.crt**\n  ※IP は環境により変わることがある。届かない時は管理者（将軍）に最新の URL を確認する。\n\n## 手順\n\n### 共通（最初に1回）— 証明書を信頼する\n1. 携帯のブラウザで **https://192.168.44.45:8443/casper-ca.crt** を開く（自己署名の警告が出たら「詳細→アクセス」等で進んでダウンロード）。\n2. ダウンロードした証明書（Casper Local CA）を**信頼できる証明書としてインストール**する。\n   - **iPhone**: プロファイルを導入 → **設定 → 一般 → 情報 → 証明書信頼設定** で「Casper Local CA」を**ON**（この最後のトグルを忘れると信頼されない）。\n   - **Android**: 設定 → セキュリティ → 「証明書をインストール」→「CA 証明書」で選ぶ。\n\n### iPhone の場合\n1. Safari で **https://192.168.44.45:8443/** を開く（警告が出なければ証明書は信頼済み）。\n2. **ログインする**（ヘッダに自分の名前が出るまで）。※PC のログインは携帯には引き継がれないので、携帯で改めてログインが必要。\n3. Safari 下部の**共有ボタン（□に↑）** → アクション一覧を**下にスクロール** → **「ホーム画面に追加」** → 追加。\n4. **ホーム画面の「Casper」アイコンから開く**（Safari のタブではなく、アイコンから。全画面で開けば PWA＝通知可の状態）。\n5. **「🔔 通知」ボタン**をタップ（ヘッダ右、または画面内の「通知を有効にする」カード）→ **許可**。\n\n### Android の場合\n1. Chrome で **https://192.168.44.45:8443/** を開く。\n2. **ログインする**。\n3. **「🔔 通知」ボタン**をタップ → **許可**。（Android は Safari のような PWA 化は不要。ログインさえすれば通常の Chrome で動く。）\n\n## 完了の確認\n設定できると「🔔 通知ON ✓」になる。以後、自分あての先回り通知が端末に届く。\n\n## うまくいかない時\n- **「要ログイン」と出る** → その端末（その URL）でまだログインしていない。先にログインしてから 🔔 を押す。\n- **iPhone で 🔔 が反応しない／出ない** → Safari のタブから開いている。必ず**ホーム画面のアイコン（PWA）**から開く。iOS が 16.4 以上か確認。\n- **サイトに接続できない／タイムアウト** → 携帯が Casper と別ネットワークにいる。同じ WiFi に繋ぐ。同じ WiFi でも届かない場合は WiFi の「クライアント分離（AP isolation）」の可能性 → 分離のない WiFi に繋ぐか管理者に相談。\n- **証明書の警告が消えない** → 証明書のインストール後、iPhone は「証明書信頼設定」で ON にするまで信頼されない。\n\n## 仕組み（技術メモ）\nWeb Push は端末での購読時にセキュアコンテキスト（HTTPS）が必須。Casper は自前で VAPID＋RFC 8291 の Web Push を実装（依存ゼロ）。購読は本人の uid で保存され、通知ループが「購読のある全ユーザー」を対象に各自のデータに絞って配信する。\n\nお送りする本文に、頼まれた中身がまだ入っておりませぬ。何を書いてお送りすればよいか、内容をお聞かせくだされ。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "pass",
+   "reasons": [
+    "箇条書き行数 10 本(>=2)",
+    "甲(両面機械照合可)・must/must_not/structural条件をすべて通過"
+   ],
+   "elapsed_sec": 48.2
+  },
+  {
+   "id": "E01",
+   "type": "DM代筆",
+   "decidable": "丙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_E01",
+   "prev": "（Scoreのステータス説明を提示した直後）",
+   "prev_sent": "Scoreのステータスを説明して",
+   "prev_answer": "Calendar の最新データを確認しました。プロジェクト「Score 検証」は**完了**状態です。\n\n| 項目 | 内容 |\n|---|---|\n| プロジェクト名 | Score 検証 |\n| ステータス | **完了 (Completed)** |\n| 納期/期限 | 2026-07 |\n| 備考 | タスク詳細は vault/90_db_archives に保全済み |\n\n現在進行中のタスクはありません。",
+   "q": "この内容をryojiに共有しておいて",
+   "answer": "共有したい「内容」が不明です。直前の会話履歴や添付ファイルがありません。\n\nお送りする本文に、頼まれた中身がまだ入っておりませぬ。何を書いてお送りすればよいか、内容をお聞かせくだされ。\n\n※上記のうちネット由来: https://www.weblio.jp/content/%E5%85%B1%E6%9C%89%E3%81%97%E3%81%BE%E3%81%99, https://jp.indeed.com/career-advice/career-development/i-will-share-it, https://note.com/barairo325/n/naefacb89a08c, https://support.google.com/calendar/answer/37082?hl=ja, https://detail.chiebukuro.yahoo.co.jp/qa/question_detail/q11125441666",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "承認カードが立たなかった(needs_card条件不成立)"
+   ],
+   "elapsed_sec": 89.2
+  },
+  {
+   "id": "F01",
+   "type": "資料URL",
+   "decidable": "乙",
+   "uid": "36",
+   "thread": "eval_run_1786215602_F01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "http://nina_notepc_02:8100/doc/elvis/2026-07-30/hikou-fairu-kirikae-kinou-irai-shiyousho-hikou-tan-an-sekkan\nこの内容を簡単に教えてください",
+   "answer": "---\n\n提示されたURLの資料は、Crazyflieドローンシミュレーションにおける**「飛行ファイル切替機能」**の依頼仕様書（2026-07-30作成）です。\n\n主な要点は以下の通りです：\n\n1.  **目的**: シミュレーション実行中に別の飛行ファイルへ切り替え可能にする。\n2.  **中核要件**: 切替遷移中に機体同士が衝突しないこと（**最小間隔50cm以上**を絶対条件とする）。\n3.  **技術的前提**:\n    *   受信側（UE C++）の改修は不要（既存の`start_epoch`信号で対応）。\n    *   「全機が同時に直線移動する」単純な遷移では、幾何学的理由により50cm条件を満たせないケースがあるため、この方式は不採用。\n4.  **実現方針**: 機体番号と役割の対応を変えずに衝突回避するため、以下のいずれかの手法を採用（開発担当の判断委ね）：\n    *   (a) 各機体の遷移開始時刻をずらす\n    *   (b) 経路を直線から外す（迂回・円弧等）\n    *   (c) 遷移中のみ高度を分離する\n5.  **速度制限**: 遷移速度の上限は本編の実測最高値である**90cm/s**とする。指定時間が短すぎてこれを超える場合は、切替を拒否し必要な時間を報告する。\n6.  **安全但書**: 50cm保証は「指令軌跡上」の幾何学的間隔であり、実機の追従誤差（トラッキング誤差）を含んだ実際の間隔を保証するものではない。\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 20.8
+  },
+  {
+   "id": "G01",
+   "type": "起票",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_run_1786215602_G01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "（SB_estimate_invoice_DCRP_柳井氏_FQ_20260601_02_tes.xlsx を投入し）新規プロジェクトを起票",
+   "answer": "Excelファイルの構造化解析に失敗しています。JSON形式での出力指示が不足しているため、Casper側でデータを読み取れませんでした。\n\n1. ファイルを再添付\n2. 「このExcelファイルの内容を基に新規プロジェクトを起票して」と明確な指示文を併記\n\nまたは、ryoji（uid28）に直接「Excel起票のエラー再発」を確認してもらうことも可能です。\n\n※上記アクションはまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "untestable",
+   "reasons": [
+    "untestable: 実Excelを投じておらぬ以上、測っておるのは『ファイルを読めぬ時に正直に返すか』であり、holdoutのexpect(構造化が通り承認カードまで到達する)を測っておらぬ(cmd_496実測: 起票の構造化は100〜270秒要し、/api/chatのテキスト経路のみでは承認カードまで到達しない=機械的に毎回fail)。fail確定にもpass水増しにもせず、測れておらぬと正直に申告する第四区分untestableとする(cmd_500第2便・軍師裁定+将軍許可)。実Excelを投じる経路の実装は次便以降の課題。"
+   ],
+   "elapsed_sec": 15.5
+  }
+ ],
+ "round2": [],
+ "fail_or_review_full_answers": [
+  {
+   "id": "A01",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_A01",
+   "prev": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_sent": "ARKitLedScan_DesignSpec　これをわかりやすく説明して",
+   "prev_answer": "vault に登録されている `ARKitLedScan_DesignSpec.pdf` の内容に基づき、要点をまとめます。\n\n**ARKitLedScan とは**\niOSデバイス（iPhone/iPad）のカメラとLiDARセンサーを用い、静止した物体や空間に対して高精度な3Dスキャン・計測を行う技術仕様です。\n\n**主な特徴・目的**\n1. **静物固定前提**: 動く対象ではなく、固定された物体や環境を対象としています。\n2. **高密度LED計測**: LEDの配置や輝度特性などを詳細に記録・解析することを目的としています。\n3. **ARKit活用**: Appleの拡張現実フレームワーク（ARKit）を基盤にし、デバイスのモーションデータと深度情報を統合して正確な空間把握を行います。\n\nこの仕様書は、主にLED関連の製品開発や展示物における精密な計測・検証プロセスを定義したものです。\n\n※上記のうちネット由来: https://en.wikipedia.org/wiki/ARKit, https://developer.apple.com/documentation/arkit/arkit-in-ios, https://en.wikipedia.org/wiki/LED_to_LED_communication, https://www.getapp.com/industries-software/a/designspec/, https://designspec.com/, https://www.arkscan.com/technical-support/download",
+   "q": "工数を教えて",
+   "answer": "tetsuo (uid 30) の現在の活動記録 `25_activity/u_30.md` には、具体的なタスクごとの工数（人時/人日）のデータは含まれていません。\n\n現在進行中のプロジェクトにおける tetsuo の担当タスクと期限を確認し、そこから工数を推計するか、あるいは過去の類似案件から基準値を算出するには、Calendar から最新データを取得する必要があります。\n\nどのプロジェクト（例: Zenith, marukome, AI動画生成 など）のどのタスクについて知りたいですか？特定できれば、そのタスクの締切と現在の日付(2026-08-09)から残り日数や想定工数を計算します。\n\n※上記のうちネット由来: https://ja.wikipedia.org/wiki/%E5%B7%A5%E6%95%B0, https://asana.com/ja/resources/what-is-man-hour, https://www.internetacademy.jp/it/design/web-design/system_development_effort.html, https://www.kaonavi.jp/dictionary/kosu/, https://biz.moneyforward.com/erp/basic/6170/, https://di-square.co.jp/tech_info/production_costs/, https://www.crowdlog.jp/blog/127144/, https://www.fdc-inc.co.jp/fapi/man-hour_calculation/",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_not条件に該当: ['どのプロジェクト']"
+   ],
+   "elapsed_sec": 102.6
+  },
+  {
+   "id": "A02",
+   "type": "文脈引き継ぎ",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_A02",
+   "prev": "ARKitLedScan　説明して",
+   "prev_sent": "ARKitLedScan　説明して",
+   "prev_answer": "1. **ARKitLedScan_DesignSpec.pdf** — 技術仕様書（設計詳細）\n2. **WorkEstimate_ARKitLedScan.xlsx** — 作業工数見積もり表\n\n具体的な内容（機能概要・実装方針・工数内訳等）はこれらのファイルに記載されています。どちらの資料の詳細を確認しますか？\n\n※上記のうちネット由来: https://en.wikipedia.org/wiki/ARKit, http://www.arkscan.com/, https://en.wikipedia.org/wiki/LED_to_LED_communication\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "q": "作業工数も教えて",
+   "answer": "profile_u_30 はスキルシート上の情報（得意・ソフト）が空欄であり、現在進行中のプロジェクトへのタスクアサインも確認できません。したがって、具体的な作業工数は算出できません。\n\n該当する人物の正式名称または担当プロジェクトを特定できれば、そのPJのタスクから工数を抽出します。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 53.2
+  },
+  {
+   "id": "A04",
+   "type": "文脈引き継ぎ",
+   "decidable": "甲",
+   "uid": "30",
+   "thread": "eval_run_1786215602_A04",
+   "prev": "コンバトラーの進捗は？",
+   "prev_sent": "コンバトラーの進捗は？",
+   "prev_answer": "Calendarで「コンバトラーV プロモーション映像」のタスクを確認しました。\n\n| 状態 | タスク名 | 担当者 | 締切 | 備考 |\n|---|---|---|---|---|\n| **完了** | コンバトラーV プロモーション映像 | kiyotomo | 2026-07-31 | PJ自体は完了扱い |\n\nプロジェクト全体としては「完了」ステータスであり、現在進行中のタスクはありません。\n詳細なフィードバックやアーカイブが必要な場合はお知らせください。",
+   "q": "まるこめの進捗状況は？",
+   "answer": "うまくお答えできませなんだ。恐れ入りますが、今一度 別の言い方でお尋ねくだされ。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "must_any条件をどれも満たさぬ: ['marukome', 'まるこめ', 'マルコメ']"
+   ],
+   "elapsed_sec": 22.3
+  },
+  {
+   "id": "B01",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_B01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "8/5がマルコメの試写ではなかったのでは？",
+   "answer": "いいえ、8月5日はマルコメ（marukome）の試写日ではありません。\n\n記録にある「現場でのプロジェクターを使った確認」は**2026年5月27日**です。\n\nまた、現在のプロジェクト状況を確認すると：\n*   **marukome**: 納期は**2026-08-19**（予定内）\n*   **本日**: 2026-08-09\n\n8月5日は、他のプロジェクト（SORAFUNE、AIアニメレイアウト作成）の納期日でしたが、マルコメに関連する試写や確定日の記録はありません。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "母集合語(['件を確認', '件のうち', '件中', 'Calendar', 'calendar', '母集合'])を伴わず断定語['ありません']のみ"
+   ],
+   "elapsed_sec": 12.6
+  },
+  {
+   "id": "B02",
+   "type": "不在断言",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_run_1786215602_B02",
+   "prev": "遅れてるタスクはないってことかな？",
+   "prev_sent": "遅れてるタスクはないってことかな？",
+   "prev_answer": "はい、本日（2026-08-09）時点で**締切当日のタスクはありません**。\n\nただし、プロジェクトレベルでは**4件が納期超過**しています。\n- SORAFUNE\n- RND TKPプレヴィズ\n- GS（〆08/07）\n- AIアニメレイアウト作成\n\nこれらプロジェクト内のタスクが「進行中」かつ期限切れであれば、実質的に遅延しています。確認が必要であればお申し付けください。",
+   "q": "各タスクのステータスを見せて",
+   "answer": "そのプロジェクト名に一致がございませぬ。もしやこちらでは？（違えば具体名で仰せを）",
+   "cards": [
+    {
+     "tool": "choices",
+     "choices": {
+      "prompt": "そのプロジェクト名に一致がございませぬ。もしやこちらでは？（違えば具体名で仰せを）",
+      "options": [
+       {
+        "id": "pjtask_test",
+        "label": "test のタスク",
+        "preview": "test の未完了タスク一覧を表示",
+        "say": "testのタスクを見せて"
+       }
+      ]
+     }
+    }
+   ],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "断定語が本文に無い(このstructural条件は不発火)",
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 18.8
+  },
+  {
+   "id": "C01",
+   "type": "できません",
+   "decidable": "乙",
+   "uid": "28",
+   "thread": "eval_run_1786215602_C01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "Aurora内の今日アップデートした資料って何？",
+   "answer": "本日（2026-08-09）にAurora内でアップロード・更新された資料は**0件**です。\n\n※上記のうちネット由来: https://blog.s-style.co.jp/2025/10/14798/, https://zenn.dev/lunarxlark/articles/aws-important-notice-aurora-upgrade, https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/AuroraUserGuide/Aurora.VersionPolicy.Upgrading.html, https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Updates.Upgrading.html, https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/WhatsNew.html, https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Updates.html, https://www.spaceweatherlive.com/, https://en.wikipedia.org/wiki/Aurora_(Ayumi_Hamasaki_song\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 59.7
+  },
+  {
+   "id": "E01",
+   "type": "DM代筆",
+   "decidable": "丙",
+   "uid": "30",
+   "thread": "eval_run_1786215602_E01",
+   "prev": "（Scoreのステータス説明を提示した直後）",
+   "prev_sent": "Scoreのステータスを説明して",
+   "prev_answer": "Calendar の最新データを確認しました。プロジェクト「Score 検証」は**完了**状態です。\n\n| 項目 | 内容 |\n|---|---|\n| プロジェクト名 | Score 検証 |\n| ステータス | **完了 (Completed)** |\n| 納期/期限 | 2026-07 |\n| 備考 | タスク詳細は vault/90_db_archives に保全済み |\n\n現在進行中のタスクはありません。",
+   "q": "この内容をryojiに共有しておいて",
+   "answer": "共有したい「内容」が不明です。直前の会話履歴や添付ファイルがありません。\n\nお送りする本文に、頼まれた中身がまだ入っておりませぬ。何を書いてお送りすればよいか、内容をお聞かせくだされ。\n\n※上記のうちネット由来: https://www.weblio.jp/content/%E5%85%B1%E6%9C%89%E3%81%97%E3%81%BE%E3%81%99, https://jp.indeed.com/career-advice/career-development/i-will-share-it, https://note.com/barairo325/n/naefacb89a08c, https://support.google.com/calendar/answer/37082?hl=ja, https://detail.chiebukuro.yahoo.co.jp/qa/question_detail/q11125441666",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "fail",
+   "reasons": [
+    "承認カードが立たなかった(needs_card条件不成立)"
+   ],
+   "elapsed_sec": 89.2
+  },
+  {
+   "id": "F01",
+   "type": "資料URL",
+   "decidable": "乙",
+   "uid": "36",
+   "thread": "eval_run_1786215602_F01",
+   "prev": "",
+   "prev_sent": "",
+   "prev_answer": null,
+   "q": "http://nina_notepc_02:8100/doc/elvis/2026-07-30/hikou-fairu-kirikae-kinou-irai-shiyousho-hikou-tan-an-sekkan\nこの内容を簡単に教えてください",
+   "answer": "---\n\n提示されたURLの資料は、Crazyflieドローンシミュレーションにおける**「飛行ファイル切替機能」**の依頼仕様書（2026-07-30作成）です。\n\n主な要点は以下の通りです：\n\n1.  **目的**: シミュレーション実行中に別の飛行ファイルへ切り替え可能にする。\n2.  **中核要件**: 切替遷移中に機体同士が衝突しないこと（**最小間隔50cm以上**を絶対条件とする）。\n3.  **技術的前提**:\n    *   受信側（UE C++）の改修は不要（既存の`start_epoch`信号で対応）。\n    *   「全機が同時に直線移動する」単純な遷移では、幾何学的理由により50cm条件を満たせないケースがあるため、この方式は不採用。\n4.  **実現方針**: 機体番号と役割の対応を変えずに衝突回避するため、以下のいずれかの手法を採用（開発担当の判断委ね）：\n    *   (a) 各機体の遷移開始時刻をずらす\n    *   (b) 経路を直線から外す（迂回・円弧等）\n    *   (c) 遷移中のみ高度を分離する\n5.  **速度制限**: 遷移速度の上限は本編の実測最高値である**90cm/s**とする。指定時間が短すぎてこれを超える場合は、切替を拒否し必要な時間を報告する。\n6.  **安全但書**: 50cm保証は「指令軌跡上」の幾何学的間隔であり、実機の追従誤差（トラッキング誤差）を含んだ実際の間隔を保証するものではない。\n\n※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。",
+   "cards": [],
+   "outbox_pids": [],
+   "rejects": [],
+   "verdict": "review",
+   "reasons": [
+    "乙(ng側のみ機械化確実)・ng条件には当たらなんだが、expect側は近似ゆえ機械ではpassと断ぜず人の目へ回す"
+   ],
+   "elapsed_sec": 20.8
+  }
+ ]
+}

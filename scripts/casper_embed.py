@@ -29,9 +29,24 @@ OLLAMA = os.environ.get("CASPER_EMBED_ENDPOINT",
 MODEL = os.environ.get("CASPER_EMBED_MODEL", "bge-m3")
 _VEC = None      # [{src,title,t,v:[float]}]
 
+try:
+    sys.path.insert(0, HERE)
+    import casper_llm_client                      # cmd_519第3便: 横断呼出台帳(inflight)配線・Fable第三診正典
+except Exception:
+    casper_llm_client = None
+
 
 def embed_one(text):
     """1テキストを埋め込みベクトル化。失敗(モデル無し等)で None。"""
+    _prompt_chars = min(len(text), 2000)
+    _inflight_handle = None
+    if casper_llm_client:
+        try:
+            if casper_llm_client.inflight_should_record(_prompt_chars, "casper_embed"):
+                _inflight_handle = casper_llm_client.inflight_start(
+                    "casper_embed", MODEL, OLLAMA, _prompt_chars)
+        except Exception:
+            _inflight_handle = None
     try:
         req = urllib.request.Request(
             OLLAMA + "/api/embeddings",
@@ -39,14 +54,40 @@ def embed_one(text):
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as r:
             d = json.load(r)
+        if casper_llm_client:
+            try:
+                # ttft_sec=None: 非stream・埋め込みAPIはfirst token概念が無い(distill_activityと同型・瑕疵2是正)
+                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d)
+            except Exception:
+                pass
         v = d.get("embedding")
         return v if v else None
     except Exception:
+        if casper_llm_client:
+            try:
+                casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA)
+            except Exception:
+                pass
         return None
+    finally:
+        if casper_llm_client and _inflight_handle:
+            try:
+                casper_llm_client.inflight_end(_inflight_handle)
+            except Exception:
+                pass
 
 
 def embed_batch(texts):
     """複数テキストをバッチ埋め込み(/api/embed)。[[float],...] or None。"""
+    _prompt_chars = sum(min(len(t), 2000) for t in texts)
+    _inflight_handle = None
+    if casper_llm_client:
+        try:
+            if casper_llm_client.inflight_should_record(_prompt_chars, "casper_embed"):
+                _inflight_handle = casper_llm_client.inflight_start(
+                    "casper_embed", MODEL, OLLAMA, _prompt_chars)
+        except Exception:
+            _inflight_handle = None
     try:
         req = urllib.request.Request(
             OLLAMA + "/api/embed",
@@ -54,9 +95,25 @@ def embed_batch(texts):
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=120) as r:
             d = json.load(r)
+        if casper_llm_client:
+            try:
+                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d)
+            except Exception:
+                pass
         return d.get("embeddings")
     except Exception:
+        if casper_llm_client:
+            try:
+                casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA)
+            except Exception:
+                pass
         return None
+    finally:
+        if casper_llm_client and _inflight_handle:
+            try:
+                casper_llm_client.inflight_end(_inflight_handle)
+            except Exception:
+                pass
 
 
 def _atomic_dump(obj, path):

@@ -20,6 +20,7 @@ scripts/threads/
 scripts/.casper_secret
 scripts/.casper_write_token
 scripts/casper_embed_index.json
+scripts/casper_embed_index.json.tmp.*
 scripts/.casper_user_mcp.json
 scripts/.casper_user_mcp.json.tmp
 scripts/roster_cache.json

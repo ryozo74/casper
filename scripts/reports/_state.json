@@ -1,0 +1,23 @@
+{
+ "weekly_last_run": "2026-08-20",
+ "weekly_last_ok": true,
+ "weekly_last_summary_path": "/mnt/h/multi-agent-shogun-main/projects/casper/scripts/reports/weekly_2026-08-20.json",
+ "weekly_last_totals": {
+  "questions": 47,
+  "stumbles": 8,
+  "rate": 0.1702
+ },
+ "last_error": null,
+ "pack_lint_last_run": "2026-08-21",
+ "pack_lint_last_count": 0,
+ "pack_lint_last_files": [],
+ "pack_lint_last_error": null,
+ "holdout_last_run": "2026-08-16",
+ "holdout_last_ok": true,
+ "holdout_last_pass": 7,
+ "holdout_last_total": 10,
+ "dropbox_space_alert_active": true,
+ "dropbox_space_alert_first_ts": "2026-08-19T22:35:15",
+ "dropbox_space_alert_last_error": "path/insufficient_space/",
+ "dropbox_space_alert_cleared_ts": "2026-08-19T22:34:57"
+}
