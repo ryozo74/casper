@@ -2398,10 +2398,30 @@ def _llm_call_record(site, model, fn):
         calls.append(rec)
 
 
+class LocalClassifierSuppressed(RuntimeError):
+    """雲に座っている間、ローカルの分類器を呼ばなかったことを表す。
+    ★これは「失敗」ではなく「呼ばなかった」である。呼出元の三値契約では None(判定不能)へ落ち、
+    各機構は安全側の既定へ倒れる(送信意図は載せる/canonは差さぬ 等)。"""
+
+
+_OLLAMA_JSON_SUPPRESSED = 0        # 雲に座っている間に呼ばずに済ませた回数(観測用・黙って変えぬ)
+
+
 def _ollama_json(system, user, num_predict=400):
     """z8a を format='json' の制約デコードで呼び、JSON文字列を返す(P2ルーター/引数抽出の土台)。
     Ollamaのschema-object modeはqwenが無視する為、format='json'＋プロンプト記述スキーマを使う(実測で確実)。"""
-    global _OLLAMA_JSON_CALL_COUNT
+    global _OLLAMA_JSON_CALL_COUNT, _OLLAMA_JSON_SUPPRESSED
+    # 【殿御下命 2026-08-24】雲に座っている間は【ローカルの分類器を呼ばぬ】。
+    # ★真因(実測): 雲へ移したのは「本文を書く口」だけで、意図判定(_ollama_json)は
+    #   従来どおりローカル宛先(CASPER_OLLAMA)を叩き続けていた。ゆえに殿が別作業へ回された
+    #   z8a に 27b が再ロードされ、「z8aは使わぬ」の御下命が半分しか効いていなかった。
+    # ★呼出元5箇所はすべて try/except で包まれ、三値契約(True/False/None)を持つ。
+    #   ここで例外を投げれば None(判定不能)へ落ち、各機構は既に設計された安全側へ倒れる。
+    #   「判定を雲へ回す」道も採り得たが、送出量と費えが増えるゆえ殿は「呼ばぬ」を選ばれた。
+    if BACKEND in ("claude_cli", "anthropic"):
+        _OLLAMA_JSON_SUPPRESSED += 1
+        raise LocalClassifierSuppressed(
+            f"雲({BACKEND})に着座中ゆえローカル分類器を呼ばぬ(判定不能=Noneへ倒す)")
     _OLLAMA_JSON_CALL_COUNT += 1
     body = {"model": A.model, "stream": False, "think": False, "keep_alive": -1, "format": "json",
             # num_ctx は対話/pinger と統一(Fable): 不一致は Ollama のランナー再作成=実質再ロードで温存を壊す(冷間の真犯人)
@@ -9029,6 +9049,8 @@ class H(BaseHTTPRequestHandler):
             _pol = "engine" if "回答方針" in _ctx.get("core", "") else "digest"
             _fresh = casper_embed.ensure_fresh() if casper_embed else {}   # cmd_498: 観測時に古ければその場で是正
             self._json({"ok": True, "model": active, "backend": BACKEND,
+                        # 雲に座っている間、ローカル分類器を呼ばずに済ませた回数(殿御下命2026-08-24)
+                        "classifier_suppressed": _OLLAMA_JSON_SUPPRESSED,
                         "policy": _pol, "ctx_sections": len(_ctx.get("sections", [])),
                         "ctx_core_len": len(_ctx.get("core", "")), "index_freshness": _fresh})
         else:
