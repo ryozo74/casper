@@ -380,6 +380,56 @@ def _rewrite_env(target_hostport, is_embed_too):
     os.replace(tmp, ENV_FILE)
 
 
+def _rewrite_env_kv(key, value):
+    """casper_endpoints.envの任意の1行(key=value)を書き換える。無ければ末尾へ足す。
+    ★機構が書いた事実は必ずログへ(人手書換との衝突を可視化・_rewrite_envと同じ作法)。"""
+    if not os.path.exists(ENV_FILE):
+        raise FileNotFoundError(ENV_FILE)
+    with open(ENV_FILE, encoding="utf-8") as f:
+        lines = f.readlines()
+    out, found = [], False
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            out.append(f"{key}={value}\n"); found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(f"\n# 【2026-08-24 機構が追記】雲への降段状態(最下段の座席)\n{key}={value}\n")
+    tmp = ENV_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(out)
+    os.replace(tmp, ENV_FILE)
+    return found
+
+
+def cmd_set_backend(args):
+    """【殿御裁可2026-08-24・甲】最下段の座席=雲(claude_cli)への降段/復席。
+    ★GPUの席が一つも緑でない時のみ雲へ座る。雲は救命艇であって住処ではない。
+    ★雲へ出た内容は casper_cloud_ledger が一件残らず帳簿へ刻む(殿御下命)。
+    通知(inbox/Discord)はsupervisor側が担う(cmd_switchと同じ分担)。"""
+    to = (args.to or "").strip()
+    if to not in ("claude_cli", "ollama"):
+        print(json.dumps({"error": "--to must be claude_cli|ollama"}))
+        return 3
+    env = _read_env()
+    old = env.get("CASPER_BACKEND", "ollama")
+    if old == to:
+        print(json.dumps({"backend": to, "changed": False, "reason": "既にその座席に居る"},
+                         ensure_ascii=False))
+        return 0
+    _rewrite_env_kv("CASPER_BACKEND", to)
+    state = _load_state()
+    state.setdefault("backend_switches", []).append(
+        {"ts": time.time(), "from": old, "to": to, "reason": args.reason or ""})
+    _save_state(state)
+    log(f"[座席変更] backend {old} → {to} (reason={args.reason}) ★機構による自動書換。"
+        + ("★社の情報がAnthropicを経由する状態に入る。帳簿=casper_cloud_ledger.jsonl。"
+           if to == "claude_cli" else "★ローカル推論へ復席。"))
+    print(json.dumps({"backend": to, "from": old, "changed": True,
+                      "reason": args.reason or ""}, ensure_ascii=False))
+    return 0
+
+
 def cmd_switch(args):
     """実際の切替を行う: env書換+ログ+state記録。★呼び出し元(supervisor)がinbox/Discord通知を担う
     (このモジュールはPython・通知スクリプトはbash資産のため、通知はsupervisor.sh側で行う設計)。"""
@@ -413,6 +463,9 @@ def main():
 
     sub.add_parser("decide")
 
+    p_bk = sub.add_parser("set-backend")
+    p_bk.add_argument("--to", required=True, help="claude_cli(雲へ降段) | ollama(復席)")
+    p_bk.add_argument("--reason", default="")
     p_sw = sub.add_parser("switch")
     p_sw.add_argument("--to", required=True, help="host:port")
     p_sw.add_argument("--reason", default="")
@@ -420,7 +473,8 @@ def main():
     args = ap.parse_args()
     fn = {"probe-active": cmd_probe_active, "probe-home": cmd_probe_home,
           "probe-generate": cmd_probe_generate,
-          "decide": cmd_decide, "switch": cmd_switch}[args.cmd]
+          "decide": cmd_decide, "switch": cmd_switch,
+          "set-backend": cmd_set_backend}[args.cmd]
     return fn(args)
 
 

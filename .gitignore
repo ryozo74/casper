@@ -48,3 +48,7 @@ scripts/breaker.json
 
 # 索引の件数サイドカー(実行時生成物・cmd_498)
 scripts/casper_embed_index.json.meta.json
+
+# 雲へ出た内容の帳簿(社の情報・0600・git管理外)
+scripts/casper_cloud_ledger.jsonl
+scripts/casper_embed_reindex.jsonl

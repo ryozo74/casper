@@ -23,7 +23,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "chat_server.py")
-WANT = ["_QUESTION_FORM_RE", "_DESIRE_FORM_RE", "_REQUEST_FORM_RE", "_ASK_DELEGATE_RE",
+WANT = ["_LLM_CALL_LOCAL", "_TURN_SEQ", "_turn_memo", "_llm_call_turn_reset",   # 【Fable第七診】memo依存
+        "_TAIKEN_GUIDE_LINE",                 # casper_howto_digest が使う(WANT漏れ・本日補完)
+        "_TAIKEN_GUIDE_URL",
+        "_QUESTION_FORM_RE", "_DESIRE_FORM_RE", "_REQUEST_FORM_RE", "_ASK_DELEGATE_RE",
         "_asks_about_casper", "_asks_about_casper_llm",
         "_HOWTO_CACHE", "_HOWTO_FALLBACK", "_load_casper_howto", "casper_howto_digest",
         "_CASPER_HOWTO_FORBIDDEN_RE", "_CASPER_HOWTO_FORBIDDEN_NEGATION_RE", "_casper_howto_forbidden_hit",
@@ -49,7 +52,7 @@ if missing:
     sys.exit(1)
 
 M = {}
-exec("import re, os, json, urllib.request", M)
+exec("import re, os, json, threading, urllib.request", M)   # threading: _LLM_CALL_LOCAL(turn-local memo)が要る
 exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
 _asks = M["_asks_about_casper"]
 _asks_llm = M["_asks_about_casper_llm"]
@@ -157,12 +160,85 @@ chk_true("正典読取失敗時にqwenへ委ねる自由作文の余地がない
 M["_load_casper_howto"] = _load   # 復元
 
 # ══════════════════════════════════════════════════════════════════════════
-# B-3: 判定None(分類器が答えない)時も同じ正直フォールバックへ倒す
+# B-3: 判定None(分類器が答えない)時は【何も注入しない】
 # ══════════════════════════════════════════════════════════════════════════
+# ★2026-08-24 是正: 本条は「Noneでもフォールバック文を注入する」を期待していたが、
+#   本番コードは 2026-08-18 の実害を受けて cmd_515手当1 で意図的に
+#   「None → 注入ゼロ」へ改められている(chat_server.casper_howto_digest の docstring と
+#   インライン実害記録に残る: 同日12:41、殿の「vaultではなくDM検索して」に対し、
+#   about is None の turn にまで導線を添えたため★体験ガイドのURLだけが返り、
+#   問いに一切答えなかった=「添え物が本文になる」)。
+#   本条はその改修に追随せず旧契約のまま取り残されていた。ゲートが _TAIKEN_GUIDE_LINE の
+#   WANT漏れでクラッシュし続けていたため、この齟齬は誰の目にも触れなかった
+#   (=走らぬゲートは緑でも赤でもなく、ただの沈黙である)。
+#   Noneは「判定不能」であって「使い方の話である」ことを意味せぬ——無関係turnへの
+#   滲出を避けるため、注入ゼロが正しい。
 M["_ollama_json"] = lambda *a, **k: (_ for _ in ()).throw(TimeoutError())
 _out_none = M["casper_howto_digest"]("携帯で通知を受け取るには？")
-chk_true("判定None時も正直な出口文言を含む(qwenに自由作文させない)",
-         "確かな手順をただいま参照できませなんだ" in _out_none)
+chk("判定None(分類器timeout)時は注入ゼロ(無関係turnへ滲出させぬ)", _out_none, "")
+chk_true("判定None時にqwenへ委ねる自由作文の余地もない(そもそも何も差さぬ)",
+         "確かな手順" not in _out_none and "体験ガイド" not in _out_none)
+
+# ══════════════════════════════════════════════════════════════════════════
+# B-3b: 【Fable第七診】turn-local memo — 同じ問いを二度払わぬ / turnの境で必ず忘れる
+# ══════════════════════════════════════════════════════════════════════════
+# 実害の背景: _asks_about_casper は4箇所(canon判定/web gate/howto digest/出口検問)から
+# 独立に呼ばれ、同一turn・同一発話に対し最大4往復ぶん推論機を払っていた(実測「携帯」turn
+# 7呼出のうち2〜3回が同一問いの再判定)。
+# ★ただし記憶して良いのは「1発話の中」だけである。turn印(_llm_call_turn_reset)が
+#   立っていない経路では memo を完全に無効化する——さもなくば前の発話の判定が次へ漏れ、
+#   それは cache ではなく嘘になる(この穴は gate_context_handoff が実際に撃った)。
+_memo_calls = {"n": 0}
+
+
+def _counting_ollama_json(system, user, num_predict=60):
+    _memo_calls["n"] += 1
+    return '{"about_casper": true}'
+
+
+M["_ollama_json"] = _counting_ollama_json
+_q_memo = "キャスパーって携帯で見れるの？"
+
+# ① turnの外(turn印なし)では記憶しない=毎回払う(判定が古びて嘘になるより、払う方を選ぶ)
+M["_LLM_CALL_LOCAL"].turn_id = None
+_memo_calls["n"] = 0
+M["_asks_about_casper"](_q_memo)
+M["_asks_about_casper"](_q_memo)
+chk("① turn印なし: memoは効かず毎回分類器を呼ぶ(古い判定を漏らさぬ)", _memo_calls["n"], 2)
+
+# ② turnの中では同じ問いを1回に畳む
+M["_llm_call_turn_reset"]()
+_memo_calls["n"] = 0
+_a1 = M["_asks_about_casper"](_q_memo)
+_a2 = M["_asks_about_casper"](_q_memo)
+_a3 = M["_asks_about_casper"](_q_memo)
+chk("② turn内: 同一発話の判定は1往復に畳まれる(3呼出→1)", _memo_calls["n"], 1)
+chk("② turn内: 畳んでも答えは変わらぬ", (_a1, _a2, _a3), (True, True, True))
+
+# ③ turnが変われば必ず忘れる(次の発話へ持ち越さぬ)
+M["_llm_call_turn_reset"]()
+_memo_calls["n"] = 0
+M["_asks_about_casper"](_q_memo)
+chk("③ turnが変われば忘れる(新しいturnでは改めて判定する)", _memo_calls["n"], 1)
+
+# ④ 別の発話は別の記憶(発話をkeyに含めている証拠)
+M["_llm_call_turn_reset"]()
+_memo_calls["n"] = 0
+M["_asks_about_casper"](_q_memo)
+M["_asks_about_casper"]("キャスパーの通知設定はどこ？")
+chk("④ 別発話は別に判定される(memo keyが発話を含む)", _memo_calls["n"], 2)
+
+# ⑤ 突然変異: memoを素通し(常にcompute)にすると①〜④のうち②が赤化する=配線が効いている証拠
+_orig_turn_memo = M["_turn_memo"]
+M["_turn_memo"] = lambda key, compute: compute()
+M["_llm_call_turn_reset"]()
+_memo_calls["n"] = 0
+M["_asks_about_casper"](_q_memo)
+M["_asks_about_casper"](_q_memo)
+chk("⑤ 変異(memo素通し)では畳まれず2往復になる(赤化実証)", _memo_calls["n"], 2)
+M["_turn_memo"] = _orig_turn_memo
+M["_LLM_CALL_LOCAL"].turn_id = None
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # B-4: _guard_casper_howto_claims — 判定Trueのturnで禁止語(捏造手順)を落とし正典へ差替

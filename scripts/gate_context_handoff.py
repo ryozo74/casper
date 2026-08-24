@@ -30,6 +30,11 @@ _examples = pack_config.get("examples", {}) or {}
 _OTHER_PJ = (_examples.get("project_names") or ["other-pj"])[0]
 
 WANT = ["_LAST_TOPIC", "_TOPIC_HANDOFF_FRESH_SEC", "_PJ_ALIAS",
+        # 【Fable第七診】_needs_prior_context が形ゲート(疑問形/依頼形)とturn-local memoを
+        # 使うようになったため、その依存もここへ載せる。載せねばゲートは実機構でなく
+        # 「抽出できた部分だけ」を検査することになる(検問器自身の差分を見よ・cmd_491の教訓)。
+        "_QUESTION_FORM_RE", "_REQUEST_FORM_RE", "_DESIRE_FORM_RE", "_ASK_DELEGATE_RE",
+        "_LLM_CALL_LOCAL", "_TURN_SEQ", "_turn_memo",
         "_needs_prior_context", "_needs_prior_context_llm",
         "_topic_handoff", "_pending_question_synthesis", "topic_handoff_digest",
         "_pj_resolve", "_pj_index", "_pj_name_hit", "_canonical",
@@ -63,7 +68,7 @@ if missing:
     sys.exit(1)
 
 M = {}
-exec("import re, os, json, time, datetime", M)
+exec("import re, os, json, threading, time, datetime", M)   # threading: _LLM_CALL_LOCAL(turn-local memo)が要る
 
 
 class _FakeRag:

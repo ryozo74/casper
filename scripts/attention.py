@@ -206,9 +206,14 @@ def gather(uid):
     return cands
 
 
-def today_three(uid, n=3):
-    """今日の注意 上位n件(スコア降順・種類が偏らぬよう軽く分散)。"""
-    cands = gather(uid)
+def today_three(uid, n=3, exclude_kinds=()):
+    """今日の注意 上位n件(スコア降順・種類が偏らぬよう軽く分散)。
+    exclude_kinds: 除く種類。★【重要】除外は選抜の【前】に掛ける。
+    選んでから捨てると、上位n件にその種類が混ざっていた分だけ本文が痩せる——
+    実害(2026-08-24 殿ご指摘): 見出しは「今日の3件」なのに1件しか出ておらぬ。
+    briefing は下書き(draft)を承認カードで別に出すため本文から除いていたが、
+    除外を選抜の後に掛けていたため、上位3件中2件が下書きだと本文が1件へ痩せていた。"""
+    cands = [c for c in gather(uid) if c.get("kind") not in exclude_kinds]
     cands.sort(key=lambda c: -c.get("score", 0))
     out, kinds = [], {}
     for c in cands:
@@ -241,9 +246,8 @@ def expire_stale():
 def briefing_lines(uid, include_drafts=True):
     """open_briefing へ差し込む『今日の3件』テキスト(無ければ空)。
     include_drafts=False: 下書きは承認カードで直接出す為テキストから除く(一往復短縮・Fable Q4)。"""
-    three = today_three(uid)
-    if not include_drafts:
-        three = [c for c in three if c.get("kind") != "draft"]
+    # ★除外は選抜の前に(上記 today_three の docstring 参照)。
+    three = today_three(uid) if include_drafts else today_three(uid, exclude_kinds=("draft",))
     icon = {"draft": "📝", "overdue": "🔴"}
     out = ""
     if three:
@@ -257,7 +261,19 @@ def briefing_lines(uid, include_drafts=True):
                 link = f"（[元DMを確認](casper-dm:{tid}:{pid})）" if tid else "（推測・元DM要確認）"
                 return f"🔗未確認 {c['title']} — {c['detail']}{link}"
             return f"{icon.get(c['kind'], '・')} {c['title']} — {c['detail']}"
-        out += "\n\n**今日の3件（気にかけどころ）**\n" + "\n".join(_fmt(c) for c in three)
+        # ★見出しは【実数】を名乗る。件数と一覧は同一の値から作る(鉄則: 件数と一覧は同一機構)。
+        #   見出しが数を約束して一覧が応えぬのは、見出しが嘘をついている状態である
+        #   (Fable: 見出しが帰属を約束する / 実害 2026-08-24 殿ご指摘「3件なのに1件」)。
+        _n = len(three)
+        _head = f"**今日の気にかけどころ（{_n}件）**"
+        _note = ""
+        if not include_drafts:
+            # 下書きは本文から外して承認カードで出している。数が痩せて見える理由を機構が名乗る
+            #   (黙って減らさぬ・no silent caps)。
+            _dn = sum(1 for c in today_three(uid) if c.get("kind") == "draft")
+            if _dn:
+                _note = f"\n（ほかに承認待ちの下書き{_dn}件は下のカードで出しております）"
+        out += "\n\n" + _head + "\n" + "\n".join(_fmt(c) for c in three) + _note
     # 全社の納期超過は"参考(降格見出し)"で。本人の3件(actionable)に無い分だけ提示。統括(owner)は全社を管掌ゆえ
     # 「担当外」と言わず単に参考、staffは帰属でなく「担当外」と明示(Fable: 見出しが帰属を約束する)。
     try:

@@ -97,6 +97,10 @@ try:
 except Exception:
     casper_minutes = None
 try:
+    import casper_cloud_ledger                       # 殿御下命2026-08-24: 雲へ出た内容の帳簿(頻度と中身を後で検分)
+except Exception:
+    casper_cloud_ledger = None
+try:
     import casper_status                             # M4 Phase4: status更新verb(納品/客先承認/対象外・W2実行ガード)
 except Exception:
     casper_status = None
@@ -1301,7 +1305,7 @@ def _asks_about_casper(query):
         return False
     if not (_QUESTION_FORM_RE.search(q) or _REQUEST_FORM_RE.search(q)):
         return False                                       # 疑問形でも依頼形でもない→対象外(LLMを呼ばぬ)
-    return _asks_about_casper_llm(q)
+    return _turn_memo(("asks_about_casper", q), lambda: _asks_about_casper_llm(q))
 
 
 # cmd_498 穴B手当1: 「そのturnに正典が要るか」を先に判じ(_asks_about_casper再利用)、要る時だけ序列を動かす。
@@ -1626,7 +1630,15 @@ def _needs_prior_context(query):
         return False
     if _pj_resolve(q)[0] == "unique":                 # 案件名が一意解決→対象明示済(既存機構の再利用・LLM呼ばず)
         return False
-    return _needs_prior_context_llm(q)
+    # 【Fable第七診】挨拶に分類器を呼ばせぬ。★語彙表(挨拶リスト)は作らない(cmd_485の轍)——
+    # 既に在る形ゲート(_asks_about_casperと同一の門)を再利用する。「対象を引き継がねば
+    # 答えられぬ問い」は必ず疑問形か依頼形を取る。挨拶は問いではない。
+    # 実測: 「こんにちは」の一言に分類器往復13.5秒を払っていた(その内訳はload 11.86秒)。
+    # ★分類器自身のプロンプトも「挨拶・雑談・一般知識の問いはfalse」と命じており、
+    #   この門はその判断を先回りするだけで、意味を変えていない。
+    if not (_QUESTION_FORM_RE.search(q) or _REQUEST_FORM_RE.search(q)):
+        return False
+    return _turn_memo(("needs_prior_context", q), lambda: _needs_prior_context_llm(q))
 
 
 def _needs_prior_context_llm(query):
@@ -2252,11 +2264,72 @@ def ollama_json_call_count():
 # turn(=1 HTTPリクエスト=1スレッド)ごとに集計するためthreading.localへ積む
 # (ThreadingHTTPServerゆえ1turn=1スレッド。globalリストだと並行turnで混線する)。
 _LLM_CALL_LOCAL = threading.local()
+_TURN_SEQ = 0                      # turn印の採番(memoの生存範囲を1発話に閉じるため)
 
 
 def _llm_call_turn_reset():
     """turn(1 HTTPリクエスト)の開始時に呼ぶ。このスレッドの呼出記録を空にする。"""
     _LLM_CALL_LOCAL.calls = []
+    _LLM_CALL_LOCAL.memo = {}          # 【Fable第七診】turn内の意図判定memoも同時に空にする
+    _LLM_CALL_LOCAL.memo_hits = 0
+    _LLM_CALL_LOCAL.ctx = {}           # turnの素性(雲の帳簿が引く)
+    # ★turn印。memoはこの印が立っている間だけ生きる(下記_turn_memo参照)。
+    global _TURN_SEQ
+    _TURN_SEQ += 1
+    _LLM_CALL_LOCAL.turn_id = _TURN_SEQ
+
+
+def _turn_ctx_set(**kv):
+    """このturnの素性(uid/name/thread/trace_id/query)を置く。雲の帳簿が「誰の何の発話が
+    社外へ出たか」を名乗れるようにするため(殿御下命2026-08-24)。"""
+    c = getattr(_LLM_CALL_LOCAL, "ctx", None)
+    if c is None:
+        c = _LLM_CALL_LOCAL.ctx = {}
+    c.update({k: v for k, v in kv.items() if v is not None})
+
+
+def _turn_ctx():
+    return dict(getattr(_LLM_CALL_LOCAL, "ctx", None) or {})
+
+
+def _cloud_ledger(door, model, prompt=None, response=None, dur_sec=None,
+                  outcome="ok", image_path=None, extra=None):
+    """雲へ出た一件を帳簿へ。★本番の応答は決して止めぬ(帳簿の失敗で答えを失わせぬ)。"""
+    if not casper_cloud_ledger:
+        return
+    try:
+        casper_cloud_ledger.record(door, model, prompt=prompt, response=response,
+                                   dur_sec=dur_sec, outcome=outcome, ctx=_turn_ctx(),
+                                   image_path=image_path, extra=extra)
+    except Exception:
+        pass
+
+
+def _turn_memo(key, compute):
+    """【Fable第七診・同じ問いを二度払わぬ】turn内で同一の意図判定を1回に畳む。
+    実測: _asks_about_casper は4箇所(canon判定/web gate/howto digest/出口検問)から独立に
+    呼ばれ、同じ問いを最大4往復ぶん推論機へ払っていた。1turn=1スレッド=1発話ゆえ、
+    同じ(判定名, 発話)の答えはturn内で変わらぬ。
+    ★turn境界を跨いで持ち越さない(_llm_call_turn_resetが空にする)——古い判定が
+      次の発話へ漏れれば、それは cache ではなく嘘になる。
+    ★Noneも記憶する(判定不能という結論も結論である・三値の掟)。二度目に別の値を返しては、
+      同一turn内で機構の判断が揺れる。"""
+    # ★turnの外では決して記憶しない。gate_context_handoffが実際にこの穴を撃った——
+    #   ゲートはturnを開始せぬまま同じ発話を複数回判じるが、memoが生き残ると
+    #   「分類器が例外を投げた回」に前回の答えが返り、機構が嘘をつく。
+    #   turn印(_llm_call_turn_resetが立てる)が無い経路=背景スレッド・非turn呼出では
+    #   memoを完全に無効化する。記憶して良いのは「1発話の中」だけである。
+    if getattr(_LLM_CALL_LOCAL, "turn_id", None) is None:
+        return compute()
+    m = getattr(_LLM_CALL_LOCAL, "memo", None)
+    if m is None:
+        m = _LLM_CALL_LOCAL.memo = {}
+    if key in m:
+        _LLM_CALL_LOCAL.memo_hits = getattr(_LLM_CALL_LOCAL, "memo_hits", 0) + 1
+        return m[key]
+    v = compute()
+    m[key] = v
+    return v
 
 
 def _llm_call_turn_records():
@@ -2279,6 +2352,7 @@ def _llm_call_record(site, model, fn):
     t_send = time.time()
     outcome = "error"
     server_total_sec = server_eval_sec = None
+    server_load_sec = server_prompt_eval_sec = None
     try:
         result = fn()
         outcome = "ok"
@@ -2288,6 +2362,15 @@ def _llm_call_record(site, model, fn):
                 server_total_sec = round(st / 1e9, 3)
             if isinstance(se, (int, float)):
                 server_eval_sec = round(se / 1e9, 3)
+            # 【Fable第七診の楔】load(ランナー再ロード)とprefill(prompt評価)を分別する。
+            # ★応答dictは元よりこの2欄を載せているのに、我らが捨てていただけである。
+            #   これが無いために将軍は「遅さ=生成」と誤帰属した(実測: server_evalは0.1秒台で、
+            #   9〜18秒の呼出の正体はload 11.86秒=qwen再ロードであった)。
+            sl, sp = result.get("load_duration"), result.get("prompt_eval_duration")
+            if isinstance(sl, (int, float)):
+                server_load_sec = round(sl / 1e9, 3)
+            if isinstance(sp, (int, float)):
+                server_prompt_eval_sec = round(sp / 1e9, 3)
         return result
     except Exception as e:
         outcome = "timeout" if _llm_is_timeout_error(e) else "error"
@@ -2296,7 +2379,19 @@ def _llm_call_record(site, model, fn):
         t_recv = time.time()
         rec = {"site": site, "model": model, "t_send": round(t_send, 3), "t_recv": round(t_recv, 3),
                "wait_sec": round(t_recv - t_send, 3), "server_total_sec": server_total_sec,
-               "server_eval_sec": server_eval_sec, "outcome": outcome}
+               "server_eval_sec": server_eval_sec, "server_load_sec": server_load_sec,
+               "server_prompt_eval_sec": server_prompt_eval_sec, "outcome": outcome}
+        # 待ちの帰属を機構が名乗る(推測させぬ): load / prefill / eval / queue のどれで待ったか。
+        # ★不明を "unknown" と名乗る(未確認をtrueと名乗るな)。
+        if server_total_sec is None:
+            rec["wait_kind"] = "unknown"
+        else:
+            _parts = {"load": server_load_sec or 0.0, "prefill": server_prompt_eval_sec or 0.0,
+                      "eval": server_eval_sec or 0.0}
+            _queue = round(max(0.0, (t_recv - t_send) - server_total_sec), 3)
+            _parts["queue"] = _queue
+            rec["wait_kind"] = max(_parts, key=_parts.get)
+            rec["queue_sec"] = _queue
         calls = getattr(_LLM_CALL_LOCAL, "calls", None)
         if calls is None:
             calls = _LLM_CALL_LOCAL.calls = []
@@ -6012,8 +6107,11 @@ def attention_digest(who, query):
         if not three:
             return ""
         lines = [f"- [{c['kind']}] {c['title']} — {c['detail']}" for c in three]
-        return ("\n\n## 【今日の3件(気にかけどころ)=先回りで拾った要対応・これが『上記の件』】\n"
+        # ★見出しは実数を名乗る(件数と一覧は同一機構・実害2026-08-24「3件なのに1件」)。
+        #   qwenへ渡す指示文の中で数を約束すると、qwenはその数に合わせて【作文する】。
+        return (f"\n\n## 【気にかけどころ{len(three)}件(先回りで拾った要対応)=これが『上記の件』】\n"
                 "利用者が『気にかけどころ/今日の3件/上記の2件』と言ったらこれを指す(vault議事録検索ではない)。"
+                f"★ここに挙げた{len(three)}件がすべてである。件数を増やして作文するな。"
                 "各々の対処を案内せよ: draft=承認待ちの下書き→『承認で送信・却下で破棄できます。まとめて確認しますか?』と促す / "
                 "overdue=納期超過PJ→状況確認や催促 / loop=未了の約束→催促の頃合いか。:\n" + "\n".join(lines))
     except Exception:
@@ -6264,6 +6362,20 @@ _CTX_CONDITIONAL = [
     {"h": "画像・動画の貼付ルール",
      "kws": ["画像", "動画", "貼付", "貼り", "貼る", "埋め込み", "埋込", "iframe", "vimeo", "ノート", "aurora",
              "base64", "img", "サムネ"]},
+    # 【Fable第八診・2026-08-24】毎turn無条件に載っていた死荷重を条件注入へ移す。
+    # 実測: 雲へ出た初行 21,941字のうち、この三節だけで 2,481字(メンバー2,076/実績195/legacy210)。
+    # ★roster_kws=True の節は、語彙表を手書きせず【名簿の実名から機械生成】する(cmd_485の轍を踏まぬ)。
+    # ★echo=False の節は出口のecho検問の署名に使わない——人名は Calendar からも正当に出てくるゆえ、
+    #   署名にすると「本物の人名を含む行」まで落としてしまう(捏造手順の滲出とは性質が違う)。
+    {"h": "メンバー / スキル",
+     "kws": ["メンバー", "スキル", "得意", "誰が", "誰か", "担当者", "人員", "チーム", "何人", "スタッフ",
+             "アニメータ", "モデラ", "コンポジ", "できる人", "詳しい人"],
+     "roster_kws": True, "echo": False},
+    {"h": "代表的な実績",
+     "kws": ["実績", "事例", "代表作", "制作事例", "どんな仕事", "過去作", "ポートフォリオ", "受賞"],
+     "echo": False},
+    {"h": "旧スコア legacy",
+     "kws": ["legacy", "レガシー", "旧スコア", "旧score", "昔の記録", "過去の記録"]},
 ]
 _ctx_cache = {"mtime": 0.0, "core": "", "sections": []}
 
@@ -6304,7 +6416,9 @@ def _load_context():
         head = chunk.split("\n", 1)[0].lstrip("# ").strip()
         cond = next((c for c in _CTX_CONDITIONAL if c["h"] in head), None)
         if cond:
-            sections.append({"kws": [k.lower() for k in cond["kws"]], "body": chunk.strip()})
+            sections.append({"kws": [k.lower() for k in cond["kws"]], "body": chunk.strip(),
+                             "roster_kws": bool(cond.get("roster_kws")),
+                             "echo": cond.get("echo", True)})
         else:
             core_chunks.append(chunk.strip())
     core = re.sub(r"\n{3,}", "\n\n", "\n\n".join(x for x in core_chunks if x)).strip()
@@ -6312,12 +6426,24 @@ def _load_context():
     return _ctx_cache
 
 
+def _section_kws(s):
+    """節の照合語。roster_kws の節は【名簿の実名】を機械的に足す(語彙表を手書きせぬ)。
+    ★名簿は単一ソース(_ROSTER_MAP)ゆえ、人が増減すれば照合語も自動で追随する。"""
+    kws = list(s.get("kws") or [])
+    if s.get("roster_kws"):
+        try:
+            kws += [str(nm).lower() for nm in _ROSTER_MAP.values() if len(str(nm)) >= 2]
+        except Exception:
+            pass
+    return kws
+
+
 def context_sections_digest(query):
     """クエリのキーワードに合致する CTXSEC セクションだけを注入(動的注入・Vimeo混入の恒久解の入口壁)。"""
     q = (query or "").lower()
     if not q:
         return ""
-    hits = [s["body"] for s in _load_context()["sections"] if any(k in q for k in s["kws"])]
+    hits = [s["body"] for s in _load_context()["sections"] if any(k in q for k in _section_kws(s))]
     return ("\n\n" + "\n\n".join(hits)) if hits else ""
 
 
@@ -6331,7 +6457,9 @@ def _strip_context_echo(text, query):
     changed = False
     kept = text
     for s in _load_context()["sections"]:
-        if any(k in q for k in s["kws"]):                  # このセクションはクエリに関係あり→正当・素通し
+        if not s.get("echo", True):
+            continue                                       # 署名に使わぬ節(人名等・正当に応答へ出うる)
+        if any(k in q for k in _section_kws(s)):            # このセクションはクエリに関係あり→正当・素通し
             continue
         keys = []
         for ln in s["body"].splitlines():
@@ -6351,8 +6479,41 @@ def _strip_context_echo(text, query):
     return re.sub(r"\n{3,}", "\n\n", kept).strip() if changed else text
 
 
-def build_sys():
-    """毎リクエストで社内ナレッジ digest (左脳+右脳) を読み込み system prompt に注入。"""
+def _vault_anchor(query):
+    """【Fable第八診】vault の全文を丸ごと注ぐ資格があるturnか。
+    ★決定的な錨(PJ名が一意に解ける / 資料名が『』「」で名指しされている)が立つ時だけ True。
+    trigram 類似度0.32 は錨ではない——実測(2026-08-24 雲へ出た初行)では
+    「今どの推論機で動いておる？一言で」に対し、ドローンショー商談の議事録・提携先の売上高・
+    TVCM会議の雑談が 8,030字ぶん引かれ、うち約7,000字は無関係な議事録の【全文】であった。
+    社外(雲)へ出るのも、prefillで殿を待たせるのも、この塊が最大の元凶である。"""
+    q = query or ""
+    if not q:
+        return False
+    try:
+        if _pj_resolve(q)[0] == "unique":          # 案件名が一意に解ける=その案件の資料を見てよい
+            return True
+    except Exception:
+        pass
+    return bool(_QUOTED_SPAN_RE.search(q))         # 『題』「題」で資料を名指ししている
+
+
+def _last_user_msg(msgs):
+    """messages から直近のユーザー発話を取り出す(条件注入の判定材料)。無ければ None
+    → build_sys は安全側(名簿を載せる)へ倒れる。"""
+    try:
+        for m in reversed(msgs or []):
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                return m["content"]
+    except Exception:
+        pass
+    return None
+
+
+def build_sys(query=None):
+    """毎リクエストで社内ナレッジ digest (左脳+右脳) を読み込み system prompt に注入。
+    query を渡すと【送信意図のturnにのみ】社内メンバー名簿(約1,300字)を載せる(Fable第八診)。
+    ★安全側: query が無い経路(起票/資料理解等)と判定不能時は従来どおり載せる。
+      名簿が無い状態で send_message を組ませると宛先を取り違える——不快より嘘の方が重い。"""
     ctx = _load_context()["core"]                          # 操作ガイド等の混入源は core から除外済(条件注入へ)
     today = datetime.date.today()
     wd = "月火水木金土日"[today.weekday()]
@@ -6383,8 +6544,18 @@ def build_sys():
     # KVキャッシュのプレフィックス安定化(Fable 6-3): 静的要素(ctx/BASE/PERSONA/roster)を先頭に固め、
     # 日替わりの日付は末尾へ。→ 日を跨いでも静的プレフィックスが再利用され TTFT が下がる(1文字でも
     # 動的要素を先頭に混ぜると全損する為)。
-    static = ((ctx + "\n\n---\n") if ctx else "") + BASE_SYS + tail + team_roster()   # 人格は ctx(casper_context の '## Casper の人格' 節)から常時注入・M5 B
-    return static + "\n\n" + datehdr
+    static = ((ctx + "\n\n---\n") if ctx else "") + BASE_SYS + tail   # 人格は ctx(casper_context の '## Casper の人格' 節)から常時注入・M5 B
+    out = static + "\n\n" + datehdr
+    # 【Fable第八診】名簿は送信意図のturnにのみ。★静的prefixの後ろへ足す(頭を触らぬ=KV再利用を壊さぬ)。
+    need_roster = True
+    if query is not None:
+        try:
+            need_roster = bool(_turn_is_send_intent(query))   # 迷えばTrue(送信turn)へ倒す既存設計をそのまま使う
+        except Exception:
+            need_roster = True                                # 判定が壊れたら載せる(宛先取り違えより安全)
+    if need_roster:
+        out += team_roster()
+    return out
 
 
 def ollama_chat(messages, tools=None, num_predict=1536, json_format=False, num_ctx=12288):
@@ -6602,6 +6773,9 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, tem
         tcs = None
         done_reason = None
         total_duration = eval_duration = None
+        load_duration = prompt_eval_duration = None   # 【Fable第八診】捨てていた2欄。これが無いと
+        #   wait_kind が load/prefill を 0 とみなし、待ちを一律 eval と誤って名乗る
+        #   (実害: 将軍が「eval 162.2秒」と誤って殿へ言上した。実際は eval 64.5秒 + prefill/load 約97秒)。
         done_line = None
         t0 = time.time()
         ttft_sec = None
@@ -6631,6 +6805,8 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, tem
                         done_reason = o.get("done_reason")   # "stop"=自然終了 / "length"=上限で截ち切れ(継続要)
                         total_duration = o.get("total_duration")
                         eval_duration = o.get("eval_duration")
+                        load_duration = o.get("load_duration")               # ★done行は元より持っている
+                        prompt_eval_duration = o.get("prompt_eval_duration")
                         done_line = o
                         break
         except Exception as e:
@@ -6664,7 +6840,8 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, tem
         if tcs:
             msg["tool_calls"] = tcs
         return {"message": msg, "done_reason": done_reason,
-                "total_duration": total_duration, "eval_duration": eval_duration}
+                "total_duration": total_duration, "eval_duration": eval_duration,
+                "load_duration": load_duration, "prompt_eval_duration": prompt_eval_duration}
 
     resp = _llm_call_record("ollama_chat_stream", A.model, _do)
     return {"message": resp["message"], "done_reason": resp["done_reason"]}
@@ -6681,11 +6858,22 @@ def claude_cli_text(prompt, allow=None):
     args = [CLAUDE_BIN, "-p", "--model", CLI_MODEL]
     if allow:
         args += ["--allowedTools"] + allow
+    # 【殿御下命2026-08-24】雲へ出るものは一件残らず帳簿へ。★呼出側でなくこの出口の中で刻む
+    # (呼出は8箇所あり、いつか誰かが呼び忘れる=単一機構の作法)。
+    _t0 = time.time()
     try:
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
                            timeout=400, cwd=CLI_CWD)
-        return (r.stdout or "").strip() or ("[claude-cli] " + (r.stderr or "no output")[:300])
+        out = (r.stdout or "").strip() or ("[claude-cli] " + (r.stderr or "no output")[:300])
+        _cloud_ledger("claude_cli_text", CLI_MODEL, prompt=prompt, response=out,
+                      dur_sec=time.time() - _t0, outcome="ok" if (r.stdout or "").strip() else "error",
+                      extra={"allow": allow} if allow else None)
+        return out
     except Exception as e:
+        # ★失敗しても【出てはいる】(送出済)。記録せねば「出たのに帳簿に無い」が生まれる。
+        _cloud_ledger("claude_cli_text", CLI_MODEL, prompt=prompt, response=f"[error] {e}",
+                      dur_sec=time.time() - _t0, outcome="error",
+                      extra={"allow": allow} if allow else None)
         return f"[claude-cli error] {e}"
 
 
@@ -6694,12 +6882,20 @@ def claude_cli_vision(image_path, prompt):
     ap = os.path.abspath(image_path)
     img_dir = os.path.dirname(ap)
     full = f"次の画像ファイルを Read ツールで開いて中身を視認し、解析せよ:\n{ap}\n\n{prompt}"
+    _t0 = time.time()
     try:
         r = subprocess.run([CLAUDE_BIN, "-p", "--model", CLI_MODEL,
                             "--add-dir", img_dir, "--allowedTools", "Read"],
                            input=full, capture_output=True, text=True, timeout=300, cwd=CLI_CWD)
-        return (r.stdout or "").strip() or ("[vision] " + (r.stderr or "no output")[:300])
+        out = (r.stdout or "").strip() or ("[vision] " + (r.stderr or "no output")[:300])
+        # ★画像は本体を帳簿へ持てぬゆえ、パス・バイト数・sha256 を刻む(何を出したか follow できる)。
+        _cloud_ledger("claude_cli_vision", CLI_MODEL, prompt=full, response=out,
+                      dur_sec=time.time() - _t0, outcome="ok" if (r.stdout or "").strip() else "error",
+                      image_path=ap)
+        return out
     except Exception as e:
+        _cloud_ledger("claude_cli_vision", CLI_MODEL, prompt=full, response=f"[error] {e}",
+                      dur_sec=time.time() - _t0, outcome="error", image_path=ap)
         return f"[vision error] {e}"
 
 
@@ -6773,8 +6969,22 @@ def anthropic_call(body):
                                  headers={"x-api-key": ANTHROPIC_KEY,
                                           "anthropic-version": "2023-06-01",
                                           "content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as r:
-        return json.load(r)
+    # 【殿御下命2026-08-24】これも雲の出口である(APIキー経路)。同じ帳簿へ落とす。
+    _t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            out = json.load(r)
+        _cloud_ledger("anthropic_api", body.get("model") or ANTHROPIC_MODEL,
+                      prompt=json.dumps(body.get("messages") or body, ensure_ascii=False),
+                      response=json.dumps(out, ensure_ascii=False),
+                      dur_sec=time.time() - _t0, outcome="ok",
+                      extra={"system": (body.get("system") or "")[:2000]} if body.get("system") else None)
+        return out
+    except Exception as e:
+        _cloud_ledger("anthropic_api", body.get("model") or ANTHROPIC_MODEL,
+                      prompt=json.dumps(body.get("messages") or body, ensure_ascii=False),
+                      response=f"[error] {e}", dur_sec=time.time() - _t0, outcome="error")
+        raise
 
 
 def anthropic_agent(client_msgs, extra_system=""):
@@ -10062,8 +10272,17 @@ class H(BaseHTTPRequestHandler):
               "候補が性質上存在しない問いのみ、代わりに次に聞ける質問を同じ CHOICES: 形式で3つ出せ。"
               ) if req.get("suggest") else ""
         if not any(m.get("role") == "system" for m in msgs):
-            msgs = [{"role": "system", "content": build_sys() + fu}] + msgs
+            msgs = [{"role": "system", "content": build_sys(_last_user_msg(msgs)) + fu}] + msgs
         who = identify(self)
+        # 【殿御下命2026-08-24】雲の帳簿が「誰の・どの発話が社外へ出たか」を名乗れるよう、
+        # このturnの素性を置く(帳簿はここから引く。呼出側で持ち回らない)。
+        try:
+            _last_user = next((m.get("content") for m in reversed(msgs)
+                               if m.get("role") == "user"), "")
+            _turn_ctx_set(uid=who.get("uid"), name=who.get("name"), thread=thr,
+                          query=(_last_user or "")[:300])
+        except Exception:
+            pass
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         if who["new_sid"]:
@@ -10082,12 +10301,16 @@ class H(BaseHTTPRequestHandler):
                     for m in convo[-7:-1])
             # 応答パスは高速な字面検索(casper_rag)を使う。意味検索(casper_embed 412MB)は load26s/検索8sで
             # 応答をhangさせる為 hot pathから外す(存在確認は台帳が担う)。索引の高速化(binary)は別課題。
-            hits = (casper_embed.hybrid(last_user, k=8) if (casper_embed and last_user)   # M2: 意味検索復活(sqlite再ランク・内部で字面フォールバック)
-                    else (casper_rag.search(last_user, k=8) if (casper_rag and last_user) else []))
+            # 【Fable第八診】錨の無いturnは引く数と予算を絞る(hybridは足切りsc>0.02ゆえほぼ毎回k件埋まる)
+            _k, _bud = (8, 3800) if _vault_anchor(last_user) else (3, 1200)
+            hits = (casper_embed.hybrid(last_user, k=_k, budget=_bud) if (casper_embed and last_user)
+                    else (casper_rag.search(last_user, k=_k, budget=_bud) if (casper_rag and last_user) else []))
             _canon_turn = (_asks_about_casper(last_user) is True)   # cmd_498穴B手当1: 既存機構の再利用
             if _canon_turn:
                 hits = _inject_canon(_prioritize_canon(hits))   # cmd_498第2便穴A手当2: 並べ替えで足りねば直接差し込む
-            src, fulltext = (casper_rag.top_source(last_user) if (casper_rag and last_user) else (None, None))
+            # 【Fable第八診】全文注入は錨が立つturnのみ(無関係な議事録の全文を社外へ出さぬ)
+            src, fulltext = (casper_rag.top_source(last_user)
+                             if (casper_rag and last_user and _vault_anchor(last_user)) else (None, None))
             _gstate = _grounding_state(hits, fulltext, last_user)   # cmd_497: 材料の構造の齟齬(hits=0なのにfulltext在り)を検知
             fullnote = _build_grounding_block(_gstate, src, fulltext)   # cmd_497第2便: 注意書きをfulltext有無から独立させて注入(欠陥B是正)
             cal = build_digests(who, last_user)       # Fable M1: Ollama経路と同一の単一表から(entity/availability/gear/phase/fb_log/future_assign 欠落の解消)
@@ -10109,7 +10332,7 @@ class H(BaseHTTPRequestHandler):
             else:
                 _web_hint = ("**WebSearch/WebFetchは今回のturnでは許可されておらぬ(ツールが与えられていない)。"
                              "外部情報が要ると思っても、検索はできぬ旨と代わりの言い方を促す文だけを述べよ。**")
-            prompt = (build_sys() + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
+            prompt = (build_sys(_last_user_msg(msgs)) + fu + diag_hint + hist + cal + "\n\n## 関連社内記録(RAG検索):\n" + "\n".join(hits)
                       + fullnote
                       + "\n\n## ユーザーの今回の発言:\n" + last_user
                       + "\n\n直前までの会話の流れも踏まえて答えよ。**左脳(Calendar)・右脳(RAG/資料) のデータは上に注入済**。"
@@ -10318,14 +10541,16 @@ class H(BaseHTTPRequestHandler):
         # (下段L9017の存在否定ガードはCalendar専用の掟であり、Aurora資料には無関係)。
         try:
             if not (_status_q or _au_resolved):           # knowledge経路のみ vault を引く(Aurora一次資料が有る turn は除く)
-                hits = (casper_embed.hybrid(ll_user, k=6) if (casper_embed and ll_user)
-                        else (casper_rag.search(ll_user, k=6) if (casper_rag and ll_user) else []))
+                _k2, _bud2 = (6, 3800) if _vault_anchor(ll_user) else (3, 1200)   # 【Fable第八診】
+                hits = (casper_embed.hybrid(ll_user, k=_k2, budget=_bud2) if (casper_embed and ll_user)
+                        else (casper_rag.search(ll_user, k=_k2, budget=_bud2) if (casper_rag and ll_user) else []))
                 _canon_turn = (_asks_about_casper(ll_user) is True)   # cmd_498穴B手当1: 既存機構の再利用
                 if _canon_turn:
                     hits = _inject_canon(_prioritize_canon(hits))   # cmd_498第2便穴A手当2: 並べ替えで足りねば直接差し込む
                 if hits:
                     sysadd += "\n\n## 関連社内記録(右脳vault・意味/字面検索):\n" + "\n".join(hits)
-                src, fulltext = (casper_rag.top_source(ll_user) if (casper_rag and ll_user) else (None, None))
+                src, fulltext = (casper_rag.top_source(ll_user)
+                                 if (casper_rag and ll_user and _vault_anchor(ll_user)) else (None, None))
                 if fulltext:
                     sysadd += ("\n\n## 該当資料(右脳vault・" + src + ") — サムネ等の画像URL `![](/asset/..)` は"
                                "ここから一字一句コピーせよ。これに無い画像URLは創作するな:\n" + fulltext[:7000])
@@ -10399,7 +10624,7 @@ class H(BaseHTTPRequestHandler):
             working.append({"role": "system", "content": m["content"] + sysadd})
         working += _conv
         if not any(m.get("role") == "system" for m in working):
-            working = [{"role": "system", "content": build_sys() + fu + sysadd}] + working
+            working = [{"role": "system", "content": build_sys(_last_user_msg(working)) + fu + sysadd}] + working
         tools = list(casper_tools.TOOLS) if casper_tools else []
         mcp_names = set()
         if casper_mcp:                              # MCP公開ツールを合流(同名は MCP 優先)

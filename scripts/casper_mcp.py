@@ -11,6 +11,8 @@ qwen の tool_call を MCP tools/call へ橋渡しする。chat_server から使
 import json
 import os
 import re
+import threading
+import time
 import urllib.request
 
 MCP_URL = os.environ.get("CASPER_MCP_URL", "http://192.168.44.253:8001/mcp/")
@@ -67,8 +69,30 @@ def _session(token=None, url=None):
     return sess
 
 
-def list_tools(token=None, url=None):
-    """MCP の tools を OpenAI function 定義のリストに変換して返す。失敗時 []。"""
+# 【Fable第七診】tools定義の短命cache。
+# 実測: 毎turn、session確立(initialize+initialized)とtools/listのHTTP往復を無条件に払っていた。
+# ツール定義が分単位で変わることはない。★ただし失敗([])はcacheしない——「一時的に取れなかった」
+# を「ツールが無い」として固定すれば、それは cache ではなく嘘になる(失敗とゼロを別出口へ)。
+_TOOLS_CACHE = {}                     # (url, token) -> {"ts": float, "tools": [...]}
+_TOOLS_CACHE_TTL = 300.0              # 秒
+_TOOLS_CACHE_LOCK = threading.Lock()
+
+
+def tools_cache_clear():
+    """cacheを捨てる(MCPサーバの入れ替え直後など、待たずに読み直したい時)。"""
+    with _TOOLS_CACHE_LOCK:
+        _TOOLS_CACHE.clear()
+
+
+def list_tools(token=None, url=None, use_cache=True):
+    """MCP の tools を OpenAI function 定義のリストに変換して返す。失敗時 []。
+    既定でTTL cacheを使う(use_cache=Falseで素通し)。"""
+    ck = (url or MCP_URL, token or "")
+    if use_cache:
+        with _TOOLS_CACHE_LOCK:
+            hit = _TOOLS_CACHE.get(ck)
+        if hit and (time.time() - hit["ts"]) < _TOOLS_CACHE_TTL:
+            return list(hit["tools"])
     try:
         sid = _session(token, url=url)
         if not sid:
@@ -81,6 +105,9 @@ def list_tools(token=None, url=None):
                 "name": t.get("name"),
                 "description": t.get("description", ""),
                 "parameters": t.get("inputSchema") or {"type": "object", "properties": {}}}})
+        if out:                                   # ★空(=取れなかった)はcacheしない
+            with _TOOLS_CACHE_LOCK:
+                _TOOLS_CACHE[ck] = {"ts": time.time(), "tools": list(out)}
         return out
     except Exception:
         return []
