@@ -55,6 +55,14 @@ PS_PROBE_TIMEOUT = 2      # 併走診断(i) /api/ps。病んでいる時に叩�
 CO_PROBE_TIMEOUT = 2      # 併走診断(ii) 同モデルへ1token probe。同上
 
 
+def _is_synthetic():
+    """★subtask_519_synthetic_marker(gunshi案): CASPER_SYNTHETIC=1環境変数の有無を返す。
+    site名へ接頭辞を書き込む方式(cmd_509の教訓=一つの欄は一つの問いに答える、に反した
+    旧慣習)ではなく独立欄synthetic用の判定に限定して使う。既定はFalse(安全側・未設定なら
+    本物として扱う=「本物が試験として黙殺される」事故を構造的に起こさない)。"""
+    return os.environ.get("CASPER_SYNTHETIC") == "1"
+
+
 def _now():
     return time.time()
 
@@ -126,6 +134,8 @@ def record_call_timing(caller, model, host, ttft_sec, ollama_done=None):
     秒への変換はしない(生値保持=丸め誤差回避・cmd_512瑕疵Dの教訓)。"""
     rec = {"ts": round(_now(), 3), "caller": caller, "model": model, "host": host,
            "ttft_sec": ttft_sec}
+    if _is_synthetic():
+        rec["synthetic"] = True
     if ollama_done:
         rec["total_duration_ns"] = ollama_done.get("total_duration")
         rec["load_duration_ns"] = ollama_done.get("load_duration")
@@ -324,5 +334,7 @@ def record_incident(site, model, host, ttft_info=None):
         "ttft": ttft_info if ttft_info is not None else None,
         "details": judged["details"],
     }
+    if _is_synthetic():
+        rec["synthetic"] = True
     _append_jsonl(INCIDENT_LOG, rec)
     return rec

@@ -108,9 +108,31 @@ chk("dict直下result形も正規化", _real_au._unwrap_list({"result": [{"b": 2
 chk("未知dict形は空list(捏造せず安全側)", _real_au._unwrap_list({"other": "junk"}), [])
 chk("Noneは空list", _real_au._unwrap_list(None), [])
 
+# ★鉄則「失敗とゼロを別出口へ」の機構的強制(将軍が突然変異で発見した検査漏れ・2026-08-24)。
+# list_documents が照会失敗時に [] を返すと、aurora_list_digest は「0件でござった」と
+# 【嘘をつく】(在るのに無いと述べる)。失敗は None・ゼロは [] でなければならぬ。
+_orig_call = _real_au._call
+try:
+    _real_au._call = lambda name, args: "(MCPエラー: 接続失敗)"
+    chk("★失敗とゼロを別出口へ: 照会失敗(MCPエラー文字列)はNone(=[]ではない)",
+        _real_au.list_documents(), None)
+    _real_au._call = lambda name, args: None
+    chk("★失敗とゼロを別出口へ: 未設定(接続層休止)もNone", _real_au.list_documents(), None)
+    _real_au._call = lambda name, args: '{"content": [], "structuredContent": {"result": []}}'
+    chk("★失敗とゼロを別出口へ: 真の0件は[](Noneではない)", _real_au.list_documents(), [])
+finally:
+    _real_au._call = _orig_call
+
 import datetime as _dt
 
-TODAY = _dt.date(2026, 8, 6)
+TODAY = _dt.date(2026, 8, 6)          # _resolve_since の対応表検査用(呼出側で today= を明示指定する)
+
+# ★aurora_list_digest は内部で _resolve_since(query) を today 無しで呼ぶ=【実日付】で解く。
+# 固定日付の資料を具に使うと、その日を過ぎた翌日から永久に赤くなる(試験具の腐り=「嘘の赤」)。
+# 掟「緑ゲートに嘘は映らぬ」の裏面ゆえ、digest へ渡す具の時刻だけは実日付から導く。
+_NOW = _dt.date.today()
+_T_TODAY = _NOW.isoformat()                                  # 本日付(digestのsince=本日に入る)
+_T_OLD = (_NOW - _dt.timedelta(days=5)).isoformat()          # 本日より前(0件経路へ落とす)
 
 _LIST_INPUTS = ["Aurora内の今日アップデートした資料って何？", "オーロラに今日上がった資料ある？",
                 "Auroraの資料一覧を教えて", "オーロラに追加されたドキュメント教えてくれ"]
@@ -150,9 +172,9 @@ chk("非該当turnは注入ゼロ", _digest(None, "進行中のプロジェク�
 # ══════════════════════════════════════════════════════════════════════════
 _stub_au._docs = [
     {"id": "1", "slug": "a", "title": "明石奏 顔アップターンアラウンド ダッシュボード",
-     "uploaded_by": "ashigaru2", "uploaded_at": "2026-08-06T11:17:24", "version": 2, "deleted_at": None},
+     "uploaded_by": "ashigaru2", "uploaded_at": _T_TODAY + "T11:17:24", "version": 2, "deleted_at": None},
     {"id": "2", "slug": "b", "title": "社内サービス接続先一覧(IP/ポート)",
-     "uploaded_by": "ops-desk", "uploaded_at": "2026-08-06T11:13:35", "version": 1, "deleted_at": None},
+     "uploaded_by": "ops-desk", "uploaded_at": _T_TODAY + "T11:13:35", "version": 1, "deleted_at": None},
 ]
 _out = _digest(None, "Aurora内の今日アップデートした資料って何？")
 chk_true("題を含む", "明石奏 顔アップターンアラウンド ダッシュボード" in _out)
@@ -166,7 +188,7 @@ chk_true("『リアルタイムで照会できません』を書かせぬ抑止�
 _out0 = _digest(None, "Aurora内の今日アップデートした資料って何？")
 _stub_au._docs = [
     {"id": "1", "slug": "a", "title": "古い資料", "uploaded_by": "casper",
-     "uploaded_at": "2026-08-01T09:00:00", "version": 1, "deleted_at": None},
+     "uploaded_at": _T_OLD + "T09:00:00", "version": 1, "deleted_at": None},
 ]
 _out0 = _digest(None, "Aurora内の今日アップデートした資料って何？")
 chk_true("0件時: 0件である旨を述べる", "0件でござった" in _out0)
@@ -187,7 +209,7 @@ _stub_au._configured = True
 # ══════════════════════════════════════════════════════════════════════════
 _stub_au._docs = [
     {"id": "1", "slug": "a", "title": "明石奏 顔アップターンアラウンド ダッシュボード",
-     "uploaded_by": "ashigaru2", "uploaded_at": "2026-08-06T11:17:24", "version": 2, "deleted_at": None},
+     "uploaded_by": "ashigaru2", "uploaded_at": _T_TODAY + "T11:17:24", "version": 2, "deleted_at": None},
 ]
 chk("存在確認turnはTrue", _ex_turn("Auroraに『明石奏 顔アップターンアラウンド ダッシュボード』という資料ある？"), True)
 chk("『という資料』形もTrue(引用符無し)", _ex_turn("Auroraに明石奏ダッシュボードという資料ある？"), True)
@@ -211,7 +233,7 @@ chk_true("架空資料: 『在る』とは言わない", "在り申す" not in _
 print("\n--- 突然変異検証①(json.loads省略の検知) ---")
 _stub_au._docs = [
     {"id": "1", "slug": "a", "title": "本日資料", "uploaded_by": "casper",
-     "uploaded_at": "2026-08-06T09:00:00", "version": 1, "deleted_at": None},
+     "uploaded_at": _T_TODAY + "T09:00:00", "version": 1, "deleted_at": None},
 ]
 _pre1 = _digest(None, "Aurora内の今日アップデートした資料って何？")
 _pre1_ok = "本日資料" in _pre1 and "そのまま述べよ" in _pre1
@@ -242,7 +264,7 @@ chk_true("④復元確認: 元に戻すと再び題が注入される", "本日�
 print("\n--- 突然変異検証②(0件時の母集合提示の除去検知) ---")
 _stub_au._docs = [
     {"id": "1", "slug": "a", "title": "古い資料", "uploaded_by": "casper",
-     "uploaded_at": "2026-08-01T09:00:00", "version": 1, "deleted_at": None},
+     "uploaded_at": _T_OLD + "T09:00:00", "version": 1, "deleted_at": None},
 ]
 _pre2 = _digest(None, "Aurora内の今日アップデートした資料って何？")
 _pre2_ok = "登録されており" in _pre2

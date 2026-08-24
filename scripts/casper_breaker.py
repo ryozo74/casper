@@ -23,7 +23,27 @@ _LOCK = threading.Lock()
 FAIL_TO_OPEN = 3            # 連続失敗でopen(red)
 OK_TO_CLOSE = 2            # half-open中の連続成功でclose(green)
 COOLDOWN_SEC = 60         # red→half-open のクールダウン
-SLOW_MS = {"z8a": 30000, "calendar": 8000, "aurora": 12000, "vimeo": 60000}   # これ超で"遅い"
+
+# 【cmd_509第2便】key設計の改め: 旧"z8a"(ホスト名固定・endpoint非依存で多義)から
+# "gen:<host>:<port>" / "emb:<host>:<port>" の二系統へ。用途(生成/埋込)とendpoint
+# の両方をkeyへ含める——同一ホストで生成は生きて埋込が死ぬ事態が実際に起こり得るため。
+LEGACY_KEYS = ("z8a",)      # 旧key。消さない(検出→ログのみ・新keyへ引き継がない)。
+DEFAULT_SLOW_MS = 30000
+SLOW_MS_PREFIX = {"gen:": 30000, "emb:": 15000, "calendar": 8000, "aurora": 12000, "vimeo": 60000}
+
+
+def slow_ms_for(dep):
+    """depのprefix(gen:/emb:)またはSLOW_MS_PREFIXの完全一致キーからしきい値を引く。"""
+    if dep in SLOW_MS_PREFIX:
+        return SLOW_MS_PREFIX[dep]
+    for prefix, ms in SLOW_MS_PREFIX.items():
+        if prefix.endswith(":") and dep.startswith(prefix):
+            return ms
+    return DEFAULT_SLOW_MS
+
+
+def is_legacy_key(dep):
+    return dep in LEGACY_KEYS
 
 
 def _now():
@@ -56,12 +76,14 @@ def _rec(d, dep):
 
 
 def record(dep, ok, latency_ms=0):
-    """依存呼出の結果を記録し状態を更新。ok=成功可否, latency_ms=所要ミリ秒。"""
+    """依存呼出の結果を記録し状態を更新。ok=成功可否, latency_ms=所要ミリ秒。
+    ★旧key(is_legacy_key)を検出した場合、ログへ刻むのみで新keyへは引き継がない
+    (古い判定を新しい宛先へ持ち越さぬ・呼び出し元の責務。ここではrecordを妨げない)。"""
     with _LOCK:
         d = _load()
         r = _rec(d, dep)
         r["ema_ms"] = 0.7 * r.get("ema_ms", 0.0) + 0.3 * float(latency_ms or 0)
-        slow = latency_ms and latency_ms > SLOW_MS.get(dep, 30000)
+        slow = latency_ms and latency_ms > slow_ms_for(dep)
         eff_ok = ok and not slow
         if eff_ok:
             r["oks"] = r.get("oks", 0) + 1
@@ -107,6 +129,13 @@ def gen_key(host, port):
 def emb_key(host, port):
     """casper_failover.py用の埋め込み系依存キー(host:port単位でbreakerを分ける)。"""
     return f"emb:{host}:{port}"
+
+
+def detect_legacy_keys():
+    """台帳中に旧key(LEGACY_KEYS)が存在するかを返す(存在すればlist・supervisor起動時ログ用)。
+    ★新keyへは引き継がない——呼ぶだけで台帳を書き換えない(副作用なし)。"""
+    d = _load()
+    return [k for k in d if is_legacy_key(k)]
 
 
 def state(dep):

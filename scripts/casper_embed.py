@@ -11,12 +11,15 @@ CLI:
   import casper_embed; casper_embed.search(query, k=8) -> [str,...]
   casper_embed.available() -> bool       # 埋め込み索引が使えるか
 """
+import glob
 import json
 import math
 import os
 import struct
 import sqlite3
 import sys
+import threading
+import time
 import urllib.request
 
 import casper_rag
@@ -24,6 +27,7 @@ import casper_rag
 HERE = os.path.dirname(os.path.abspath(__file__))
 EMB_INDEX = os.path.join(HERE, "casper_embed_index.json")
 EMB_DB = os.path.join(HERE, "casper_embed.db")     # Fable M2: 411MB JSON→sqlite(候補だけ引く・26s全読込を消す)
+EMB_META = EMB_INDEX + ".meta.json"                # cmd_498: 件数サイドカー(422MB本体を数え直さぬための台帳)
 OLLAMA = os.environ.get("CASPER_EMBED_ENDPOINT",
                         os.environ.get("CASPER_OLLAMA", "http://192.168.44.119:11434")).rstrip("/")
 MODEL = os.environ.get("CASPER_EMBED_MODEL", "bge-m3")
@@ -124,6 +128,11 @@ def _atomic_dump(obj, path):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)                                  # 同一FS内 rename はアトミック
+    if path == EMB_INDEX:                                  # cmd_498: 件数台帳を同便で更新
+        try:                                               # (センサーは消費者と同じ便で・後追いにせぬ)
+            _write_meta(obj)
+        except Exception:
+            pass
 
 
 def build(batch=32):
@@ -196,7 +205,10 @@ def _load():
 
 
 def available():
-    return db_available()          # Fable M2: 411MB全読込でなくsqliteの有無で判定(hybridの発火条件)
+    # Fable M2: 411MB全読込でなくsqliteの有無で判定(hybridの発火条件)。
+    # cmd_497 欠陥Aの是正: sqliteが在っても埋込サーバが死んでいれば意味検索は成らぬ。
+    # 「dbが在る」を「使える」と名乗ってはならぬ(掟: 未確認をtrueと名乗るな)。
+    return db_available() and embed_alive()
 
 
 def _cos(a, b):
@@ -253,6 +265,251 @@ def db_available():
 
 def _blob_vec(b):
     return list(struct.unpack("<%df" % (len(b) // 4), b))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 埋込サーバの生死(cmd_497) — 短命キャッシュで「断」を即答する。
+# 実害: 埋込サーバが落ちた時に毎turn疎通確認へ劣化し、応答が遅くなった。
+# 掟: 期限内はHTTPを叩かず即答。down後もTTL_DOWN経過で自動再挑戦(手動リセット不要)。
+# ══════════════════════════════════════════════════════════════════════════════
+_EMB_TTL_OK = 60.0        # 健全と判った後、次に疑うまで(秒)
+_EMB_TTL_DOWN = 30.0      # 断と判った後、再挑戦するまで(秒)。復帰を人手に頼らぬための短さ。
+_EMB_HEALTH = {"ok": True, "ts": 0.0, "fails": 0}
+
+
+def _probe():
+    """埋込サーバが実際に埋め込みを返せるかを最小の一発で確かめる(短timeout)。
+    ★/api/tags では「行列に入れるか」が判らぬ(行列を通らぬゆえ即答する)。
+    生死は使う経路そのもので測る——さもなくば「緑なのに使えぬ」が生まれる。"""
+    try:
+        req = urllib.request.Request(
+            OLLAMA + "/api/embeddings",
+            data=json.dumps({"model": MODEL, "prompt": "."}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            d = json.load(r)
+        return bool(d.get("embedding"))
+    except Exception:
+        return False
+
+
+def embed_alive():
+    """埋込サーバの生死。期限内はHTTPを叩かず即答する(AC1)。
+    期限切れの時のみ _probe() を【一度だけ】叩き、結果で台帳を更新する。"""
+    now = time.time()
+    ok, ts = _EMB_HEALTH.get("ok", True), _EMB_HEALTH.get("ts", 0.0)
+    ttl = _EMB_TTL_OK if ok else _EMB_TTL_DOWN
+    if now - ts < ttl:
+        return bool(ok)                                    # 期限内: 叩かぬ(高速フォールバックの核心)
+    alive = bool(_probe())
+    _EMB_HEALTH["ok"] = alive
+    _EMB_HEALTH["ts"] = now
+    _EMB_HEALTH["fails"] = 0 if alive else int(_EMB_HEALTH.get("fails", 0)) + 1
+    return alive
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 索引の鮮度観測と自動反映(cmd_498)
+# 実害: ① reindex() の後に build_sqlite() を呼ばず、意味検索が古いsqliteを見続けた。
+#       ② 件数を【生件数】で数えたため重複分だけ常に「ズレている」と判定し、
+#          84秒級の reindex が無限に再起動した。ゆえに件数は【一意key基準】で数える。
+# ══════════════════════════════════════════════════════════════════════════════
+_REINDEX_LOCK = threading.Lock()
+_REINDEX_STATE = {"running": False, "pending": False, "last_ok": 0.0, "last_err": "", "reason": ""}
+_REINDEX_LOG = os.path.join(HERE, "casper_embed_reindex.jsonl")
+_META_MEASURE = {"running": False}
+
+
+def _reindex_log(event, **kv):
+    """再索引の出来事を追記台帳へ(観測できぬ機構は在らぬも同じ)。"""
+    try:
+        rec = {"ts": time.time(), "event": event}
+        rec.update(kv)
+        with open(_REINDEX_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _read_meta():
+    """件数サイドカーを読む。無い/壊れていれば {} (=未確認)。"""
+    try:
+        with open(EMB_META, encoding="utf-8") as f:
+            m = json.load(f)
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_meta(obj=None, rows=None):
+    """件数サイドカーを書く。本体(EMB_INDEX)の size/mtime を併記し、
+    本体が後で差し替わったら台帳が【自ら無効になる】ようにする(陳腐化した数を信じさせぬ)。"""
+    if rows is None:
+        rows = len({_key(e.get("src"), e.get("t")) for e in (obj or []) if isinstance(e, dict)})
+    st = os.stat(EMB_INDEX)
+    tmp = EMB_META + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"rows": int(rows), "size": st.st_size, "mtime": st.st_mtime,
+                   "written_at": time.time()}, f, ensure_ascii=False)
+    os.replace(tmp, EMB_META)
+    return rows
+
+
+def _json_row_count():
+    """EMB_INDEX の【一意key基準】の件数。
+    ★生件数(len(data))で数えてはならぬ——重複を含む索引で永久に「ズレ」と判定され、
+    reindex が無限に再起動した実害そのもの(cmd_498)。
+    台帳(サイドカー)が本体の size/mtime と一致する時のみ台帳を信じ、
+    さもなくば実測へ落ちる(高価ゆえ最後の手段)。"""
+    m = _read_meta()
+    try:
+        st = os.stat(EMB_INDEX)
+        if m and int(m.get("size", -1)) == st.st_size and abs(float(m.get("mtime", -1)) - st.st_mtime) < 1e-6:
+            return int(m.get("rows", 0))
+    except Exception:
+        pass
+    try:
+        data = json.load(open(EMB_INDEX, encoding="utf-8"))
+    except Exception:
+        return 0
+    return len({_key(e.get("src"), e.get("t")) for e in data if isinstance(e, dict)})
+
+
+def sqlite_row_count():
+    """sqlite 側の実件数(COUNT(*)・安価)。引けねば0。"""
+    con = _db()
+    if con is None:
+        return 0
+    try:
+        return int(con.execute("SELECT COUNT(*) FROM emb").fetchone()[0])
+    except Exception:
+        return 0
+
+
+def index_freshness(vault_glob=None):
+    """索引の鮮度を観測して申告する(cmd_498)。二軸で見る——
+      row_gap : json(本体)と sqlite の件数差。build_sqlite の取り零しを映す。
+      behind_sec: vault の最新更新が sqlite 構築時刻をどれだけ追い越したか。
+    どちらか一方でも動いていれば stale=True。"""
+    g = vault_glob or os.path.join(casper_rag.VAULT, "**", "*.md")
+    jr = _json_row_count()
+    sr = sqlite_row_count()
+    gap = abs(int(jr) - int(sr))
+    try:
+        db_mtime = os.path.getmtime(EMB_DB) if os.path.exists(EMB_DB) else 0.0
+    except Exception:
+        db_mtime = 0.0
+    newest, newest_src = 0.0, ""
+    for pth in glob.iglob(g, recursive=True):
+        try:
+            mt = os.path.getmtime(pth)
+        except OSError:
+            continue
+        if mt > newest:
+            newest, newest_src = mt, pth
+    behind = max(0.0, newest - db_mtime)
+    return {"json_rows": jr, "sqlite_rows": sr, "row_gap": gap,
+            "db_mtime": db_mtime, "vault_newest": newest,
+            "vault_newest_src": os.path.basename(newest_src) if newest_src else "",
+            "behind_sec": round(behind, 1), "stale": bool(gap or behind > 0)}
+
+
+def _measure_meta_async():
+    """件数台帳が無い間の実測(422MB全読込)を【別スレッドへ隔離】する。
+    観測装置が本番の呼出スレッドを止めては本末転倒ゆえ、一本だけ走らせる。"""
+    def _run():
+        try:
+            n = _json_row_count()                          # 実測(高価)
+            _write_meta(rows=n)
+            _reindex_log("meta_measured", rows=n)
+        except Exception as e:
+            _reindex_log("meta_measure_failed", err=str(e)[:200])
+        finally:
+            _META_MEASURE["running"] = False
+    with _REINDEX_LOCK:
+        if _META_MEASURE["running"]:
+            return False
+        _META_MEASURE["running"] = True
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+def _reindex_worker(reason=""):
+    """再索引の実体(単位機構)。★reindex() の後に必ず build_sqlite() を呼び、
+    握っていた古いsqlite接続(_DBCON)を捨てる——ここを外すと意味検索が
+    永久に古いsqliteを見続ける(cmd_498【発見1】の再発防止)。"""
+    global _DBCON, _VEC
+    try:
+        r = reindex()
+        n = build_sqlite()
+        _DBCON = None                                      # 古い接続を握り続けぬ
+        _VEC = None
+        _REINDEX_STATE["last_ok"] = time.time()
+        _REINDEX_STATE["last_err"] = ""
+        _reindex_log("reindexed", reason=reason, result=r, sqlite_rows=n)
+        return r
+    except Exception as e:
+        _REINDEX_STATE["last_err"] = str(e)[:300]
+        _reindex_log("reindex_failed", reason=reason, err=str(e)[:300])
+        return None
+
+
+def _reindex_loop(reason):
+    try:
+        while True:
+            _reindex_worker(reason)
+            with _REINDEX_LOCK:
+                if not _REINDEX_STATE["pending"]:
+                    _REINDEX_STATE["running"] = False
+                    return
+                _REINDEX_STATE["pending"] = False          # 走行中に来た要求を1回に畳んで消化
+                reason = "coalesced"
+    except Exception:
+        with _REINDEX_LOCK:
+            _REINDEX_STATE["running"] = False
+
+
+def reindex_async(reason=""):
+    """再索引を非同期で【一本だけ】走らせる。走行中の再要求は pending へ畳む。
+    ★多重起動を許すと84秒級の reindex が重なり本番を潰す(cmd_498の実害)。
+    戻り: 起動したか(True) / 畳んだか(False)。"""
+    with _REINDEX_LOCK:
+        _REINDEX_STATE["reason"] = reason
+        if _REINDEX_STATE["running"]:
+            _REINDEX_STATE["pending"] = True
+            _reindex_log("coalesced_request", reason=reason)
+            return False
+        _REINDEX_STATE["running"] = True
+    _reindex_log("reindex_start", reason=reason)
+    threading.Thread(target=_reindex_loop, args=(reason,), daemon=True).start()
+    return True
+
+
+def ensure_fresh(auto=True):
+    """観測時に索引が古ければその場で是正する(cmd_498)。/health と起動時から呼ばれる。
+    ★高価な実測は決して呼出スレッドで行わぬ。件数台帳が無い間は json_rows を
+    None(=未確認)のまま返し、測定は別スレッドへ回す(掟: 未確認をtrueと名乗るな)。"""
+    m = _read_meta()
+    known = False
+    try:
+        st = os.stat(EMB_INDEX)
+        known = bool(m) and int(m.get("size", -1)) == st.st_size and \
+            abs(float(m.get("mtime", -1)) - st.st_mtime) < 1e-6
+    except Exception:
+        known = False
+    if not known:
+        _measure_meta_async()
+        return {"json_rows": None, "sqlite_rows": sqlite_row_count(),
+                "row_gap": None, "stale": None, "measuring": True,
+                "note": "件数台帳が未確認ゆえ別スレッドで実測中(未確認をtrueと名乗らぬ)"}
+    f = index_freshness()
+    f["measuring"] = False
+    if auto and f.get("stale"):
+        f["action"] = "reindex_async" if reindex_async("ensure_fresh") else "coalesced"
+    else:
+        f["action"] = "none"
+    f["reindex_running"] = bool(_REINDEX_STATE["running"])
+    return f
 
 
 def search(query, k=8, budget=3800):

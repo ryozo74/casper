@@ -45,3 +45,6 @@ scripts/push_subs.json
 scripts/dm_notify_state.json
 scripts/notify_prefs.json
 scripts/breaker.json
+
+# 索引の件数サイドカー(実行時生成物・cmd_498)
+scripts/casper_embed_index.json.meta.json

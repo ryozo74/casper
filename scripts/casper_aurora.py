@@ -145,6 +145,82 @@ def get(doc_id):
     return _call("get_document", {"id": doc_id})
 
 
+def _unwrap_list(r):
+    """MCP戻りを常に bare な list へ正規化する(cmd_503)。
+    実測(2026-08-06): casper_mcp.call_tool は非0件時は text content(=JSON配列)を返すが、
+    0件時は text content が空ゆえ MCP 生封筒({"content":[],"structuredContent":{"result":[]}})
+    へ流れ落ちる——この非対称を呼出側で吸収せねば、dict を for に掛けてキー文字列を回し
+    件数が化ける。未知形は捏造せず空 list へ倒す(安全側)。"""
+    if r is None:
+        return []
+    if isinstance(r, list):
+        return r
+    if isinstance(r, dict):
+        sc = r.get("structuredContent")
+        if isinstance(sc, dict) and isinstance(sc.get("result"), list):
+            return sc["result"]
+        if isinstance(r.get("result"), list):
+            return r["result"]
+        return []
+    return []
+
+
+def list_documents(since=None, limit=None, uploaded_by=None, until=None, include_deleted=False):
+    """資料一覧(cmd_503 決定的注入機構の材料)。Aurora MCP `list_documents` を叩き、
+    常に bare な list を返す。
+
+    ★掟「失敗とゼロを別出口へ」: 0件は [] を、照会失敗(未設定/未接続/MCPエラー/壊れた戻り)は
+    None を返す。呼出側(chat_server.aurora_list_digest)は None を「照会に失敗しました」、
+    [] を「その期間に0件(母集合つき)」と別々に述べ分ける。両者を混ぜてはならぬ。"""
+    args = {}
+    if since:
+        args["since"] = since
+    if until:
+        args["until"] = until
+    if uploaded_by:
+        args["uploaded_by"] = uploaded_by
+    if include_deleted:
+        args["include_deleted"] = True
+    if limit:
+        args["limit"] = int(limit)
+    r = _call("list_documents", args)
+    if r is None:                       # 未設定(接続層休止)
+        return None
+    if isinstance(r, (list, dict)):
+        return _unwrap_list(r)
+    try:                                # call_tool は text を返す規約。JSONで無いものは全て失敗扱い
+        return _unwrap_list(_json.loads(r))   # ("(MCPエラー: ...)" 等はここで失敗へ落ちる)
+    except Exception:
+        return None
+
+
+def document_exists(slug=None, title=None):
+    """slug or title の完全一致で1件を照会(soft-delete分も deleted で返る)。
+    失敗は None・該当無しは {} (掟: 失敗とゼロを別出口へ)。"""
+    args = {}
+    if slug:
+        args["slug"] = slug
+    if title:
+        args["title"] = title
+    if not args:
+        return None
+    r = _call("document_exists", args)
+    if r is None:
+        return None
+    if isinstance(r, dict):
+        return r
+    try:
+        d = _json.loads(r)
+    except Exception:
+        return None
+    if isinstance(d, dict):
+        sc = d.get("structuredContent")
+        if isinstance(sc, dict) and "result" in sc:
+            return sc["result"] or {}
+        return d
+    return {} if d in ([], None) else d
+
+
 def create(title, html_body, author_id="casper", project="社内", work="ノート", tags=None, scope="public"):
     # Elvis Aurora の create_document 必須: title, html, author_id(str), project, work
     return _call("create_document", {"title": title, "html": html_body,
