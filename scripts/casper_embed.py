@@ -120,8 +120,59 @@ def embed_batch(texts):
                 pass
 
 
+def _pid_alive(pid):
+    """そのPIDが今も生きているか。数でない/居らぬなら False。"""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ValueError, TypeError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True          # 他人の物=生きている(触らぬ)
+
+
+def sweep_stale_tmp(path=None, dry_run=False):
+    """【殿御裁可2026-08-24】書きかけの遺物を掃く。作った者が畳む。
+
+    なぜ要るか(実測): 索引本体(422MB)は `{path}.tmp.<pid>` へ全部書いてから差し替える。
+    書いている最中に supervisor の auto-reload がプロセスを止めると、書きかけだけが残る。
+    2026-08-24 11:48、pid 5931 の停止と同時に 167MB の遺物が生まれるのを現認した。
+    これが積もって 54個・8.8GB になっていた。
+
+    ★掃くのは【死んだPIDの遺物だけ】。生きたPIDの物は書込中かもしれぬゆえ絶対に触らぬ。
+    ★本体(path 自身)には決して手を出さぬ——掃除機が索引を食う事故を機構として不可能にする。
+    戻り: {"removed": [...], "kept": [...], "bytes": n}
+    """
+    base = path or EMB_INDEX
+    out = {"removed": [], "kept": [], "bytes": 0}
+    for f in glob.glob(base + ".tmp.*"):
+        if os.path.abspath(f) == os.path.abspath(base):
+            continue                                   # ★本体は対象外(在り得ぬが門を置く)
+        pid = f.rsplit(".", 1)[-1]
+        if _pid_alive(pid):
+            out["kept"].append(f)                      # 生きている=書込中かもしれぬ
+            continue
+        try:
+            n = os.path.getsize(f)
+        except OSError:
+            n = 0
+        if dry_run:
+            out["removed"].append(f); out["bytes"] += n
+            continue
+        try:
+            os.remove(f)
+            out["removed"].append(f); out["bytes"] += n
+        except OSError:
+            out["kept"].append(f)
+    return out
+
+
 def _atomic_dump(obj, path):
     """一時ファイルへ書いてから rename(=アトミック置換)。並行 reindex による半端書き込み破損を防ぐ。"""
+    try:                                               # 書く前に、前の書きかけの遺物を畳む
+        sweep_stale_tmp(path)
+    except Exception:
+        pass
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)

@@ -52,3 +52,9 @@ scripts/casper_embed_index.json.meta.json
 # 雲へ出た内容の帳簿(社の情報・0600・git管理外)
 scripts/casper_cloud_ledger.jsonl
 scripts/casper_embed_reindex.jsonl
+
+# ★台帳(宛先・席の禁足・雲の可否・座席状態)は履歴へ入れる(殿御裁可2026-08-24)。
+#   秘密は含まぬ(実読確認済: token/key/password 無し・IP/ポート/モデル名/フラグのみ)。
+#   機構が書き換えるゆえ常時dirtyになるが、「誰がいつ宛先を変えたか」の履歴が
+#   無いことの方が重い(2026-08-21「書き換えたのに座席が変わらぬ」混乱の因)。
+!scripts/casper_endpoints.env
