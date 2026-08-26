@@ -380,6 +380,102 @@ def shotlist_to_markdown(path, assets_dir, prefix, asset_url="/asset"):
     return "\n".join(out) if n else None
 
 
+def _rtf(path):
+    r"""RTF → 素のテキスト(依存ゼロ)。
+
+    【殿御下命2026-08-26】kiyotomo殿が「sorafune 様　MTG.rtf」を投じ「Auroraにアップ」と
+    書き添えたが、.rtf は本表に載っておらず「(非対応形式)」で落ちていた。macOS/テキストエディットの
+    既定書式ゆえ社内で日常的に出る。
+
+    ★破棄すべき群(fonttbl/colortbl/stylesheet/info/pict 等)は本文でないゆえ中身ごと捨てる。
+      これを捨てぬと書体名や色定義が『資料の本文』として Aurora に載る。
+    ★日本語は \'xx の連なり(cp932)か \uNNNN で来る。前者は \ansicpg を見て復号する。
+      復号に失敗した文字は握り潰さず replace で残す(読めた分は返す=失敗とゼロを別出口へ)。
+    """
+    try:
+        raw = open(path, "rb").read().decode("latin-1")
+    except Exception as e:
+        return "(rtf読取失敗: %s)" % e
+    m = re.search(r"\\ansicpg(\d+)", raw)          # 既定 cp1252・日本語RTFは cp932 が多い
+    codec = "cp" + m.group(1) if m else "cp1252"
+    try:
+        "".encode(codec)
+    except Exception:
+        codec = "cp1252"
+
+    SKIP = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "themedata",
+            "colorschememapping", "latentstyles", "datastore", "generator", "listtable",
+            "listoverridetable", "rsidtbl", "xmlnstbl", "filetbl", "revtbl", "mmathPr"}
+    out, buf = [], bytearray()
+    depth, skip_to = 0, None                       # skip_to = 破棄群に入った時の深さ
+
+    def flush():
+        if buf:
+            out.append(bytes(buf).decode(codec, errors="replace"))
+            buf.clear()
+
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == "{":
+            flush(); depth += 1; i += 1; continue
+        if c == "}":
+            flush()
+            if skip_to is not None and depth <= skip_to:
+                skip_to = None
+            depth -= 1; i += 1; continue
+        if c == "\\":
+            if raw.startswith("\\'", i) and i + 3 < n:          # \'xx = 16進1バイト
+                try:
+                    if skip_to is None:
+                        buf.append(int(raw[i + 2:i + 4], 16))
+                    i += 4; continue
+                except ValueError:
+                    i += 2; continue
+            if raw.startswith("\\*", i):                          # \* = 「解さぬなら群ごと捨てよ」の印
+                # ★RTF仕様の無視可能destination。expandedcolortbl 等を一つずつ表に足して
+                #   追いかけると必ず取りこぼす(実測: 『*;;;』が本文の先頭に混じった)。
+                #   語を数えるのでなく、印を見て群ごと捨てる。
+                skip_to = depth
+                i += 2; continue
+            if i + 1 < n and raw[i + 1] in "\r\n":                 # \+改行 = 段落区切り(TextEditの既定)
+                flush(); out.append("\n"); i += 2
+                while i < n and raw[i] in "\r\n":
+                    i += 1
+                continue
+            m2 = re.match(r"\\([a-zA-Z]+)(-?\d+)? ?", raw[i:])
+            if not m2:                                          # \{ \} \\ のエスケープ
+                if i + 1 < n and raw[i + 1] in "{}\\":
+                    if skip_to is None:
+                        buf.append(ord(raw[i + 1]))
+                    i += 2; continue
+                i += 1; continue
+            word, param = m2.group(1), m2.group(2)
+            i += m2.end()
+            if word in SKIP:                                    # 破棄群 → 閉じ括弧まで丸ごと捨てる
+                skip_to = depth
+                continue
+            if skip_to is not None:
+                continue
+            if word == "u" and param is not None:               # \uNNNN(直後の代替1文字は読み飛ばす)
+                flush()
+                cp = int(param)
+                out.append(chr(cp if cp >= 0 else cp + 65536))
+                if i < n and raw[i] == "?":
+                    i += 1
+                continue
+            if word in ("par", "line", "sect"):
+                flush(); out.append("\n"); continue
+            if word == "tab":
+                flush(); out.append("\t"); continue
+            continue
+        if skip_to is None and c not in "\r\n":
+            buf.append(ord(c) if ord(c) < 256 else 63)
+        i += 1
+    flush()
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)).strip()
+
+
 def extract(path):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pptx":
@@ -407,6 +503,8 @@ def extract(path):
         except Exception:
             pass
         return _xlsx(path)[:MAX]
+    if ext == ".rtf":
+        return _rtf(path)[:MAX] or "(rtf: 空)"
     if ext in (".txt", ".md", ".csv", ".json", ".log", ".yaml", ".yml", ".tsv"):
         try:
             return open(path, encoding="utf-8", errors="replace").read()[:MAX]

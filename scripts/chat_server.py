@@ -361,6 +361,91 @@ def _task_fb_active(t):
 PENDING_ACTIONS = {}   # id -> {tool, args, uid, summary}
 _LAST_CHOICES = {}     # thread -> {"opts":[{say,label,card_type}], "uid", "ts"}: 直前に出した選択カード(③選択ログ用)
 _AURORA_CUR = {}       # thread -> {doc_id, title}: 1スレッド=1資料の紐付け(更新はappend)
+
+
+# ★slug は ASCII のみを取る。仮名/漢字を混ぜると、URLの直後に続く日本語
+#   (「…-2026-08-26**の以下の文字を消して下さい**」)まで飲み込み、
+#   台帳に無い slug になって「特定できず」に倒れる(実測で踏んだ)。
+#   Aurora の slug は実物がローマ字("kiyotomo/2026-08-26/sorafune-mtg-gijiroku-2026-08-26")。
+_AURORA_DOC_URL_RE = re.compile(
+    r"https?://[^\s/]+(?::\d+)?/doc/([A-Za-z0-9_\-./%~]+)")
+_AURORA_DOC_ID_RE = re.compile(
+    r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", re.I)
+
+
+def aurora_doc_ref(text):
+    r"""【殿御下命2026-08-26】ユーザーの発話が名指しした Aurora 資料を**決定的に**解く。
+
+    実害(2026-08-26 18:18〜18:22): kiyotomo殿が
+      「http://…:8100/doc/kiyotomo/2026-08-26/sorafune-mtg-… の以下の文字を消して下さい」
+    と URL を添えて頼んだが、URL から doc_id を解く機構が無かった。
+    aurora_append(既存ノートの修正)は結線されているのに doc_id が埋まらず、
+    Casper は「編集機能を持っていません」と答え、二分後には「削除しました」と嘘をついた。
+    ——道具は在ったのに、鍵(doc_id)を渡す機構が無かったのである。
+
+    ★識別子はモデルに生成させぬ。URL/slug から機構で引く([[project_casper_grounding_machinery]])。
+    ★三値で返す: 解けた=dict / 名指しが無い=None / 名指しはあるが見つからぬ={"ref":…, "found":False}。
+      「名指しが無い」と「名指しはあるが台帳に無い」を混ぜると、後者を黙って新規作成に倒しかねぬ。
+    """
+    t = text or ""
+    m = _AURORA_DOC_URL_RE.search(t)
+    ref, by = (m.group(1).rstrip("/.、。"), "slug") if m else (None, None)
+    if not ref:
+        m2 = _AURORA_DOC_ID_RE.search(t)
+        ref, by = (m2.group(1), "id") if m2 else (None, None)
+    if not ref:
+        return None                                    # 名指しが無い
+    if by == "id":
+        return {"ref": ref, "by": by, "found": True, "doc_id": ref, "title": ""}
+    try:
+        import casper_aurora as _au
+        d = _au.document_exists(slug=ref)
+    except Exception:
+        d = None
+    if not d:                                          # None(照会失敗) も {}(該当無し) もここ
+        return {"ref": ref, "by": by, "found": False, "doc_id": "", "title": ""}
+    did = d.get("id") or d.get("doc_id") or ""
+    if not did:
+        return {"ref": ref, "by": by, "found": False, "doc_id": "", "title": ""}
+    return {"ref": ref, "by": by, "found": True, "doc_id": did,
+            "title": d.get("title") or "", "deleted": bool(d.get("deleted"))}
+
+
+def aurora_shrink_note(doc_id, new_body):
+    r"""既存ノートの差し替えで**本文が大きく減る**時、それを承認カードの表に立てる。
+
+    ★append_version は名に反して**内容を丸ごと差し替える**(2nd艦隊が実害を記録:
+      aurora-docid-overwrite-pitfall)。修正のつもりで断片を渡せば、資料の残りが消える。
+    ★止めはせぬ——要約への差し替えは正当な操作である。だが**黙って通さぬ**。
+      減る事実を人の目に映してから承認させる(silent cap の禁)。
+    戻り値: 注記(str) / 減っておらぬ・照会できぬ時は ""。
+    """
+    if not doc_id or not new_body:
+        return ""
+    try:
+        import casper_aurora as _au
+        cur = _au.get(doc_id)
+    except Exception:
+        return ""
+    if not cur:
+        return ""
+    try:
+        d = json.loads(cur) if isinstance(cur, str) else cur
+    except Exception:
+        d = {}
+    html = ""
+    if isinstance(d, dict):
+        html = d.get("html") or d.get("body") or d.get("content") or ""
+    old_len = len(re.sub(r"<[^>]+>", "", str(html)))
+    new_len = len(str(new_body))
+    if old_len <= 0 or new_len >= old_len * 0.6:
+        return ""
+    return (f"\n⚠️ **本文が {old_len}字 → {new_len}字 に減りまする"
+            f"（約{100 - int(new_len * 100 / old_len)}%減）。**"
+            "Aurora の版差し替えは中身を丸ごと入れ替えまする——"
+            "一部だけを直すつもりなら、修正後の**全文**をお確かめくだされ。")
+
+
 # cmd_492 第1便: 直前turnの話題を機構が記録する(記録のみ・まだ判定/注入には使わない)。
 # 既存の決定的解決器(top_source/_pj_resolve/_resolve_persons)が既に解決した結果を拾うだけで、新たな推測は行わない。
 _LAST_TOPIC = {}       # thread -> {"kind":"doc"|"project"|"person", "key":..., "label":..., "ts":..., "uid":...}
@@ -3325,6 +3410,50 @@ def _parse_hint(hint):
     return {"cut": cut, "proc": proc, "intent": intent, "fmt": fmt}
 
 
+def uploader_to_aurora(src_path, note, filename, uid):
+    """【殿御下命2026-08-26】投じられた資料を Aurora(共有ノート図書館)へ載せる道。
+
+    実害(2026-08-26 18:33): kiyotomo殿が「sorafune 様　MTG.rtf」を投じ「Auroraにアップ」と
+    書き添えたが、uploader の行先は qc/daily/reference の三つしか無く、note の文言は読まれぬまま
+    qc→daily へ流れ、Aurora には一度も届かなかった。
+
+    ★書き込まぬ。承認カードを立てるだけ。Aurora書込は承認制ゆえ、ここに直書きの裏口を作れば
+      門が二つになる(掟: 件数と一覧は同一機構)。
+    ★抽出の失敗を本文として載せぬ。casper_extract は失敗を「(非対応形式 .xxx)」のような
+      括弧書きで返す。これをそのまま載せれば、その一行が全社の共有資料になる。
+      失敗とゼロ(空)と成功を、それぞれ別の出口で名乗らせる。
+
+    戻り値(常に dict): {"ok":bool, "written":False, "dest":"aurora",
+                       "confirm":{...}(成功時のみ), "message":str, "reason":str(失敗時のみ)}
+    """
+    if not src_path or not os.path.exists(src_path):
+        return {"ok": False, "written": False, "dest": "aurora", "reason": "no_file",
+                "message": "⚠️ Aurora に載せられませぬ — 投じられた実体が見当たりませぬ(添付し直してくだされ)"}
+    if not casper_extract:
+        return {"ok": False, "written": False, "dest": "aurora", "reason": "no_extractor",
+                "message": "⚠️ Aurora に載せられませぬ — 本文抽出の機構が無効にござる"}
+    body = casper_extract.extract(src_path) or ""
+    if body.startswith("("):                       # 抽出できなかった(非対応形式・読取失敗・空 等)
+        return {"ok": False, "written": False, "dest": "aurora", "reason": "extract_failed",
+                "message": f"⚠️ Aurora に載せられませぬ — {body.strip('()')}"}
+    if not body.strip():
+        return {"ok": False, "written": False, "dest": "aurora", "reason": "empty",
+                "message": "⚠️ Aurora に載せられませぬ — 本文が空にござる"}
+    title = re.sub(r"\s+", " ", (note or "").strip())[:120] \
+        or os.path.splitext(os.path.basename(filename or src_path))[0]
+    args = {"title": title, "body": body[:20000], "tags": ["casper", "uploader"]}
+    summary = _action_summary("aurora_create", args)
+    pid = _register_pending("aurora_create", args, uid, summary,
+                            origin="user", query=f"[uploader] {filename} → Aurora")
+    if not pid:                                    # 起票できなんだ = 成功と名乗らぬ
+        return {"ok": False, "written": False, "dest": "aurora", "reason": "propose_failed",
+                "message": "⚠️ Aurora への下書き登録に失敗しました"}
+    return {"ok": True, "written": False, "dest": "aurora",
+            "confirm": {"id": pid, "tool": "aurora_create", "args": args, "summary": summary},
+            "message": ("📖 Aurora への下書きを立てました。**まだ書き込んでおりませぬ**"
+                        f"——下の承認ボタンを押すと保存されまする。(本文 {len(body)}字を抽出)")}
+
+
 def uploader_resolve(hint, vision_desc="", uid=None, max_c=6):
     """投入物のヒント×vision×本人タスクから、提出先候補タスクを確度順に返す(読取のみ)。"""
     if not casper_tools:
@@ -5172,6 +5301,84 @@ def _corpus_only_note(query):
             "資料に基づく内容(経緯・論点・決定事項・関係先)は答えてよい。"
             "答える際は必ず『Calendar には案件登録が無い(ゆえにタスク/担当は未登録)』旨を添えよ。"
             "関連しそうな Calendar PJ が別名で在るなら、断定せず『〜かもしれぬ』と候補として示せ。")
+
+
+_MATERIAL_MIN_CHARS = int(os.environ.get("CASPER_MATERIAL_MIN_CHARS", "300"))
+_MATERIAL_MIN_LINES = 5
+_MATERIAL_MIN_STRUCT = 3
+# 構造のある行(番号見出し / 箇条書き / 「見出し: 値」)。文章の羅列と資料を分ける印。
+_MATERIAL_STRUCT_RE = re.compile(
+    r"^\s*(?:[0-9０-９]+\s*[.．、)）]|[-・*＊●○■□▪]|#{1,6}\s|[^\s:：]{1,24}\s*[:：]\s*\S)")
+# 依頼・問いの印。一つでも在れば「材料の投げ入れ」でなく「頼み事」ゆえ通常経路へ返す。
+_MATERIAL_REQUEST_RE = re.compile(
+    r"(教え|説明し|まとめ|要約|アップ|保存|登録|起票|送っ|送信|共有して|直し|修正し|消して|削除|"
+    r"作っ|作成し|して下さい|してください|してくれ|お願い|頂けま|いただけま|"
+    r"どう|なぜ|何故|いつ|誰|どこ|どれ|どの|ですか|ますか|でしょうか|[？?])")
+
+
+def pasted_material(text):
+    r"""【殿御下命2026-08-26】長い資料をそのまま貼っただけの発話を『材料』と判ずる。
+
+    実害(2026-08-26 18:26〜18:29): kiyotomo殿は SORAFUNE の議事録本文を**四度**貼った。
+    そのたび Casper は問いとして読み、PJ状況の要約や逆インタビューを返した——
+    貼られた本文には一言も触れずに。殿は噛み合わぬまま貼り直しを繰り返し、
+    最後は .rtf を投げて諦められた。
+
+    ★『貼っただけ』は問いではない。材料の投げ入れである。
+      何をするかは**人が決める**——機構が勝手に要約や起票へ倒すのではなく、
+      受け取った事実と選択肢を返す。
+    ★返す中身は数え上げた事実のみ(行数/字数/見出し)。中身の解釈はここでは一切せぬ
+      (retrieve-then-render: 憶測の入る余地を作らぬ)。
+
+    戻り値: {"lines":int,"chars":int,"heads":[str,...]} / 材料でなければ None
+    """
+    t = (text or "").strip()
+    if len(t) < _MATERIAL_MIN_CHARS:
+        return None
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if len(lines) < _MATERIAL_MIN_LINES:
+        return None
+    if len([ln for ln in lines if _MATERIAL_STRUCT_RE.match(ln)]) < _MATERIAL_MIN_STRUCT:
+        return None
+    if _MATERIAL_REQUEST_RE.search(t):
+        return None                                  # 頼み事が混じる=材料でなく依頼。通常経路へ返す
+    heads = [ln for ln in lines
+             if re.match(r"^\s*(?:[0-9０-９]+\s*[.．、)）]|#{1,6}\s)", ln)][:6]
+    if not heads:
+        heads = lines[:1]
+    # 文書の題= 構造行でない先頭行(「SORAFUNE 様　MTG 議事録」)。
+    # ★見出し(「1. シナリオ・コンセプト」)を題に流用せぬ——実測でそれが既定に立ち、
+    #   資料の名が中の一節になってしまった。題は文書が自ら名乗っている行から採る。
+    first = lines[0]
+    title_line = "" if _MATERIAL_STRUCT_RE.match(first) else first[:80]
+    return {"lines": len(lines), "chars": len(t), "heads": [h[:40] for h in heads],
+            "title_line": title_line}
+
+
+def material_choices(mat, filename=""):
+    """材料を受け取った時の返し(決定的・qwen非経由)。事実＋選択肢のカード。"""
+    what = (filename or mat.get("title_line")
+            or (mat["heads"][0] if mat["heads"] else "貼られた文書"))
+    body = ["📄 資料として受け取り申した。**まだ何もしておりませぬ**——何にいたしましょう。", "",
+            f"- 行数: {mat['lines']}行 / {mat['chars']}字"]
+    if mat["heads"]:
+        body.append("- 見出し: " + " / ".join(mat["heads"]))
+    prompt = "この資料をどういたしましょう。"
+    opts = [
+        {"id": "mat_aurora", "label": "📖 Aurora に保存",
+         "preview": "共有ノート図書館へ新しい資料として起票(承認カードが出まする)",
+         "say": f"いま貼った文書を Aurora に新規保存して。題は「{what}」。本文は貼った通りに。"},
+        {"id": "mat_replace", "label": "✏️ 前の資料を差し替え",
+         "preview": "直前に扱っていた Aurora 資料の中身を、この本文で入れ替える",
+         "say": "いま貼った文書で、直前に扱っていた Aurora 資料を差し替えて。本文は貼った通りに全文。"},
+        {"id": "mat_summary", "label": "📝 要点を整理",
+         "preview": "この本文だけを材料に要約する(社内データは混ぜぬ)",
+         "say": "いま貼った文書の要点だけを整理して。貼った本文以外の情報は混ぜないで。"},
+        {"id": "mat_none", "label": "🤝 共有まで(何もせぬ)",
+         "preview": "受け取るだけ。以後の会話の前提として覚えておく",
+         "say": "いま貼った文書は共有まででよい。何もしないで、以後の前提として覚えておいて。"},
+    ]
+    return "\n".join(body), {"prompt": prompt, "options": opts}
 
 
 def _pj_task_choices(query):
@@ -8090,6 +8297,23 @@ def aurora_url_digest(query):
            "資料に書かれていないことは、書かれていないと述べよ(補完で埋めるな)。")
     if r.get("coverage", {}).get("insufficient"):
         out += "\n※図が読めていない(画像主体)。読めた範囲を明示し、足りぬ点は正直に申せ。"
+    # 【殿御下命2026-08-26】直す手立てを同じ便で渡す。
+    # 実害(18:22:55): 本文は注入されていたのに doc_id が無く、Casperは「編集機能を持っていません」と
+    # 答えた(=持っているのに無いと言う嘘)。二分後には「削除しました」と逆の嘘をついた。
+    # ★『読める』と『直せる』を別々に渡すと、片方だけ見て機構が揺れる。鍵は資料と同じ便で渡す。
+    _ref = aurora_doc_ref(u)
+    if _ref and _ref.get("found") and _ref.get("doc_id"):
+        out += (f"\n\n### この資料は直せる(doc_id={_ref['doc_id']})\n"
+                "修正を頼まれたら **aurora_append** を呼べ(doc_id は上の値をそのまま使う)。"
+                "**『編集機能が無い/できない』とは言うな——道具は在る。**\n"
+                "★aurora_append は中身を**丸ごと入れ替える**。body には抜粋でなく"
+                "**修正後の全文**を入れよ(一部だけ渡すと資料の残りが消える)。\n"
+                "★呼ぶと承認カードが出る。押されるまでは書き込まれておらぬゆえ、"
+                "『削除しました/直しました』と完了を断ずるな。")
+    elif _ref and not _ref.get("found"):
+        out += ("\n\n### この資料は台帳で特定できておらぬ\n"
+                f"名指し: {_ref.get('ref')}。**doc_id が解けておらぬゆえ修正は掛けられぬ。**"
+                "勝手に新規作成へ倒すな。特定できぬ旨を述べ、資料の題か検索語を願え。")
     _AURORA_URL_MEMO[u] = out
     return out
 
@@ -9517,7 +9741,12 @@ class H(BaseHTTPRequestHandler):
                            "filename": fn, "note": note}
                     with open(os.path.join(HERE, "uploader_intent_log.jsonl"), "a", encoding="utf-8") as f:
                         f.write(json.dumps({**rec, "status": "submitted"}, ensure_ascii=False) + "\n")
-                    if intent in ("daily", "memo", "record"):
+                    if intent == "aurora":
+                        ext = os.path.splitext(fn)[1].lower()
+                        src = os.path.join(ASSETS_DIR, "upl_" + who["sid"] + ext)
+                        self._json(uploader_to_aurora(src, note, fn, uid))
+                        return
+                    elif intent in ("daily", "memo", "record"):
                         # 右脳vault に即保存(Calendar 権限不要)
                         # resolve が ASSETS_DIR/upl_{sid}{ext} に保存済の実体を、feed_save が参照する
                         # ASSET_FILES/{safe_filename} へ複製する(両者はディレクトリもファイル名も別物ゆえ、
@@ -10884,6 +11113,12 @@ class H(BaseHTTPRequestHandler):
         _fdm = None if (_snz or _assign_short) else (_file_delivery_dm(ll_user, who, convo=msgs)
                                                       or _own_response_delivery_dm(ll_user, who, convo=msgs))   # 最優先: 文脈の共有リンク→DM(『これtetsuoに送っといて』の deixis で選択カードに横取りされぬよう choices より先)。URL文脈が無ければcmd_508(病三E01): 直前の自分の応答本文→DM
         choices_obj = None if (_snz or _fdm or _assign_short) else _build_choices(who, ll_user, convo=msgs)   # 内部で deixis＋action意図を判定
+        # 【殿御下命2026-08-26】長い資料を貼っただけの発話は『問い』でなく『材料』。
+        # 実害: 議事録本文を四度貼られ、四度ともPJ状況要約/逆インタビューを返し、貼られた本文に
+        # 一言も触れなかった。何をするかは人が決める——受け取った事実と選択肢だけを返す。
+        _material = None
+        if not (_snz or _fdm or _assign_short or choices_obj or _looks_like_action(ll_user)):
+            _material = pasted_material(ll_user)
         if not choices_obj and not _snz and not _fdm and not _assign_short:    # 名前解決の3値(ambiguous/none)→選択カードで拾う(無言None落ち禁止・Fable)
             choices_obj = _pj_task_choices(ll_user)
         if not choices_obj:
@@ -10896,6 +11131,9 @@ class H(BaseHTTPRequestHandler):
             routed = _fdm or (None if choices_obj else (_action_router(ll_user, sysadd, who, convo=msgs, gate=_gate) if _looks_like_action(ll_user) else None))
             if choices_obj:                         # 曖昧→選択カード提示。生成ループはスキップ(routed扱い)
                 routed = {"_choices": True, "reply": choices_obj["prompt"]}
+            elif _material and not routed:          # 材料の投げ入れ→事実＋選択肢(決定的・qwen非経由)
+                _mreply, choices_obj = material_choices(_material)
+                routed = {"_choices": True, "reply": _mreply}
         # 追従: Casperが「下書きを表示しますか?」と申し出た直後の裸の肯定(おねがい/はい)=その申し出への同意→浮上
         _affirm_draft = bool(_AFFIRM_RE.match((ll_user or "").strip())) and bool(_DRAFT_OFFER_RE.search(_last_assistant(msgs)))
         # 滞留下書きの浮上: 『下書き見せて/承認待ち確認/気にかけどころ処理』等→実カード(内容+承認/却下)を出す
@@ -11048,13 +11286,24 @@ class H(BaseHTTPRequestHandler):
                                 result = str(_au.get(args.get("doc_id", "")))[:6000]
                             else:                                  # aurora_create / aurora_append = 書込 → 承認ゲート(1スレ1資料 紐付け)
                                 cur = _AURORA_CUR.get(thr) if thr else None
+                                # 【殿御下命2026-08-26】発話がURL/idで資料を名指ししているなら、それが最優先。
+                                # ★スレッドの紐付け(暗黙)より、人が今この発話で指した物(明示)を上に置く。
+                                #   18:18の実害は「aurora_appendは在るのにdoc_idを渡す機構が無い」だった。
+                                _ref = aurora_doc_ref(ll_user or "")
+                                if _ref and _ref.get("found") and _ref.get("doc_id"):
+                                    cur = {"doc_id": _ref["doc_id"], "title": _ref.get("title", "")}
                                 new_intent = bool(re.search(r"新規|新しく|新しい|別の|別に|もう[1一]つ|new doc", ll_user or ""))
+                                if _ref and _ref.get("found"):
+                                    new_intent = False     # 既存を名指ししている以上、新規ではない
                                 efn = fn
                                 if fn == "aurora_create" and cur and not new_intent:   # 既存資料あり&新規指定なし→同じ資料へ追記
                                     efn = "aurora_append"; args = {"doc_id": cur["doc_id"], "body": args.get("body", "")}
                                 elif fn == "aurora_append" and not args.get("doc_id") and cur:
                                     args["doc_id"] = cur["doc_id"]
                                 summary = _action_summary(efn, args)
+                                if efn == "aurora_append":
+                                    # ★版差し替えは中身を丸ごと入れ替える。減る時は黙って通さず表に立てる。
+                                    summary += aurora_shrink_note(args.get("doc_id", ""), args.get("body", ""))
                                 pid = _register_pending(efn, args, who.get("uid"), summary,
                                                         origin="user", query=str(ll_user)[:400], trace_id=_tid)
                                 PENDING_ACTIONS[pid]["thread"] = thr

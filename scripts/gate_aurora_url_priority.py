@@ -23,7 +23,9 @@ import pack_config
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "chat_server.py")
-WANT = ["_AURORA_URL_RE", "_AURORA_URL_MEMO", "aurora_url_digest", "seiri_aurora_fetch"]
+WANT = ["_AURORA_URL_RE", "_AURORA_URL_MEMO", "aurora_url_digest", "seiri_aurora_fetch",
+        # 2026-08-26: 本文と同じ便で「直せる」鍵(doc_id)も渡すようになった
+        "aurora_doc_ref", "_AURORA_DOC_URL_RE", "_AURORA_DOC_ID_RE"]
 
 # cmd_495: 固有名は pack から受け取る(gate_pjname.pyと同じ流儀・cmd_491 AC3の趣旨を本ゲートにも適用)。
 _examples = pack_config.get("examples", {}) or {}

@@ -1529,6 +1529,7 @@ async function uploaderFlow(file, hint){
   useArea.innerHTML='<div style="margin:4px 0"><b>この投入物の用途は?</b></div>';
   [['qc','🎬 成果物(QC/Review提出)','提出先タスクを選びクロスチェック→Calendar(権限待ち)'],
    ['daily','🗂 daily / メモ(記録だけ)','右脳vaultに即記録(権限不要)'],
+   ['aurora','📖 Aurora(共有ノートに載せる)','本文を抽出して共有書架へ→承認後に保存'],
    ['reference','📚 リファレンス(参考資料)','紐付け先を選んでCalendar(権限待ち)']].forEach(([v,label,desc])=>{
     const bt=document.createElement('button'); bt.className='ulopt';
     bt.innerHTML='<b>'+label+'</b> <span style="color:var(--mut);font-size:12px">'+desc+'</span>';
@@ -1538,6 +1539,15 @@ async function uploaderFlow(file, hint){
       if(v==='daily'){
         ccArea.innerHTML='<div style="margin-top:8px"><b>🗂 daily/メモとして記録</b><input class="ulfree" placeholder="メモ(任意): 何の作業か等" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid #243049;color:#dbe4ee;border-radius:9px;padding:8px 11px;font-size:13px;margin-top:4px" value="'+esc(hint||'')+'"><button class="ulsubmit">vaultに記録</button></div>';
         const inq=ccArea.querySelector('.ulfree'); ccArea.querySelector('.ulsubmit').onclick=()=>doSubmit(ccArea,{id:null,name:file.name},file,inq.value,'daily',res.recognized); inq.focus();
+      } else if(v==='aurora'){
+        // 殿御下命2026-08-26: 「Auroraにアップ」と書いても届かなかった道を開く。
+        // 本文はサーバがファイルから抽出する(ここでは題だけ聞く=人が名を付ける)。
+        ccArea.innerHTML='<div style="margin-top:8px"><b>📖 Aurora に載せる</b>'
+          +'<div style="color:var(--mut);font-size:12px;margin:4px 0">本文はファイルから抽出しまする。保存は承認制ゆえ、この後に承認ボタンが出まする。</div>'
+          +'<input class="ulfree" placeholder="資料の題（空ならファイル名）" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid #243049;color:#dbe4ee;border-radius:9px;padding:8px 11px;font-size:13px;margin-top:4px" value="'+esc(hint||'')+'"><button class="ulsubmit">Aurora への下書きを作る</button></div>';
+        const inq=ccArea.querySelector('.ulfree');
+        ccArea.querySelector('.ulsubmit').onclick=()=>doSubmit(ccArea,{id:null,name:file.name},file,inq.value,'aurora',res.recognized);
+        inq.focus();
       } else { showTaskPicker(); }
     };
     useArea.appendChild(bt);
@@ -1557,7 +1567,14 @@ async function openCross(ccArea, c, file, hint){
 }
 async function doSubmit(ccArea, c, file, note, intent, recognized){
   const r=await apiPost('/api/uploader/submit',{task_id:c.id,intent:intent||'qc',filename:file.name,note:note,recognized:recognized||''});
+  if(r.ok===false){   // 失敗を成功の見た目で出さぬ(抽出できなかった等・失敗とゼロを別出口へ)
+    ccArea.insertAdjacentHTML('beforeend','<div class="ulcard" style="margin-top:8px;border-color:#f59e0b">'+esc(r.message||'失敗しました')+'</div>');
+    return;
+  }
   ccArea.insertAdjacentHTML('beforeend','<div class="ulcard" style="margin-top:8px">'+(r.written?('✅ '+esc(r.message||'記録しました')):'🟡 '+esc(r.message||'確認のみ（書込権限待ち）'))+'</div>');
+  if(r.confirm){      // Aurora 等の承認制の行先 → 会話欄へ承認カードを出す(既存の門を再利用)
+    const b=el('bot'); renderConfirm(b,r.confirm); log.scrollTop=log.scrollHeight;
+  }
   offUploader();
 }
 function sendRouter(){
