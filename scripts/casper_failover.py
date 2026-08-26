@@ -220,7 +220,37 @@ def cmd_probe_active(args):
         print(json.dumps(result, ensure_ascii=False))
         return 0
 
-    # present is True(自モデル在なのにtimeout) または None(ps自体に到達不可=不在と確証できず)
+    # 【2026-08-24 多人数テストの予行で発覚】★自分の仕事を自分の死と数えぬ。
+    # 自陣の呼出が今まさに走っている(inflight台帳に在る)なら、probeのtimeoutは
+    # 「推論機が病んでいる」ではなく「自分たちが並んでいる」である。推論機は同時要求を
+    # 直列に捌くゆえ、5人が話しかければ5秒のprobeは必ず溢れる。これをfailと数えると
+    # 混んだ時ほどbreakerが赤へ傾き、テストの最中に退避が発火する(=自傷)。
+    # ★verdict=busy として専用に名乗り、breakerへは刻まぬ(coldと同じ作法)。
+    if present is True:
+        try:
+            import casper_llm_client as _llc
+            _llc.inflight_gc()                     # 遺物を先に畳む(作った者が畳む)
+            _live = []
+            for x in (_llc.inflight_list() or []):
+                if _hostport(str(x.get("host") or "")) != _hostport(endpoint):
+                    continue
+                # ★生きたPIDのものだけを数える。死んだPIDの遺物を「走行中」と読めば、
+                #   busyが本物の故障を永久に覆い隠す(実測: 死んだPIDの遺物が11件残っていた)。
+                try:
+                    os.kill(int(x.get("pid")), 0)
+                except Exception:
+                    continue
+                _live.append(x)
+        except Exception:
+            _live = []
+        if _live:
+            print(json.dumps({"key": key, "ok": False, "ms": ms, "verdict": "busy",
+                              "inflight": len(_live), "ps_ms": ps_ms,
+                              "note": "自陣の呼出が走行中ゆえ行列待ち。故障とは数えぬ"},
+                             ensure_ascii=False))
+            return 0
+
+    # present is True(自モデル在・自陣の走行も無いのにtimeout) または None(ps自体に到達不可)
     # → 本物のfailとしてbreakerへ刻む(占有・停滞の信号。到達不可も安全側=failに倒す)。
     state = B.record(key, ok=False, latency_ms=ms)
     verdict = "fail"

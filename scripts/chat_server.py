@@ -2353,6 +2353,7 @@ def _llm_call_record(site, model, fn):
     outcome = "error"
     server_total_sec = server_eval_sec = None
     server_load_sec = server_prompt_eval_sec = None
+    server_eval_count = None
     try:
         result = fn()
         outcome = "ok"
@@ -2366,6 +2367,9 @@ def _llm_call_record(site, model, fn):
             # ★応答dictは元よりこの2欄を載せているのに、我らが捨てていただけである。
             #   これが無いために将軍は「遅さ=生成」と誤帰属した(実測: server_evalは0.1秒台で、
             #   9〜18秒の呼出の正体はload 11.86秒=qwen再ロードであった)。
+            _ec = result.get("eval_count")
+            if isinstance(_ec, (int, float)):
+                server_eval_count = int(_ec)
             sl, sp = result.get("load_duration"), result.get("prompt_eval_duration")
             if isinstance(sl, (int, float)):
                 server_load_sec = round(sl / 1e9, 3)
@@ -2380,7 +2384,12 @@ def _llm_call_record(site, model, fn):
         rec = {"site": site, "model": model, "t_send": round(t_send, 3), "t_recv": round(t_recv, 3),
                "wait_sec": round(t_recv - t_send, 3), "server_total_sec": server_total_sec,
                "server_eval_sec": server_eval_sec, "server_load_sec": server_load_sec,
-               "server_prompt_eval_sec": server_prompt_eval_sec, "outcome": outcome}
+               "server_prompt_eval_sec": server_prompt_eval_sec,
+               "server_eval_count": server_eval_count, "outcome": outcome}
+        # 生成の速さ(tok/s)。★健康は【速さ】で測る——所要そのものは答えの長さに比例するゆえ
+        # 尺度にならぬ(実測: 1203字の正しい答えが server 44.8秒=「故障」と数えられた)。
+        if server_eval_count and server_eval_sec:
+            rec["server_tps"] = round(server_eval_count / server_eval_sec, 1)
         # 待ちの帰属を機構が名乗る(推測させぬ): load / prefill / eval / queue のどれで待ったか。
         # ★不明を "unknown" と名乗る(未確認をtrueと名乗るな)。
         if server_total_sec is None:
@@ -6793,6 +6802,7 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, tem
         tcs = None
         done_reason = None
         total_duration = eval_duration = None
+        eval_count = None                             # 生成トークン数(tok/sの分子・健康の尺度)
         load_duration = prompt_eval_duration = None   # 【Fable第八診】捨てていた2欄。これが無いと
         #   wait_kind が load/prefill を 0 とみなし、待ちを一律 eval と誤って名乗る
         #   (実害: 将軍が「eval 162.2秒」と誤って殿へ言上した。実際は eval 64.5秒 + prefill/load 約97秒)。
@@ -6827,6 +6837,7 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, tem
                         eval_duration = o.get("eval_duration")
                         load_duration = o.get("load_duration")               # ★done行は元より持っている
                         prompt_eval_duration = o.get("prompt_eval_duration")
+                        eval_count = o.get("eval_count")
                         done_line = o
                         break
         except Exception as e:
@@ -6861,7 +6872,8 @@ def ollama_chat_stream(messages, tools=None, num_predict=1536, emit_fn=None, tem
             msg["tool_calls"] = tcs
         return {"message": msg, "done_reason": done_reason,
                 "total_duration": total_duration, "eval_duration": eval_duration,
-                "load_duration": load_duration, "prompt_eval_duration": prompt_eval_duration}
+                "load_duration": load_duration, "prompt_eval_duration": prompt_eval_duration,
+                "eval_count": eval_count}
 
     resp = _llm_call_record("ollama_chat_stream", A.model, _do)
     return {"message": resp["message"], "done_reason": resp["done_reason"]}
@@ -11058,9 +11070,30 @@ class H(BaseHTTPRequestHandler):
                      f"（Excelで開けます。編集して取り込み直すことも可能です／Calendarへ直接反映も承認カードで行えます）")
         if casper_breaker:                          # z8a(qwen)の健全性を記録: 成功可否+レイテンシ→連続失敗でred=クラウド縮退の判断材料
             try:                                     # cmd_509第2便: key を endpoint別(gen:host:port)へ改める(旧"z8a"固定は多義)
-                casper_breaker.record(casper_breaker.gen_key(*_ENDPOINT_HOSTPORT.split(":", 1)),
-                                      ok=not final.startswith("[error]"),
-                                      latency_ms=int((time.time() - _t0) * 1000))
+                # 【2026-08-24 多人数テストの予行で発覚】★turnの壁時計を latency にしてはならぬ。
+                # 壁時計には【他人の順番待ち】が含まれる。推論機は同時要求を直列に捌くゆえ
+                # (実測: 完了が0.9/1.7/2.6/3.4秒と階段状)、5人が同時に話しかけると5人目の
+                # turnは60秒を超える。それを slow_ms=30000 で「失敗」と数えると、混んだ時ほど
+                # breakerが赤へ傾き、テストの最中に退避が発火して声も答えも変わる——
+                # 「遅いから壊れた」のではなく【遅さを故障と誤診して自ら壊しに行く】形であった。
+                # ★推論機の健康は、推論機自身が申告した所要(server_total)で測る。行列待ちは除く。
+                # ★健康は【速さ】で測る。所要そのものは答えの長さに比例するゆえ尺度にならぬ
+                #   (実測: 1203字の正しい答えが server 44.8秒 = slow_ms 30秒超 = 「故障」と数えられた)。
+                #   100トークンを生むのに要した時間を latency として刻む——答えが長かろうと短かろうと、
+                #   健やかな 27b は約4秒、CPUへ溢れた病んだ機は60秒超になる(尺度が健康にのみ比例する)。
+                _recs = _llm_call_turn_records()
+                _tok = sum((c.get("server_eval_count") or 0) for c in _recs)
+                _evs = sum((c.get("server_eval_sec") or 0) for c in _recs)
+                _srv = (_evs / _tok * 100.0) if (_tok and _evs) else None
+                if _srv is not None:
+                    casper_breaker.record(casper_breaker.gen_key(*_ENDPOINT_HOSTPORT.split(":", 1)),
+                                          ok=not final.startswith("[error]"),
+                                          latency_ms=int(_srv * 1000))
+                elif final.startswith("[error]"):
+                    # 推論機が一度も応えなかった=申告が無い。失敗そのものは必ず刻む
+                    # (「測れなかった」を「健康」と読み替えぬ)。
+                    casper_breaker.record(casper_breaker.gen_key(*_ENDPOINT_HOSTPORT.split(":", 1)),
+                                          ok=False, latency_ms=0)
             except Exception:
                 pass
         # cmd_492 第1便: _LAST_TOPIC記録(記録のみ・まだ判定/注入に使わない・挙動は変えない)。
