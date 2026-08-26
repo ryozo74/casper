@@ -6884,6 +6884,93 @@ def strip_think(s):
     return re.sub(r"<think>.*?</think>", "", s or "", flags=re.S).strip()
 
 
+# ── 雲が枯れた時の二段目（殿御下命 2026-08-26）──────────────────────────────
+# 2026-08-25 21:43〜21:50、雲(claude CLI)が週次上限に達し、その生の英文
+#   "You've hit your weekly limit · resets 2am (Asia/Tokyo)"
+# が **そのまま社員2名の回答欄に出た**（terajima uid40 / hori uid34）。しかも帳簿は
+# 7件すべてを outcome="ok" と刻んでいた——CLIが終了コード0で「枯れた」と喋るためである。
+# ★失敗とゼロを別の出口にする。雲が枯れたら
+#   ① GPUのQwenが**本当に答えられるか**を実物で確かめ、答えられるなら其方で答える
+#   ② 答えられぬなら「今は答えられぬ」と正直に返す（英文の生エラーを回答に化けさせぬ）
+# ★この出口ひとつで claude_cli_text の呼出3箇所すべてを守る（呼出側に配らぬ＝単一機構）。
+
+_CLI_EXHAUSTED_RE = re.compile(
+    r"(hit (your|the) (weekly|usage|5[- ]hour|rate) limit"
+    r"|usage limit reached"
+    r"|rate limit(ed)? *(exceeded|reached)?"
+    r"|credit balance is too low"
+    r"|out of (credits|tokens)"
+    r"|quota exceeded)", re.I)
+
+# 「今は答えられぬ」。★これは回答ではなく**回答できぬ旨**である。捏造で埋めない。
+CASPER_NO_SEAT_MSG = ("ただいま推論機に空きがござりませぬ（雲=利用上限／GPU=応答なし）。"
+                      "少し置いてから今一度お尋ねくだされ。")
+
+# Qwen の生存確認 timeout。casper_llm_client.CO_PROBE_TIMEOUT(2秒)は「病んだ機を観測が
+# 悪化させぬ」ための併走診断用で、**冷えて健やかな席まで死と読む**。ここは退避先を選ぶ判断ゆえ
+# 温まっていれば実測2秒前後(breaker ema)で返る幅を取り、固着(90秒超無応答)だけを弾く。
+_QWEN_ALIVE_PROBE_SEC = int(os.environ.get("CASPER_QWEN_PROBE_SEC", "20"))
+
+
+def _cli_exhausted(out):
+    """雲CLIが『枯れた』と自ら名乗った時だけ True。
+    ★短文に限る——長い回答の本文中に limit の語が出ただけで誤爆すれば、
+      正しく答えられた turn を握り潰すことになる。"""
+    t = (out or "").strip()
+    return bool(t) and len(t) <= 300 and bool(_CLI_EXHAUSTED_RE.search(t))
+
+
+def _qwen_alive():
+    """GPUのQwenが**実際に1トークン返せるか**。在庫照合(/api/tags)では判じない——
+    2026-08-26 の .139 は tags 27ms で応じながら /api/generate は90秒超無応答であった。
+    戻り値: (bool, 理由)"""
+    body = json.dumps({"model": A.model, "stream": False, "prompt": "ping",
+                       "keep_alive": -1, "options": {"num_predict": 1}}).encode()
+    url = A.endpoint.rstrip("/") + "/api/generate"
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=_QWEN_ALIVE_PROBE_SEC) as r:
+            json.load(r)
+        return True, f"ok {time.time() - t0:.1f}s"
+    except Exception as e:
+        return False, f"{type(e).__name__} {time.time() - t0:.1f}s"
+
+
+def _local_or_silence(prompt, cloud_said=""):
+    """雲が枯れた後の二段目。Qwenで答えるか、答えられぬと言うか。★沈黙で落ちない。"""
+    alive, why = _qwen_alive()
+    if alive:
+        try:
+            r = ollama_chat([{"role": "user", "content": prompt}])
+            txt = strip_think(((r or {}).get("message") or {}).get("content") or "")
+            if txt.strip():
+                _no_seat_log("fallback_qwen", cloud_said, why, len(txt))
+                return txt
+            _no_seat_log("qwen_empty", cloud_said, why, 0)
+        except Exception as e:
+            _no_seat_log("qwen_error", cloud_said, f"{why} -> {type(e).__name__}: {e}", 0)
+    else:
+        _no_seat_log("no_seat", cloud_said, why, 0)
+    return CASPER_NO_SEAT_MSG
+
+
+def _no_seat_log(verdict, cloud_said, probe, chars):
+    """★黙って落とさぬ（silent cap の禁）。雲が枯れた事と二段目の顛末を必ず残す。"""
+    try:
+        line = json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                           "event": "cloud_exhausted", "verdict": verdict,
+                           "cloud_said": (cloud_said or "")[:200],
+                           "qwen_probe": probe, "endpoint": A.endpoint,
+                           "answer_chars": chars}, ensure_ascii=False)
+        with open(os.path.join(HERE, "casper_no_seat.jsonl"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        print("[no-seat] " + line, flush=True)
+    except Exception:
+        pass
+
+
 def claude_cli_text(prompt, allow=None):
     """Max ライセンスの claude CLI を headless(-p) で叩く (迂回 backend)。
     allow=['WebSearch','WebFetch'] 等で特定ツールのみ解禁 (権限系は無効化しない)。"""
@@ -6897,9 +6984,15 @@ def claude_cli_text(prompt, allow=None):
         r = subprocess.run(args, input=prompt, capture_output=True, text=True,
                            timeout=400, cwd=CLI_CWD)
         out = (r.stdout or "").strip() or ("[claude-cli] " + (r.stderr or "no output")[:300])
+        # ★雲が「枯れた」と名乗った回を ok と刻まぬ（失敗とゼロを別の出口へ）。
+        exhausted = _cli_exhausted(out)
         _cloud_ledger("claude_cli_text", CLI_MODEL, prompt=prompt, response=out,
-                      dur_sec=time.time() - _t0, outcome="ok" if (r.stdout or "").strip() else "error",
+                      dur_sec=time.time() - _t0,
+                      outcome=("exhausted" if exhausted
+                               else "ok" if (r.stdout or "").strip() else "error"),
                       extra={"allow": allow} if allow else None)
+        if exhausted:
+            return _local_or_silence(prompt, cloud_said=out)
         return out
     except Exception as e:
         # ★失敗しても【出てはいる】(送出済)。記録せねば「出たのに帳簿に無い」が生まれる。
@@ -6921,9 +7014,17 @@ def claude_cli_vision(image_path, prompt):
                            input=full, capture_output=True, text=True, timeout=300, cwd=CLI_CWD)
         out = (r.stdout or "").strip() or ("[vision] " + (r.stderr or "no output")[:300])
         # ★画像は本体を帳簿へ持てぬゆえ、パス・バイト数・sha256 を刻む(何を出したか follow できる)。
+        # ★雲が枯れた回を ok と刻まぬ。visionはGPUに二段目が無い(vision は雲据え置き)ゆえ、
+        #   Qwenへは落とさず「今は見られぬ」と正直に名乗る。
+        exhausted = _cli_exhausted(out)
         _cloud_ledger("claude_cli_vision", CLI_MODEL, prompt=full, response=out,
-                      dur_sec=time.time() - _t0, outcome="ok" if (r.stdout or "").strip() else "error",
+                      dur_sec=time.time() - _t0,
+                      outcome=("exhausted" if exhausted
+                               else "ok" if (r.stdout or "").strip() else "error"),
                       image_path=ap)
+        if exhausted:
+            _no_seat_log("vision_no_seat", out, "vision=雲のみ(二段目なし)", 0)
+            return "[vision] ただいま画像を見る目に空きがござりませぬ（雲=利用上限）。"
         return out
     except Exception as e:
         _cloud_ledger("claude_cli_vision", CLI_MODEL, prompt=full, response=f"[error] {e}",

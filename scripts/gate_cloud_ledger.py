@@ -39,9 +39,10 @@ def chk_true(name, cond):
 
 
 WANT = ["claude_cli_text", "claude_cli_vision", "anthropic_call",
-        "_cloud_ledger", "_turn_ctx_set", "_turn_ctx", "_llm_call_turn_reset", "_turn_memo"]
+        "_cloud_ledger", "_turn_ctx_set", "_turn_ctx", "_llm_call_turn_reset", "_turn_memo",
+        "_cli_exhausted"]
 WANT_ASSIGN = ["_LLM_CALL_LOCAL", "_TURN_SEQ", "CLAUDE_BIN", "CLI_MODEL", "CLI_CWD",
-               "ANTHROPIC_URL", "ANTHROPIC_KEY", "ANTHROPIC_MODEL"]
+               "ANTHROPIC_URL", "ANTHROPIC_KEY", "ANTHROPIC_MODEL", "_CLI_EXHAUSTED_RE"]
 tree = ast.parse(open(SRC, encoding="utf-8").read())
 picked, seen = [], set()
 for node in tree.body:
@@ -61,7 +62,7 @@ _ORIG_LEDGER = casper_cloud_ledger.LEDGER
 casper_cloud_ledger.LEDGER = os.path.join(_TMP, "ledger.jsonl")
 
 M = {}
-exec("import os, json, time, shutil, subprocess, threading, urllib.request", M)
+exec("import os, re, json, time, shutil, subprocess, threading, urllib.request", M)
 M["casper_cloud_ledger"] = casper_cloud_ledger
 exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
 
@@ -119,6 +120,30 @@ rows = _rows()
 chk("③ 失敗時も帳簿に残る(『出たのに帳簿に無い』を作らぬ)", len(rows), 1)
 chk("③ 失敗はoutcome=errorとして別出口で名乗る", rows[0]["outcome"], "error")
 chk_true("③ 失敗時も送出本文は残る", "社外へは出ている" in rows[0]["prompt"])
+
+# ── ⑦ 雲が「枯れた」回を ok と刻まぬ(2026-08-25 実害の回帰) ─────────────────
+# 実害: CLIは終了コード0で "You've hit your weekly limit" と喋る。stdoutが在るゆえ
+# 旧実装は outcome="ok" と刻み、その英文が社員2名の回答欄にそのまま出た。
+_reset_ledger()
+_seat = {"called": 0}
+M["_local_or_silence"] = lambda prompt, cloud_said="": (_seat.__setitem__("called", _seat["called"] + 1)
+                                                       or "二段目の答え")
+M["subprocess"].run = lambda *a, **k: _R("You've hit your weekly limit \u00b7 resets 2am (Asia/Tokyo)")
+_out = M["claude_cli_text"]("この問いは雲が枯れている時に投げられた")
+rows = _rows()
+chk("⑦ 枯れた回は ok ではなく exhausted と名乗る", rows[0]["outcome"], "exhausted")
+chk("⑦ 枯れたら二段目(Qwen/沈黙)へ渡す", _seat["called"], 1)
+chk_true("⑦ 雲の生エラー文字列を回答として返さぬ", "weekly limit" not in _out)
+
+# 誤爆せぬこと: 本文中に limit の語が出る**正しい回答**を握り潰さぬ
+_reset_ledger()
+_seat["called"] = 0
+_long = ("ご質問の件、レンダーファームの同時実行数には limit がござる。" * 12)
+M["subprocess"].run = lambda *a, **k: _R(_long)
+_out2 = M["claude_cli_text"]("同時実行数の上限は？")
+chk("⑦ 長い正答は ok のまま(誤爆せぬ)", _rows()[0]["outcome"], "ok")
+chk("⑦ 長い正答は二段目へ落とさぬ", _seat["called"], 0)
+chk_true("⑦ 長い正答はそのまま返る", "レンダーファーム" in _out2)
 
 # ── ① claude_cli_vision: 画像の素性(パス/バイト/sha)が残る ──────────────────
 _reset_ledger()
