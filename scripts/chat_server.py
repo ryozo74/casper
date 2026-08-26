@@ -2139,7 +2139,21 @@ _COMPLETION_READ_EXCL_RE = re.compile(r"(読み|閲覧し|検索し|見つけ|�
 _COMPLETION_UNDONE_EXCL_RE = re.compile(r"まだ.{0,4}(送って|実行して)おりませぬ|下書き|承認カード|ボタンを押すと")
 
 
+# 【殿御下命2026-08-26】保存/送信の語彙表に「既にある物を書き換える」動詞が一つも無かった。
+# 実害(18:24:57): kiyotomo殿が Aurora 資料から一行消すよう頼み、Casperは二分前に
+# 「編集機能を持っていません」と正直に答えていながら、直後に
+#   「SORAFUNE様とのMTG議事録から、指定された記述を削除しました。」
+# と断じた。カードは無く、何も起きていない。同じ機構が二分で揺れたのは、
+# 保存系は語彙表に載り、編集系は載っていなかったゆえである。
+# ★『資料/議事録/ノート』を『削除/編集/更新/追記』することは、チャットの中では原理的に成し得ぬ
+#   ——必ず保存された実体を触る行為ゆえ、カード無き完了主張は例外なく嘘である。
+#   汎用動詞(作成/表示)と違い在庫の言い訳が立たぬゆえ、Aurora語が無くとも文書語で発火させる。
+_COMPLETION_VERB_MUTATE_RE = r"(削除|消去|消し|編集|修正|更新|追記|差し替え|差替|置き換え|置換|上書き|復元)"
+# 保存された実体を指す語。これらに対する書き換え主張は、チャット内の作文では説明がつかぬ。
+_COMPLETION_DOC_NOUN_RE = re.compile(r"(資料|議事録|ノート|ドキュメント|文書|ページ|記事|note|doc)", re.I)
+
 _COMPLETION_COMM_RE = re.compile(_COMPLETION_VERB_COMM_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
+_COMPLETION_MUTATE_RE = re.compile(_COMPLETION_VERB_MUTATE_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
 _COMPLETION_AURORA_ONLY_RE = re.compile(_COMPLETION_VERB_AURORA_ONLY_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
 _COMPLETION_GENERIC_RE = re.compile(_COMPLETION_VERB_GENERIC_RE + _COMPLETION_GAP_RE + _COMPLETION_TAIL_RE)
 
@@ -2161,6 +2175,11 @@ def _completion_claim_line_hit(ln):
     if _COMPLETION_AURORA_ONLY_RE.search(ln):
         return True, True
     if _COMPLETION_GENERIC_RE.search(ln) and _AURORA_WORD_RE.search(ln):
+        return True, True
+    # 書き換え動詞は Aurora語 **または** 文書語(資料/議事録/ノート等)で発火する。
+    # 「重複行を削除しました」のような表の整形は文書語を伴わぬゆえ巻き込まぬ(実測で確認)。
+    if _COMPLETION_MUTATE_RE.search(ln) and (_AURORA_WORD_RE.search(ln)
+                                             or _COMPLETION_DOC_NOUN_RE.search(ln)):
         return True, True
     return False, False
 
@@ -10502,6 +10521,11 @@ class H(BaseHTTPRequestHandler):
             ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
             ans = _validate_assets(ans)                           # 出口検問: 捏造/asset URLを除去
             ans = _guard_unrostered_person_claim(ans)             # 出口検問(AC2・cmd_508): claude_cli経路でも同一機構を通す
+            # 【殿御下命2026-08-26】★この分岐には道具が一つも無い——pending_actions も casper_outbox も
+            # 結線されておらず、Aurora保存・DM送信・起票はいずれも起こり得ぬ。にも関わらず完了検問だけが
+            # 抜けており、雲に座る間は「保存しました」と言い切っても誰も止めなかった。
+            # 雲では**必ず**カード0件ゆえ、完了主張は例外なく嘘である。[]を渡して fail-closed に倒す。
+            ans = _guard_completion_claims(ans, [])
             if _web_query:                                        # cmd_501: WebSearchを許可したturnのみ札付け出口検問
                 ans = casper_web.grounding_gate(ans, {"ok": True, "urls": casper_web._URL_RE.findall(raw or "")})
             ans, diagram = render_diagram(ans)

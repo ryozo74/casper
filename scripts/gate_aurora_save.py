@@ -38,6 +38,10 @@ WANT = ["_AURORA_SAVE_REQ_RE", "_AURORA_READ_RE", "_wants_aurora_save",
         "_COMPLETION_VERB_COMM_RE", "_COMPLETION_VERB_AURORA_ONLY_RE", "_COMPLETION_VERB_GENERIC_RE",
         "_COMPLETION_TAIL_RE", "_COMPLETION_READ_EXCL_RE", "_COMPLETION_UNDONE_EXCL_RE",
         "_COMPLETION_COMM_RE", "_COMPLETION_AURORA_ONLY_RE", "_COMPLETION_GENERIC_RE",
+        "_COMPLETION_VERB_MUTATE_RE", "_COMPLETION_MUTATE_RE", "_COMPLETION_DOC_NOUN_RE",
+        "_DECLINE_LOG",   # 2026-08-26: 本ゲートは以前から NameError で落ちていた(=何も守れていなかった)
+        # ↑2026-08-26: 資料/議事録の削除・編集・更新を「した」と偽る主張の検問
+
         "_completion_claim_line_hit", "_COMPLETION_GAP_RE",
         "_AURORA_EDIT_READ_VERB_RE", "_AURORA_IMMEDIATE_TAIL_VERB_BOUNDARY_NEG",
         "_AURORA_CLAUSE_SPLIT_RE", "_aurora_edit_read_verb_same_clause", "_aurora_read_verb_same_clause",
