@@ -411,6 +411,85 @@ def aurora_doc_ref(text):
             "title": d.get("title") or "", "deleted": bool(d.get("deleted"))}
 
 
+_DOC_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _aurora_plain(html):
+    r"""Aurora のノートHTMLから**本文だけ**を取り出す。
+
+    【殿御下命2026-08-27】実地試験で当方の検問が偽警報を出した——正しい追記に対し
+    「1941字 → 492字（約75%減）」と警告した。真因は `make_note` が埋める `<style>` の
+    中身(CSS 1,482字)を、タグ除去だけでは落とせず**本文として数えていた**こと
+    (実測: html 2796字 / タグ除去 1941字 / style除去 459字)。
+    ★偽警報は警報より質が悪い。人は鳴り続ける鐘を無視するようになる。
+    ★測る側を一箇所に畳む(縮み検問と乖離検問が別々に数えれば、また食い違う)。
+    """
+    t = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", str(html or ""))
+    t = re.sub(r"<[^>]+>", "\n", t)
+    t = re.sub(r"(?m)^\s*@import[^\n]*$", "", t)          # style の外に漏れた @import も落とす
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def aurora_valid_doc_id(v):
+    """Aurora の doc_id はUUID。slug や題を doc_id と称する値を通さぬ。
+
+    【殿御下命2026-08-27】実害(14:21/14:25): モデルが doc_id に **slug** を書いた
+    (`kiyotomo/2026-08-27/sorafune-sama-mtg-gijiroku`)。機構は URL から本物の doc_id を
+    引けていたにも関わらず、埋め込みが `not args.get("doc_id")` の条件付きであったため
+    **モデルの偽物が機構の本物を押しのけた**。識別子は生成させぬ——生成された物は弾く。
+    """
+    return bool(_DOC_ID_RE.match(str(v or "").strip()))
+
+
+def aurora_body_drift_note(doc_id, new_body):
+    r"""版差し替えの本文が、現本文と**別物**になっていないか。
+
+    【殿御下命2026-08-27】実害(14:21:47/14:25:20): 「BOKAN 担当事項に一行足して」と頼まれた
+    aurora_append の body が、**実在せぬ議事録の丸ごと書き起こし**であった
+    (実在せぬ参加者「武井/rui」、実在せぬ節「フェーズ1(レイアウト/アニメーション)」)。
+    承認されておれば本物の資料が捏造で置き換わっていた。
+
+    ★字数の増減では捕まらぬ(捏造は同じくらいの長さで来る)。**現本文の見出しがどれだけ
+      生き残っているか**を測る。追記なら見出しはそのまま残る。書き起こしなら消える。
+    ★止めはせぬ——章立てごと作り直す正当な差し替えも在る。だが**黙っては通さぬ**。
+    戻り値: 注記(str) / 問題なし・照会できぬ時は ""。
+    """
+    if not doc_id or not new_body:
+        return ""
+    try:
+        import casper_aurora as _au
+        cur = _au.get(doc_id)
+    except Exception:
+        return ""
+    if not cur:
+        return ""
+    try:
+        d = json.loads(cur) if isinstance(cur, str) else cur
+    except Exception:
+        d = {}
+    html = (d.get("html") or d.get("body") or d.get("content") or "") if isinstance(d, dict) else ""
+    text = _aurora_plain(html)                  # ★縮み検問と同じ物差し(別々に数えれば食い違う)
+    heads = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        # 見出しらしき行(番号付き/#/太字見出し)を骨格として拾う
+        if re.match(r"^(#{1,6}\s+\S|[0-9０-９]+\s*[.．、)）]\s*\S|\*\*[^*]{2,40}\*\*\s*$)", ln):
+            heads.append(re.sub(r"^[#*\s]+|[*\s]+$", "", ln)[:40])
+    heads = [h for h in dict.fromkeys(heads) if len(h) >= 3][:12]
+    if len(heads) < 2:
+        return ""                                    # 骨格が読めぬ資料では判じぬ(推測で騒がぬ)
+    nb = str(new_body)
+    kept = [h for h in heads if h in nb]
+    if len(kept) >= max(2, int(len(heads) * 0.5)):
+        return ""                                    # 骨格の半分以上が残っている=追記/部分修正
+    lost = [h for h in heads if h not in kept][:5]
+    return (f"\n🚨 **現本文の見出し {len(heads)}件のうち {len(heads) - len(kept)}件が"
+            f"新しい本文に見当たりませぬ**（消える見出し: {' / '.join(lost)}）。\n"
+            "Aurora の版差し替えは中身を丸ごと入れ替えまする。"
+            "**追記のつもりであれば、これは資料の作り直しになっており申す**——"
+            "本文をよくお確かめの上で承認くだされ。")
+
+
 def aurora_shrink_note(doc_id, new_body):
     r"""既存ノートの差し替えで**本文が大きく減る**時、それを承認カードの表に立てる。
 
@@ -436,7 +515,7 @@ def aurora_shrink_note(doc_id, new_body):
     html = ""
     if isinstance(d, dict):
         html = d.get("html") or d.get("body") or d.get("content") or ""
-    old_len = len(re.sub(r"<[^>]+>", "", str(html)))
+    old_len = len(_aurora_plain(html))          # ★style/script を落として数える(偽警報の是正)
     new_len = len(str(new_body))
     if old_len <= 0 or new_len >= old_len * 0.6:
         return ""
@@ -842,6 +921,51 @@ def _aurora_save_unknown_choices():
                 {"label": "Auroraへ保存する", "say": "Auroraに保存して"},
                 {"label": "保存は不要(このまま続ける)", "say": "保存は不要"},
             ]}
+
+
+_AURORA_EDIT_INTENT_RE = re.compile(
+    r"(追加|追記|足し|加え|修正|直し|直す|変更|書き換え|置き換え|消し|消して|削除|更新|差し替え)")
+# モデルが道具を呼ばず、本文を地の文へ書いてしまった時の取り出し口。
+_AURORA_BODY_KW_RE = re.compile(r'body\s*=\s*("""|\'\'\'|"|\')(.+?)\1', re.S)
+
+
+def aurora_append_salvage(final, pin, query):
+    r"""【殿御下命2026-08-27】錨が生きておるのに道具が呼ばれなんだ turn を救う。
+
+    実害(2026-08-27 15:14:34・実地試験で再現): 錨の手当により doc_id も現本文も正しく
+    渡っていたにも関わらず、qwen は `aurora_append` を**呼ばず地の文へ書いた**
+      (doc_id= と body= を Python の代入の形で地の文へ書いた)。カードは0件、殿へ返ったのは
+    「うまくお答えできませなんだ」の一行のみ。**材料は揃っていたのに届かなかった。**
+
+    ★既存の salvage は `aurora_create` しか作らず、しかも発火条件が `_wants_aurora_save(query)`
+      ——「BOKAN 担当事項のところに以下追加」には Aurora語が無いゆえ、そもそも通らぬ。
+      **修正の救済路が一本も無かった。**
+    ★弱いモデルに『道具を正しく呼べ』と求め続けるのでなく、**呼ばなんだ時に機構が拾う**。
+
+    戻り値: 差し替え本文(str) / 救えぬ時は None
+    """
+    if not pin or not pin.get("doc_id") or not (final or "").strip():
+        return None
+    if not _AURORA_EDIT_INTENT_RE.search(query or ""):
+        return None                                  # 修正の意図が無い turn では拾わぬ
+    m = _AURORA_BODY_KW_RE.search(final)
+    cand = (m.group(2) if m else final).strip()
+    if len(cand) < 40:
+        return None
+    # ★拾った物が「その資料」であることを確かめる。地の文の雑談を本文に据えて
+    #   資料を吹き飛ばさぬための関——現本文の見出しが半分以上生きている物だけを通す。
+    mat = pin.get("material") or ""
+    heads = [h for h in
+             (re.sub(r"^[#*\s]+|[*\s]+$", "", ln.strip())[:40] for ln in mat.splitlines()
+              if re.match(r"^\s*(#{1,6}\s+\S|[0-9０-９]+\s*[.．、)）]\s*\S)", ln))
+             if len(h) >= 3]
+    heads = list(dict.fromkeys(heads))[:12]
+    if len(heads) < 2:
+        return None                                  # 骨格が読めぬ資料では救わぬ(推測で書き換えぬ)
+    kept = [h for h in heads if h in cand]
+    if len(kept) < max(2, int(len(heads) * 0.5)):
+        return None
+    return cand[:20000]
 
 
 def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=None, table_md="", choices_obj=None):
@@ -8309,7 +8433,83 @@ _AURORA_URL_RE = re.compile(r"https?://[^\s、。]+?/doc/[^\s、。]+", re.I)
 _AURORA_URL_MEMO = {}                                     # url -> material(取得成功のみ記憶・失敗は都度やり直す)
 
 
-def aurora_url_digest(query):
+# ── 資料の錨(pin): 一度名指された資料を turn を跨いで保つ ─────────────────
+# 【殿御下命2026-08-27】実害(2026-08-27 14:18〜15:04): kiyotomo殿が資料URLを貼り
+# 「変更したい」→「追加」→「BOKAN 担当事項のところに以下追加」と**三turnかけて**頼まれた。
+# ★URLを貼った turn は本文が入る(ctx_len 6922)。だが次の turn では消える(ctx_len 2909)。
+#   `aurora_url_digest` は**その発話にURLが在る時しか発火せぬ**からである。
+#   本文を失ったモデルは、記憶から議事録を**一から捏造**して「修正後の全文」に据えた
+#   (実測: 実在せぬ参加者「武井/rui」、実在せぬ節「フェーズ1(レイアウト/アニメーション)」)。
+#   承認されておれば、**本物の資料が捏造で丸ごと上書きされていた**。
+# ★資料の修正は必ず複数 turn にまたがる(貼る→何を直すか→書け)。
+#   1 turn しか生きぬ紐付けは、修正という仕事に対して構造的に短すぎる。
+_AURORA_PIN = {}                       # key -> {doc_id,title,slug,material,ts}
+_AURORA_PIN_TTL = int(os.environ.get("CASPER_AURORA_PIN_TTL", "1800"))   # 30分
+# 錨を外す意図(別の資料・新規作成へ移る)。★人が明示した時だけ外す。
+_AURORA_PIN_RELEASE_RE = re.compile(r"(新規|新しく|新しい|別の資料|別の文書|違う資料|もう[1一]つ|new doc)")
+
+
+def aurora_pin_key(thread, who):
+    """錨の鍵。thread が在ればそれ、無ければ session。
+    ★thread だけを鍵にすると、thread を持たぬ経路で錨が一切効かぬ(実測: 8/26 のカードは
+      thread=None であった)。session へ落として必ず鍵が立つようにする。"""
+    t = str(thread or "").strip()
+    if t and t.lower() != "none":
+        return "th:" + t
+    return "sid:" + str((who or {}).get("sid") or "")
+
+
+def aurora_pin_set(key, ref, material=""):
+    if not key or not ref or not ref.get("doc_id"):
+        return
+    _AURORA_PIN[key] = {"doc_id": ref["doc_id"], "title": ref.get("title", ""),
+                        "slug": ref.get("ref", ""), "material": material or "",
+                        "ts": time.time()}
+    if len(_AURORA_PIN) > 200:                       # 際限なく溜めぬ(古い順に落とす)
+        for k in sorted(_AURORA_PIN, key=lambda x: _AURORA_PIN[x]["ts"])[:100]:
+            _AURORA_PIN.pop(k, None)
+
+
+def aurora_pin_get(key):
+    """生きている錨を返す。期限切れは畳んで None(『無い』と『古い』を混ぜぬ)。"""
+    p = _AURORA_PIN.get(key)
+    if not p:
+        return None
+    if time.time() - p.get("ts", 0) > _AURORA_PIN_TTL:
+        _AURORA_PIN.pop(key, None)
+        return None
+    return p
+
+
+def aurora_pinned_digest(key, query):
+    """発話にURLが無くとも、錨が生きておればその資料を注入する。
+
+    ★これが無いと『貼る→追加→書け』の二手目以降で本文が消え、モデルが記憶から作文する。
+    ★『新規/別の資料』と人が明示した時は錨を外す——勝手に前の資料へ吸い寄せぬ。
+    """
+    if _AURORA_URL_RE.search(query or ""):
+        return ""                                    # URLが在る turn は本家(aurora_url_digest)が出す
+    if _AURORA_PIN_RELEASE_RE.search(query or ""):
+        _AURORA_PIN.pop(key, None)
+        return ""
+    p = aurora_pin_get(key)
+    if not p:
+        return ""
+    out = ("\n\n## 【いま扱っている Aurora 資料(機構が保持・これが一次資料)】\n"
+           f"doc_id: {p['doc_id']}\n題: {p.get('title') or '(無題)'}\n")
+    if p.get("material"):
+        out += p["material"] + "\n"
+        out += ("**上が現在の全文である。**修正を頼まれたら、この全文を土台に直した"
+                "**全文**を body に入れて aurora_append を呼べ(doc_id は上の値)。\n"
+                "★**記憶から議事録を書き起こすな。** 上に無い参加者・節・決定事項を足せば、"
+                "承認された瞬間に本物の資料がその捏造で丸ごと置き換わる。\n")
+    else:
+        out += ("**本文は取得できておらぬ。**中身を語るな。修正が要るなら本文を取り直せ。\n")
+    out += "★呼んでも承認カードが出るだけで、押されるまでは書き込まれておらぬ。完了を断ずるな。\n"
+    return out
+
+
+def aurora_url_digest(query, pin_key=None):
     """【貼られた資料は機構が取りに行く】殿が Aurora の資料URLを貼ったなら、その本文を注入する。
     qwen の tool 選択(aurora_get)に委ねると、URLを渡されても読まずに周辺を作文する——実測
     2026-07-27 19:04: 19ステータス定義の資料URLを渡されたのに Score のタスク一覧を並べ、次には
@@ -8320,6 +8520,14 @@ def aurora_url_digest(query):
         return ""
     u = m.group(0).rstrip("　 ")
     if u in _AURORA_URL_MEMO:
+        # ★memoで早戻りする時も錨は張り直す(memoは本文の再取得を省くためのもので、
+        #   錨を張らぬ理由にはならぬ。ここを飛ばすと二度目のURL貼付で錨が立たぬ)。
+        try:
+            _r2 = aurora_doc_ref(u)
+            if _r2 and _r2.get("found"):
+                aurora_pin_set(pin_key, _r2, material=_AURORA_URL_MEMO[u])
+        except Exception:
+            pass
         return _AURORA_URL_MEMO[u]
     try:
         r = seiri_aurora_fetch(u)
@@ -8343,6 +8551,8 @@ def aurora_url_digest(query):
     # ★『読める』と『直せる』を別々に渡すと、片方だけ見て機構が揺れる。鍵は資料と同じ便で渡す。
     _ref = aurora_doc_ref(u)
     if _ref and _ref.get("found") and _ref.get("doc_id"):
+        # ★錨を据える。これが無いと次の turn で本文も doc_id も消え、モデルが作文する。
+        aurora_pin_set(pin_key, _ref, material=r.get("material") or "")
         out += (f"\n\n### この資料は直せる(doc_id={_ref['doc_id']})\n"
                 "修正を頼まれたら **aurora_append** を呼べ(doc_id は上の値をそのまま使う)。"
                 "**『編集機能が無い/できない』とは言うな——道具は在る。**\n"
@@ -10591,7 +10801,18 @@ class H(BaseHTTPRequestHandler):
                     if pend["tool"] == "aurora_create":
                         result = casper_aurora.create(a.get("title", ""), html, author_id=uname, tags=a.get("tags"))
                     else:                                  # aurora_append = 既存ノートの修正(新版)
-                        result = casper_aurora.append_version(a.get("doc_id", ""), html, author_id=uname)
+                        # ★最後の関: doc_id がUUIDでなければ叩かぬ。実害(2026-08-27)では slug が
+                        #   doc_id として入っており、そのまま投げれば「直したつもりが直っておらぬ」か、
+                        #   最悪よその資料を触る。**新規作成へ倒して逃げもせぬ**——黙って別の物を作れば
+                        #   『追記したのに新しい資料が出来た』が起きる(まさに殿が踏まれた症状)。
+                        _did = a.get("doc_id", "")
+                        if not aurora_valid_doc_id(_did):
+                            result = (f"(doc_id が不正: {str(_did)[:60]!r}。Aurora の doc_id は UUID にござる。"
+                                      "資料のURLを添えてもう一度お申し付けくだされ——機構が台帳から引き直しまする。"
+                                      "★勝手に新規作成へ倒すことはいたしませぬ)")
+                            ok = False
+                            raise RuntimeError(result)
+                        result = casper_aurora.append_version(_did, html, author_id=uname)
                     ok = bool(result) and not str(result).startswith("(")
                     if ok and pend.get("thread"):          # 1スレ1資料: 作成/更新した資料をスレッドに束ねる
                         try:
@@ -10873,7 +11094,10 @@ class H(BaseHTTPRequestHandler):
         _gate = casper_person_gate.resolve(who.get("uid"), ll_user, convo=msgs) if casper_person_gate else {}
         if _gate.get("digest"):                          # 理解ゲート: その人の既定ファセット/別名を前提として注入(入力の接地)
             sysadd += _gate["digest"]
-        _au_note = aurora_url_digest(ll_user)            # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
+        _pin_key = aurora_pin_key(thr, who)              # 資料の錨(turnを跨ぐ)
+        _au_note = aurora_url_digest(ll_user, pin_key=_pin_key)   # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
+        if not _au_note:                                 # URLが無いturn→錨が生きておればそれを注入
+            _au_note = aurora_pinned_digest(_pin_key, ll_user)
         sysadd += _au_note
         _au_resolved = "これが一次資料" in _au_note        # cmd_493: 一次資料が確定した turn か(取得失敗時は False=vault併用を妨げぬ)
         sysadd += deixis_table_digest(ll_user, msgs)      # 『この表』→直前の自分の応答の表を機構が名指して渡す
@@ -11332,18 +11556,32 @@ class H(BaseHTTPRequestHandler):
                                 _ref = aurora_doc_ref(ll_user or "")
                                 if _ref and _ref.get("found") and _ref.get("doc_id"):
                                     cur = {"doc_id": _ref["doc_id"], "title": _ref.get("title", "")}
+                                else:
+                                    # 【殿御下命2026-08-27】発話にURLが無い turn でも、錨が生きておれば其れを使う。
+                                    # 実害: 「貼る→追加→書け」の二手目以降で資料を見失い、モデルが作文した。
+                                    _pn = aurora_pin_get(aurora_pin_key(thr, who))
+                                    if _pn:
+                                        cur = {"doc_id": _pn["doc_id"], "title": _pn.get("title", "")}
                                 new_intent = bool(re.search(r"新規|新しく|新しい|別の|別に|もう[1一]つ|new doc", ll_user or ""))
                                 if _ref and _ref.get("found"):
                                     new_intent = False     # 既存を名指ししている以上、新規ではない
                                 efn = fn
                                 if fn == "aurora_create" and cur and not new_intent:   # 既存資料あり&新規指定なし→同じ資料へ追記
                                     efn = "aurora_append"; args = {"doc_id": cur["doc_id"], "body": args.get("body", "")}
-                                elif fn == "aurora_append" and not args.get("doc_id") and cur:
-                                    args["doc_id"] = cur["doc_id"]
+                                elif fn == "aurora_append":
+                                    # ★識別子はモデルに作らせぬ。UUIDでない値(slug/題)は棄て、機構の解決値で置く。
+                                    #   実害(14:21/14:25): モデルが doc_id に slug を書き、`not args.get("doc_id")`
+                                    #   の条件ゆえ機構の本物が押しのけられた。偽物が在る方が空より質が悪い。
+                                    if not aurora_valid_doc_id(args.get("doc_id")):
+                                        if cur:
+                                            args["doc_id"] = cur["doc_id"]
+                                        else:
+                                            args.pop("doc_id", None)
                                 summary = _action_summary(efn, args)
                                 if efn == "aurora_append":
-                                    # ★版差し替えは中身を丸ごと入れ替える。減る時は黙って通さず表に立てる。
+                                    # ★版差し替えは中身を丸ごと入れ替える。黙って通さず表に立てる。
                                     summary += aurora_shrink_note(args.get("doc_id", ""), args.get("body", ""))
+                                    summary += aurora_body_drift_note(args.get("doc_id", ""), args.get("body", ""))
                                 pid = _register_pending(efn, args, who.get("uid"), summary,
                                                         origin="user", query=str(ll_user)[:400], trace_id=_tid)
                                 PENDING_ACTIONS[pid]["thread"] = thr
@@ -11409,6 +11647,26 @@ class H(BaseHTTPRequestHandler):
         # _held_claims相当の文(「〇〇さんへ…送信しました\n> 本文」等)が確定文に差し替わった後の
         # finalしか見えず、salvageが宛先/本文を抽出できずカード成立の芽そのものを摘んでしまう
         # (AC14の「意志表明/完了断定いずれの文言でもカードが成立する」を構造的に阻害する)。
+        # 【殿御下命2026-08-27】道具が呼ばれなんだ修正turnを機構が拾う(既存salvageはcreate専用ゆえ)。
+        if not pending_actions:
+            try:
+                _pin2 = aurora_pin_get(aurora_pin_key(thr, who))
+                _sb = aurora_append_salvage(final, _pin2, str(ll_user))
+                if _sb:
+                    _aargs = {"doc_id": _pin2["doc_id"], "body": _sb}
+                    _asum = _action_summary("aurora_append", _aargs)
+                    _asum += aurora_shrink_note(_pin2["doc_id"], _sb)
+                    _asum += aurora_body_drift_note(_pin2["doc_id"], _sb)
+                    _apid = _register_pending("aurora_append", _aargs, who.get("uid"), _asum,
+                                              origin="user", query=str(ll_user)[:400], trace_id=_tid)
+                    if _apid:
+                        PENDING_ACTIONS[_apid]["thread"] = thr
+                        pending_actions.append({"id": _apid, "tool": "aurora_append",
+                                                "args": _aargs, "summary": _asum})
+                        final = ("修正版を下書きいたしました。**まだ書き込んでおりませぬ**——"
+                                 "下の承認カードで本文をお確かめの上、押していただければ Aurora に保存されまする。")
+            except Exception:
+                pass
         final, _au_choices = _salvage_text_toolcall(final, who, pending_actions, query=str(ll_user)[:400], trace_id=_tid,
                                        table_md=_dx_rows, choices_obj=choices_obj)   # qwenがツール未呼出でJSON文を書いた時の救済→承認カード
         if _au_choices and not choices_obj:      # ★既にchoices_objが埋まっている場合(下書き選択が先行)は既存を優先し、本カードは出さぬ(安全側)

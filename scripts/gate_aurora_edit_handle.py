@@ -46,7 +46,8 @@ def chk_true(name, cond):
     print(("✅" if cond else "❌") + f" {name}")
 
 
-WANT_F = ["aurora_doc_ref", "aurora_shrink_note"]
+WANT_F = ["aurora_doc_ref", "aurora_shrink_note",
+          "_aurora_plain"]   # 2026-08-27: 本文だけを数える単一の物差し
 WANT_A = ["_AURORA_DOC_URL_RE", "_AURORA_DOC_ID_RE"]
 
 REAL_URL = ("http://nina_notepc_02.local:8100/doc/kiyotomo/2026-08-26/"
@@ -146,8 +147,10 @@ chk("⑤ doc_id が無ければ黙る", M["aurora_shrink_note"]("", "短い"), "
 
 # ── ⑥ 経路への結線(承認ゲートで実際に使われている) ─────────────────────
 print("── ⑥ 結線 ──")
+# ★切り出し幅は「次の分岐まで」で決める。固定字数で切ると、後から一行足しただけで
+#   検査対象が窓から外れ、機構は在るのにゲートが赤くなる(2026-08-27 実測で踏んだ)。
 _route = SRC_TEXT[SRC_TEXT.index("# aurora_create / aurora_append = 書込 → 承認ゲート"):]
-_route = _route[:2000]
+_route = _route[:_route.index('elif fn == "calendar_lookup"')]
 chk_true("⑥ 承認ゲートで aurora_doc_ref を引いている", "aurora_doc_ref(ll_user" in _route)
 chk_true("⑥ 名指しがスレッド紐付けより優先される", '_ref.get("found")' in _route
          and 'cur = {"doc_id": _ref["doc_id"]' in _route)

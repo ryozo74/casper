@@ -25,7 +25,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "chat_server.py")
 WANT = ["_AURORA_URL_RE", "_AURORA_URL_MEMO", "aurora_url_digest", "seiri_aurora_fetch",
         # 2026-08-26: 本文と同じ便で「直せる」鍵(doc_id)も渡すようになった
-        "aurora_doc_ref", "_AURORA_DOC_URL_RE", "_AURORA_DOC_ID_RE"]
+        "aurora_doc_ref", "_AURORA_DOC_URL_RE", "_AURORA_DOC_ID_RE",
+        # 2026-08-27: 解決した資料を turn を跨いで保つ錨
+        "aurora_pin_set", "aurora_pin_get", "aurora_pin_key", "_AURORA_PIN",
+        "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE"]
 
 # cmd_495: 固有名は pack から受け取る(gate_pjname.pyと同じ流儀・cmd_491 AC3の趣旨を本ゲートにも適用)。
 _examples = pack_config.get("examples", {}) or {}
@@ -120,7 +123,8 @@ chk_true("AC2配線: vault注入のif条件に _au_resolved が含まれる(RAG�
          'if not (_status_q or _au_resolved):' in _src_text)
 # _au_note/_au_resolved の代入が、vaultブロック(_status_q定義)より前に位置すること
 # (後段で定義したのでは間に合わぬ・実行順序そのものの検査)。
-_au_note_pos = _src_text.index('_au_note = aurora_url_digest(ll_user)')
+# ★呼出の形(引数)は変わり得る。名で探して行順だけを検める(形に縛られぬ)。
+_au_note_pos = _src_text.index('_au_note = aurora_url_digest(ll_user')
 _vault_gate_pos = _src_text.index('if not (_status_q or _au_resolved):')
 chk_true("AC2配線: _au_note/_au_resolved の算出が vault ゲート判定より先に実行される(行順)",
          _au_note_pos < _vault_gate_pos)
