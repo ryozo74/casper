@@ -929,6 +929,115 @@ _AURORA_EDIT_INTENT_RE = re.compile(
 _AURORA_BODY_KW_RE = re.compile(r'body\s*=\s*("""|\'\'\'|"|\')(.+?)\1', re.S)
 
 
+_MATERIAL_WRAPPER_RE = re.compile(r"^\s*【Aurora資料:[^】]*】\s*\n?")
+_META_BLOCK_RE = re.compile(r'(?is)<div\s+class="meta">.*?</div>')
+_H1_RE = re.compile(r"(?is)<h1[^>]*>.*?</h1>")
+
+
+# 指示の中の「人が示した文言」。鉤括弧か『〜を追加/追記』の目的語。
+_INSTR_QUOTED_RE = re.compile(r"[「『\"']([^「」『』\"'\n]{2,120})[」』\"']")
+_INSTR_ADD_RE = re.compile(r"(?:に|へ)?\s*([^\n。、]{4,120}?)\s*(?:を|の)?\s*(?:追加|追記|足し|加え)")
+# 固有名らしき token(カタカナ列・英数語)。漢字は普通の語と紛れるゆえ採らぬ(誤検出を避ける)。
+_PROPER_TOKEN_RE = re.compile(r"[ァ-ヴー]{3,}|[A-Za-z][A-Za-z0-9_-]{2,}")
+_DECOR_META_RE = re.compile(r"^(著者|作成|タグ|Author|Created)\s*[:：]")
+_STRUCT_HEAD_RE = re.compile(r"^\s*(#{1,6}\s+\S|[0-9０-９]+\s*[.．、)）]\s*\S)")
+
+
+def _strip_material_wrapper(text, title=""):
+    """取得用の包み紙(【Aurora資料: 題】＋題行/著者行/タグ行)を落とす。
+
+    【Fable診断2026-08-27】seiri_aurora_fetch は material を
+    「【Aurora資料: 題】\\n{描画済みページのテキスト}」と組む。描画テキストには
+    ページの化粧(題・著者・タグ)が含まれる。これを『現在の全文』として渡し
+    「一字も変えるな」と命じ、出てきた物を本文として書き戻せば、
+    **一往復ごとに化粧が一層積もる**。実測: 2026-08-27 の本番カードの body 先頭が
+    「【Aurora資料: SORAFUNE 様 MTG 議事録】著者: kiyotomo」——包み紙が本文になる寸前だった。
+    利用者の『2重になってる』はこの累積である。
+    """
+    t = _MATERIAL_WRAPPER_RE.sub("", str(text or ""))
+    lines = t.split("\n")
+    ttl = re.sub(r"\s+", "", str(title or ""))
+    # ★『本文の始まり』を構造(見出し行)で見つけ、その手前が飾りだけなら丸ごと落とす。
+    #   飾り=空行 / 題と同一 / 著者・作成・タグ行 / 句点の無い短い行(タグ列)。
+    #   ここを緩くすると本物の前書きを消しかねぬゆえ、**句点を含む行や長い行が挟まれば落とさぬ**。
+    head_at, decor_only = None, True
+    for i, ln in enumerate(lines[:12]):
+        sline = ln.strip()
+        if not sline:
+            continue
+        # ★先頭の「# 題」は飾り。Aurora は <h1>題</h1> を別に描くゆえ、本文にも置けば二重になる。
+        if ttl and re.sub(r"\s+", "", re.sub(r"^#{1,6}\s*", "", sline)) == ttl:
+            continue
+        if _STRUCT_HEAD_RE.match(sline):
+            head_at = i
+            break
+        if (ttl and re.sub(r"\s+", "", sline) == ttl) or _DECOR_META_RE.match(sline) \
+                or (len(sline) < 60 and "。" not in sline):
+            continue                              # 飾りとみなす
+        decor_only = False
+        break
+    if head_at is not None and decor_only:
+        return "\n".join(lines[head_at:]).strip()
+    # 見出しが見つからぬ資料では、従来どおり先頭の明白な飾り行だけを落とす(控えめに)
+    drop = 0
+    for ln in lines[:6]:
+        sline = ln.strip()
+        if not sline:
+            drop += 1; continue
+        if _DECOR_META_RE.match(sline) or (ttl and re.sub(r"\s+", "", sline) == ttl):
+            drop += 1; continue
+        break
+    return "\n".join(lines[drop:]).strip()
+
+
+def aurora_canonical_body(doc_id):
+    """Aurora の**正本の本文だけ**を取り直す。返り: (本文, version) / 失敗は (None, None)。
+
+    ★compose の材料は錨に持った描画テキストでなく、その場で doc_id から取り直した正本にする。
+      理由は二つ:
+      ① 描画テキストは化粧つき(上記 _strip_material_wrapper の害)
+      ② 30分前の錨の本文で全文置換すれば、その間に他者が編集していた分を**黙って巻き戻す**
+         (lost update)。取り直せば少なくとも取得時点の正本に乗る。
+    ★note_html の造りは <h1>題</h1><div class="meta">著者…</div>{本文} ゆえ、
+      meta ブロックまでを切り落とせば本文が残る(決定的に切れる)。
+    """
+    if not doc_id:
+        return None, None
+    import html as _htmlmod                        # ★module級には無い(seiri_aurora_fetch内と同じ作法)
+    try:
+        import casper_aurora as _au
+        raw = _au.get(doc_id)
+    except Exception:
+        return None, None
+    if not raw:
+        return None, None
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None, None
+    if not isinstance(d, dict):
+        return None, None
+    doc = d.get("document") or d.get("doc") or d
+    ver = doc.get("version")
+    html = doc.get("html") or doc.get("body") or doc.get("content") or ""
+    if not html:
+        return None, ver
+    body = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", str(html))
+    m = _META_BLOCK_RE.search(body)
+    if m:
+        body = body[m.end():]                     # 化粧(題+meta)より後ろが本文
+    else:
+        m2 = _H1_RE.search(body)
+        if m2:
+            body = body[m2.end():]
+    body = re.sub(r"<br\s*/?>", "\n", body)
+    body = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|table|ul|ol)>", "\n", body)
+    body = _htmlmod.unescape(re.sub(r"<[^>]+>", "", body))
+    body = _strip_material_wrapper(body, title=doc.get("title") or "")
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    return (body or None), ver
+
+
 def aurora_edit_compose(pin, instruction):
     r"""資料の修正を**機構が直接こしらえる**（モデルの道具呼びに頼らぬ）。
 
@@ -943,9 +1052,15 @@ def aurora_edit_compose(pin, instruction):
 
     戻り値: 修正後の全文(str) / こしらえられぬ時は None(fail-closed=起票せぬ)
     """
-    mat = (pin or {}).get("material") or ""
-    if not mat.strip() or not (instruction or "").strip():
-        return None
+    if not (instruction or "").strip():
+        return None, "指示が空にござる"
+    # ★材料は錨の描画テキストでなく、その場で正本を取り直す(化粧の累積と lost update を断つ)。
+    mat, _ver = aurora_canonical_body((pin or {}).get("doc_id"))
+    if not mat:
+        mat = _strip_material_wrapper((pin or {}).get("material") or "",
+                                      title=(pin or {}).get("title") or "")   # 取り直せぬ時のみ錨で凌ぐ
+    if not mat.strip():
+        return None, "資料の本文を取り直せませなんだ(Auroraへ届いておりませぬ)"
     prompt = (
         "以下は社内の共有資料の『現在の全文』である。\n"
         "----- 現在の全文 ここから -----\n" + mat[:12000] + "\n----- 現在の全文 ここまで -----\n\n"
@@ -962,11 +1077,12 @@ def aurora_edit_compose(pin, instruction):
             r = ollama_chat([{"role": "user", "content": prompt}], num_predict=3000)
             out = strip_think(((r or {}).get("message") or {}).get("content") or "")
     except Exception:
-        return None
+        return None, "推論機が答えませなんだ"
     out = re.sub(r"^\s*```[a-zA-Z]*\s*|\s*```\s*$", "", (out or "").strip())
     out = re.sub(r"^\s*(以下|修正後|承知|かしこまり)[^\n]{0,40}\n+", "", out)
+    out = _strip_material_wrapper(out, title=(pin or {}).get("title") or "")
     if len(out) < 40:
-        return None
+        return None, "こしらえた本文が短すぎまする(推論機が答え切っておりませぬ)"
     # ★こしらえた物が『その資料』であることを確かめてから起票する。
     #   骨格が半分も残っておらねば、それは修正でなく作り直し=捏造の疑い(fail-closed)。
     heads = [h for h in
@@ -977,10 +1093,45 @@ def aurora_edit_compose(pin, instruction):
     if len(heads) >= 2:
         kept = [h for h in heads if h in out]
         if len(kept) < max(2, int(len(heads) * 0.5)):
-            return None
+            lost = [h for h in heads if h not in kept][:4]
+            return None, ("元の見出しが大きく失われまする(消える見出し: "
+                          + " / ".join(lost) + ")。修正でなく作り直しになっており申す")
     if len(out) < len(mat) * 0.4:            # 極端に痩せた=指示に無い部分まで落ちている
-        return None
-    return out[:20000]
+        return None, (f"本文が {len(mat)}字 → {len(out)}字 に痩せまする。"
+                      "指示に無い所まで落ちておらぬか確かめが要り申す")
+    # 【Fable診断2026-08-27】見出しの生存だけでは破られる型が二つある。実測一件あり。
+    # ★① 節内の言い換え: 承認済みv2で、殿の「UE＋コンソールデータを提供」が
+    #    「UE＋コンソール: SORAFUNE様に提供。」へ**無断で書き換えられた**。見出しは全生存ゆえ検問は通った。
+    #    人が示した文言は逐語で残らねばならぬ——直された事に気づけぬ書き換えが最も質が悪い。
+    # ★逐語検問は**人が鉤括弧で括った時だけ**に絞る。地の文から「足す語」を切り出す試みは
+    #   場所の指定まで巻き込み(実測:「2. BOKAN 担当事項にUE＋コンソールを…」を丸ごと拾った)、
+    #   正当な修正を弾いた。**正しい修正を止める検問は、無いより悪い。**
+    _q = _INSTR_QUOTED_RE.findall(instruction or "")
+    _lit = [x.strip() for x in _q if 4 <= len(x.strip()) <= 120]
+    for _x in _lit:
+        if _x not in out:
+            return None, (f"仰せの文言「{_x[:40]}」が、こしらえた本文に其のまま入っておりませぬ"
+                          "(言い換えられた恐れがござる)")
+    # ★② 見出しを温存したまま中身を作文する型。元にも指示にも無い固有名が新たに現れたら止める
+    #    (実測の捏造「rui」「フェーズ1」はこれで落ちる)。
+    # ★題も既知語である(正本の本文からは飾りとして落としてあるゆえ、明示的に足さねば
+    #   題の語が『新出』に見える。実測でこれを踏み「SORAFUNE / MTG」を捏造と誤断した)。
+    _known = (mat or "") + " " + (instruction or "") + " " + str((pin or {}).get("title") or "")
+    _known_l = _known.lower()
+    _new = []
+    for _t in set(_PROPER_TOKEN_RE.findall(out)):
+        if len(_t) < 3 or _t in _known or _t.lower() in _known_l:
+            continue
+        # ★複合語の差(「コンソール」→「コンソールデータ」)を新出と数えぬ。
+        #   実測でこれを弾き、正当な追記を止めた。3文字でも重なれば同族とみなす。
+        if any(_t[i:i + 3].lower() in _known_l for i in range(len(_t) - 2)):
+            continue
+        _new.append(_t)
+    _new = _new[:5]
+    if _new:
+        return None, ("元の資料にも仰せにも無い語が新たに現れており申す("
+                      + " / ".join(_new) + ")。書き起こしになっておらぬか確かめが要り申す")
+    return out[:20000], ""
 
 
 def aurora_append_salvage(final, pin, query):
@@ -8517,7 +8668,10 @@ def aurora_pin_set(key, ref, material=""):
     if not key or not ref or not ref.get("doc_id"):
         return
     _AURORA_PIN[key] = {"doc_id": ref["doc_id"], "title": ref.get("title", ""),
-                        "slug": ref.get("ref", ""), "material": material or "",
+                        "slug": ref.get("ref", ""),
+                        # ★包み紙(【Aurora資料: 題】/著者行/タグ行)を落として持つ。
+                        #   これを本文として書き戻すと一往復ごとに化粧が積もる(実測)。
+                        "material": _strip_material_wrapper(material or "", title=ref.get("title") or ""),
                         "ts": time.time()}
     if len(_AURORA_PIN) > 200:                       # 際限なく溜めぬ(古い順に落とす)
         for k in sorted(_AURORA_PIN, key=lambda x: _AURORA_PIN[x]["ts"])[:100]:
@@ -11461,7 +11615,16 @@ class H(BaseHTTPRequestHandler):
                 _pe = aurora_pin_get(aurora_pin_key(thr, who))
                 if (_pe and _pe.get("material") and _AURORA_EDIT_INTENT_RE.search(ll_user or "")
                         and not _AURORA_PIN_RELEASE_RE.search(ll_user or "")):
-                    _eb = aurora_edit_compose(_pe, ll_user)
+                    _eb, _ereason = aurora_edit_compose(_pe, ll_user)
+                    if not _eb and _ereason:
+                        # ★弾いた時に黙らぬ。無言のNoneは通常生成へ落ち、
+                        #   「承認カードが表示されます」の約束ループを再演させる(実測46分)。
+                        routed = {"_surfaced": True,
+                                  "reply": ("修正版をこしらえてみましたが、**お出しできませなんだ**。\n\n"
+                                            f"理由: {_ereason}\n\n"
+                                            "★資料を壊さぬための足止めにござる。"
+                                            "直したい箇所をもう少し具体に（どの節の・どの一行を・どう）"
+                                            "お示しいただければ、今一度こしらえまする。")}
                     if _eb:
                         _eargs = {"doc_id": _pe["doc_id"], "body": _eb}
                         _esum = _action_summary("aurora_append", _eargs)

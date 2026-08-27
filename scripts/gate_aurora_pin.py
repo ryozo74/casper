@@ -76,9 +76,12 @@ class _Au:
 
 WANT_F = ["aurora_pin_key", "aurora_pin_set", "aurora_pin_get", "aurora_pinned_digest",
           "aurora_valid_doc_id", "aurora_body_drift_note", "aurora_shrink_note",
-          "aurora_append_salvage", "_aurora_plain", "aurora_edit_compose"]
+          "aurora_append_salvage", "_aurora_plain", "aurora_edit_compose",
+          "_strip_material_wrapper", "aurora_canonical_body"]
 WANT_A = ["_AURORA_PIN", "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE", "_AURORA_URL_RE",
-          "_DOC_ID_RE", "_AURORA_EDIT_INTENT_RE", "_AURORA_BODY_KW_RE"]
+          "_DOC_ID_RE", "_AURORA_EDIT_INTENT_RE", "_AURORA_BODY_KW_RE",
+          "_MATERIAL_WRAPPER_RE", "_META_BLOCK_RE", "_H1_RE", "_DECOR_META_RE",
+          "_STRUCT_HEAD_RE", "_INSTR_QUOTED_RE", "_INSTR_ADD_RE", "_PROPER_TOKEN_RE"]
 
 
 def build(src_text):
@@ -243,8 +246,9 @@ PIN2 = {"doc_id": REAL_ID, "title": "SORAFUNE 様 MTG 議事録", "material": CU
 INSTR = "2. BOKAN 担当事項にUE＋コンソールをsorafuneさんに提供を追加して"
 
 GEN["out"] = added
-got = M["aurora_edit_compose"](PIN2, INSTR)
+got, why = M["aurora_edit_compose"](PIN2, INSTR)
 chk("⑩ ★実害の指示から修正後の全文をこしらえる", bool(got))
+chk("⑩ 通った時は理由が空", why == "")
 chk("⑩ 現本文を材料として渡している", "現在の全文 ここから" in GEN.get("prompt", ""))
 chk("⑩ 指示も渡している", INSTR in GEN.get("prompt", ""))
 chk("⑩ 『記憶から補うな』と縛る", "記憶から補うな" in GEN.get("prompt", ""))
@@ -252,21 +256,24 @@ chk("⑩ 『前置き・後書きを書くな』と縛る", "前置き" in GEN.g
 
 GEN["out"] = "```markdown\n" + added + "\n```"
 chk("⑩ コードブロックの衣を剥ぐ",
-    (M["aurora_edit_compose"](PIN2, INSTR) or "").startswith("# SORAFUNE"))
+    (M["aurora_edit_compose"](PIN2, INSTR)[0] or "").lstrip().startswith("## 1. シナリオ"))
 GEN["out"] = "承知いたしました。以下が修正後の全文です。\n" + added
 chk("⑩ 前置きの一行を剥ぐ",
-    (M["aurora_edit_compose"](PIN2, INSTR) or "").startswith("# SORAFUNE"))
+    (M["aurora_edit_compose"](PIN2, INSTR)[0] or "").lstrip().startswith("## 1. シナリオ"))
+chk("⑩ ★先頭の「# 題」も落とす(Auroraは題を別に描くゆえ本文に置けば二重になる)",
+    "# SORAFUNE 様 MTG 議事録" not in (M["aurora_edit_compose"](PIN2, INSTR)[0] or ""))
 
 GEN["out"] = FABRICATED
-chk("⑩ ★こしらえた物が別物なら起票せぬ(捏造をfail-closedで止める)",
-    M["aurora_edit_compose"](PIN2, INSTR) is None)
+r_ = M["aurora_edit_compose"](PIN2, INSTR)
+chk("⑩ ★こしらえた物が別物なら起票せぬ(捏造をfail-closedで止める)", r_[0] is None)
+chk("⑩ ★弾いた時は理由を伴う(無言のNoneが約束ループの元であった)", bool(r_[1]))
 GEN["out"] = "## 2. BOKAN 担当事項\n- UE＋コンソールを提供"
 chk("⑩ 断片しか返らねば起票せぬ(資料が痩せる差し替えを防ぐ)",
-    M["aurora_edit_compose"](PIN2, INSTR) is None)
+    M["aurora_edit_compose"](PIN2, INSTR)[0] is None)
 GEN["out"] = ""
-chk("⑩ 空なら起票せぬ", M["aurora_edit_compose"](PIN2, INSTR) is None)
+chk("⑩ 空なら起票せぬ", M["aurora_edit_compose"](PIN2, INSTR)[0] is None)
 chk("⑩ 本文の無い錨では働かぬ",
-    M["aurora_edit_compose"]({"doc_id": REAL_ID, "material": ""}, INSTR) is None)
+    M["aurora_edit_compose"]({"doc_id": "no-such", "material": ""}, INSTR)[0] is None)
 
 
 def _boom(*a, **k):
@@ -274,8 +281,9 @@ def _boom(*a, **k):
 
 
 M["ollama_chat"] = _boom
-chk("⑩ 推論機が落ちても例外で落ちず None(沈黙せぬ)",
-    M["aurora_edit_compose"](PIN2, INSTR) is None)
+rb_ = M["aurora_edit_compose"](PIN2, INSTR)
+chk("⑩ 推論機が落ちても例外で落ちず、理由を名乗る(沈黙せぬ)",
+    rb_[0] is None and bool(rb_[1]))
 
 _fp = SRC_TEXT[SRC_TEXT.index("資料修正の決定的経路"):][:1900]
 chk("⑩ 結線: 錨＋修正意図で発火する",
