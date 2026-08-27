@@ -929,6 +929,60 @@ _AURORA_EDIT_INTENT_RE = re.compile(
 _AURORA_BODY_KW_RE = re.compile(r'body\s*=\s*("""|\'\'\'|"|\')(.+?)\1', re.S)
 
 
+def aurora_edit_compose(pin, instruction):
+    r"""資料の修正を**機構が直接こしらえる**（モデルの道具呼びに頼らぬ）。
+
+    【殿御下命2026-08-27】実害(15:22〜16:08・46分): kiyotomo殿は
+    「承認ボタンがでてこない」「でない」「どうしたらいい？」と九度訴えられた。
+    Casper は九度とも「承認カードが表示されますので押してください」と**約束だけ**を返し、
+    カードは一枚も立たなかった(trace: cards=0 が14turn連続)。
+    ★材料は揃っていた——錨により現本文は注入済(ctx_len 4625)。
+      欠けていたのは『モデルが道具を呼ぶ』という**運**だけであった。
+    ★弱いモデルに運を求め続けてはならぬ。**機構がこしらえて機構が立てる。**
+      生成に使うのは「今の全文＋指示→直した全文」だけの、逃げ場の無い一問にする。
+
+    戻り値: 修正後の全文(str) / こしらえられぬ時は None(fail-closed=起票せぬ)
+    """
+    mat = (pin or {}).get("material") or ""
+    if not mat.strip() or not (instruction or "").strip():
+        return None
+    prompt = (
+        "以下は社内の共有資料の『現在の全文』である。\n"
+        "----- 現在の全文 ここから -----\n" + mat[:12000] + "\n----- 現在の全文 ここまで -----\n\n"
+        "利用者の指示: " + str(instruction)[:600] + "\n\n"
+        "この指示だけを反映した【修正後の全文】を出力せよ。\n"
+        "・前置き・後書き・説明・挨拶を書くな。**資料の本文だけ**を出せ。\n"
+        "・指示に触れていない箇所は一字も変えるな。見出し・節・順序をそのまま保て。\n"
+        "・記憶から補うな。上の全文に無い参加者・日付・決定事項を足すな。\n"
+        "・コードブロックや引用符で包むな。素の本文をそのまま書け。")
+    try:
+        if BACKEND == "claude_cli":
+            out = strip_think(claude_cli_text(prompt))
+        else:
+            r = ollama_chat([{"role": "user", "content": prompt}], num_predict=3000)
+            out = strip_think(((r or {}).get("message") or {}).get("content") or "")
+    except Exception:
+        return None
+    out = re.sub(r"^\s*```[a-zA-Z]*\s*|\s*```\s*$", "", (out or "").strip())
+    out = re.sub(r"^\s*(以下|修正後|承知|かしこまり)[^\n]{0,40}\n+", "", out)
+    if len(out) < 40:
+        return None
+    # ★こしらえた物が『その資料』であることを確かめてから起票する。
+    #   骨格が半分も残っておらねば、それは修正でなく作り直し=捏造の疑い(fail-closed)。
+    heads = [h for h in
+             (re.sub(r"^[#*\s]+|[*\s]+$", "", ln.strip())[:40] for ln in mat.splitlines()
+              if re.match(r"^\s*(#{1,6}\s+\S|[0-9０-９]+\s*[.．、)）]\s*\S)", ln))
+             if len(h) >= 3]
+    heads = list(dict.fromkeys(heads))[:12]
+    if len(heads) >= 2:
+        kept = [h for h in heads if h in out]
+        if len(kept) < max(2, int(len(heads) * 0.5)):
+            return None
+    if len(out) < len(mat) * 0.4:            # 極端に痩せた=指示に無い部分まで落ちている
+        return None
+    return out[:20000]
+
+
 def aurora_append_salvage(final, pin, query):
     r"""【殿御下命2026-08-27】錨が生きておるのに道具が呼ばれなんだ turn を救う。
 
@@ -11398,6 +11452,33 @@ class H(BaseHTTPRequestHandler):
             elif _material and not routed:          # 材料の投げ入れ→事実＋選択肢(決定的・qwen非経由)
                 _mreply, choices_obj = material_choices(_material)
                 routed = {"_choices": True, "reply": _mreply}
+        # 【殿御下命2026-08-27】資料修正の決定的経路。
+        # 実害(15:22〜16:08): 錨で現本文は渡っていたのに、モデルが道具を呼ばず「承認カードが
+        # 表示されます」と約束だけを返し、14turn連続で cards=0。殿は九度「ボタンが出ない」と
+        # 訴えられた。★欠けていたのは『モデルが道具を呼ぶ』という運だけ。運に頼るのをやめる。
+        if not routed and not choices_obj and not _snz and not _assign_short:
+            try:
+                _pe = aurora_pin_get(aurora_pin_key(thr, who))
+                if (_pe and _pe.get("material") and _AURORA_EDIT_INTENT_RE.search(ll_user or "")
+                        and not _AURORA_PIN_RELEASE_RE.search(ll_user or "")):
+                    _eb = aurora_edit_compose(_pe, ll_user)
+                    if _eb:
+                        _eargs = {"doc_id": _pe["doc_id"], "body": _eb}
+                        _esum = _action_summary("aurora_append", _eargs)
+                        _esum += aurora_shrink_note(_pe["doc_id"], _eb)
+                        _esum += aurora_body_drift_note(_pe["doc_id"], _eb)
+                        _epid = _register_pending("aurora_append", _eargs, who.get("uid"), _esum,
+                                                  origin="user", query=str(ll_user)[:400], trace_id=_tid)
+                        if _epid:
+                            PENDING_ACTIONS[_epid]["thread"] = thr
+                            pending_actions.append({"id": _epid, "tool": "aurora_append",
+                                                    "args": _eargs, "summary": _esum})
+                            routed = {"_surfaced": True,
+                                      "reply": ("修正版を下書きいたしました。**まだ書き込んでおりませぬ**——"
+                                                "この下に出る承認カードで本文をお確かめの上、"
+                                                "ボタンを押していただければ Aurora に保存されまする。")}
+            except Exception:
+                pass
         # 追従: Casperが「下書きを表示しますか?」と申し出た直後の裸の肯定(おねがい/はい)=その申し出への同意→浮上
         _affirm_draft = bool(_AFFIRM_RE.match((ll_user or "").strip())) and bool(_DRAFT_OFFER_RE.search(_last_assistant(msgs)))
         # 滞留下書きの浮上: 『下書き見せて/承認待ち確認/気にかけどころ処理』等→実カード(内容+承認/却下)を出す

@@ -76,7 +76,7 @@ class _Au:
 
 WANT_F = ["aurora_pin_key", "aurora_pin_set", "aurora_pin_get", "aurora_pinned_digest",
           "aurora_valid_doc_id", "aurora_body_drift_note", "aurora_shrink_note",
-          "aurora_append_salvage", "_aurora_plain"]
+          "aurora_append_salvage", "_aurora_plain", "aurora_edit_compose"]
 WANT_A = ["_AURORA_PIN", "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE", "_AURORA_URL_RE",
           "_DOC_ID_RE", "_AURORA_EDIT_INTENT_RE", "_AURORA_BODY_KW_RE"]
 
@@ -230,6 +230,64 @@ chk("⑨ ★正しい追記で縮み警報が鳴らぬ(偽警報の是正)",
 chk("⑨ 本当に縮む時は依然として鳴る", bool(M["aurora_shrink_note"](REAL_ID, "一行だけ")))
 chk("⑨ 乖離検問も同じ物差しを使う(二つの検問が食い違わぬ)",
     M["aurora_body_drift_note"](REAL_ID, added) == "" and bool(M["aurora_body_drift_note"](REAL_ID, FABRICATED)))
+
+
+# ── ⑩ 修正を機構がこしらえる(モデルの道具呼びに頼らぬ) ───────────────────
+print("── ⑩ 決定的な修正経路 ──")
+GEN = {"out": ""}
+M["BACKEND"] = "ollama"
+M["strip_think"] = lambda x: (x or "").strip()
+M["ollama_chat"] = lambda msgs, **k: (GEN.__setitem__("prompt", msgs[0]["content"])
+                                      or {"message": {"content": GEN["out"]}})
+PIN2 = {"doc_id": REAL_ID, "title": "SORAFUNE 様 MTG 議事録", "material": CUR_MD}
+INSTR = "2. BOKAN 担当事項にUE＋コンソールをsorafuneさんに提供を追加して"
+
+GEN["out"] = added
+got = M["aurora_edit_compose"](PIN2, INSTR)
+chk("⑩ ★実害の指示から修正後の全文をこしらえる", bool(got))
+chk("⑩ 現本文を材料として渡している", "現在の全文 ここから" in GEN.get("prompt", ""))
+chk("⑩ 指示も渡している", INSTR in GEN.get("prompt", ""))
+chk("⑩ 『記憶から補うな』と縛る", "記憶から補うな" in GEN.get("prompt", ""))
+chk("⑩ 『前置き・後書きを書くな』と縛る", "前置き" in GEN.get("prompt", ""))
+
+GEN["out"] = "```markdown\n" + added + "\n```"
+chk("⑩ コードブロックの衣を剥ぐ",
+    (M["aurora_edit_compose"](PIN2, INSTR) or "").startswith("# SORAFUNE"))
+GEN["out"] = "承知いたしました。以下が修正後の全文です。\n" + added
+chk("⑩ 前置きの一行を剥ぐ",
+    (M["aurora_edit_compose"](PIN2, INSTR) or "").startswith("# SORAFUNE"))
+
+GEN["out"] = FABRICATED
+chk("⑩ ★こしらえた物が別物なら起票せぬ(捏造をfail-closedで止める)",
+    M["aurora_edit_compose"](PIN2, INSTR) is None)
+GEN["out"] = "## 2. BOKAN 担当事項\n- UE＋コンソールを提供"
+chk("⑩ 断片しか返らねば起票せぬ(資料が痩せる差し替えを防ぐ)",
+    M["aurora_edit_compose"](PIN2, INSTR) is None)
+GEN["out"] = ""
+chk("⑩ 空なら起票せぬ", M["aurora_edit_compose"](PIN2, INSTR) is None)
+chk("⑩ 本文の無い錨では働かぬ",
+    M["aurora_edit_compose"]({"doc_id": REAL_ID, "material": ""}, INSTR) is None)
+
+
+def _boom(*a, **k):
+    raise RuntimeError("推論機落ち")
+
+
+M["ollama_chat"] = _boom
+chk("⑩ 推論機が落ちても例外で落ちず None(沈黙せぬ)",
+    M["aurora_edit_compose"](PIN2, INSTR) is None)
+
+_fp = SRC_TEXT[SRC_TEXT.index("資料修正の決定的経路"):][:1900]
+chk("⑩ 結線: 錨＋修正意図で発火する",
+    "_AURORA_EDIT_INTENT_RE.search(ll_user" in _fp and "aurora_pin_get(" in _fp)
+chk("⑩ 結線: こしらえた本文で aurora_append のカードを立てる",
+    '_register_pending("aurora_append"' in _fp)
+chk("⑩ 結線: 縮み検問・乖離検問も通す",
+    "aurora_shrink_note(" in _fp and "aurora_body_drift_note(" in _fp)
+chk("⑩ 結線: 生成ループを跳ばして決定的に返す", '"_surfaced": True' in _fp)
+chk("⑩ 結線: 『新規/別の資料』の時は発火せぬ", "_AURORA_PIN_RELEASE_RE.search(ll_user" in _fp)
+chk("⑩ 結線: 既に routed/選択カードが在れば触らぬ",
+    "if not routed and not choices_obj" in _fp)
 
 # ── ★突然変異 ────────────────────────────────────────────────────────────
 print("\n--- 突然変異検証 ---")
