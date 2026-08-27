@@ -1290,12 +1290,52 @@ def _wants_aurora_save(query):
     # 6. 上記のいずれにも該当せず、Aurora語+何らかの依頼形が在る → LLM意味判定(K)。
     #    灰色判定を大幅拡張(旧: 読取語+保存示唆語共起のみ → 新: 依頼形が在る全turn)。
     #    戻り値は三値のまま透過する(True/False/None・(A))。
-    if _aurora_clause_delegate_form(q):
+    # ★体言止め(「Auroraにアップ」)も灰色として同じ分類器へ回す。
+    #   依頼形の語尾だけを入口にすると、投函の添え書き欄に書かれた指示が
+    #   step7 で陰性確定してしまう(2026-08-26 18:33 の実害)。
+    if _aurora_clause_delegate_form(q) or _aurora_noun_stop_request(q):
         _AU_LAST_ROUTE["route"] = "llm"
         return _wants_aurora_save_llm(q)
     # 7. 依頼形すら無い → False(不変)
     _AU_LAST_ROUTE["route"] = "rule_negative"
     return False
+
+
+# 体言止めの保存指示。指示は短く、動詞で言い切られる——特にファイル投函の添え書き欄。
+# 【殿御下命2026-08-27】実害(2026-08-26 18:33): kiyotomo殿が .rtf を投じ添え書きに
+#   「Auroraにアップ」と書いた。届いた発話は `sorafune 様　MTG.rtf — 「Auroraにアップ」`。
+#   依頼形の語尾が無いため step7 の「依頼形すら無い」に落ち、rule_negative で陰性確定。
+#   ★「して」を足すだけで immediate/True になる(実測で再現)。
+#   規則はチャットの文に合わせて作られており、**添え書きの体言止めに合っていなかった**。
+# ★カタカナ語中一致は弾く(バックアップ/セットアップ/フォローアップ)。即断路と同じ lookbehind を使う。
+# ★短い行に限る。長い文書の末尾がたまたま保存語で終わる「報告の記述」を指示と読まぬ。
+_AURORA_NOUN_STOP_VERB_RE = re.compile(
+    r"(?<![ァ-ヴー])(アップ(ロード)?|保存|登録|起票|投稿|格納|掲載|記録)"
+    r"\s*[」』】\)）”\"'。、．，]*\s*$")
+_AURORA_NOUN_STOP_MAX = 24
+# 投函の添え書きは鉤括弧に入って届く: `sorafune 様　MTG.rtf — 「Auroraにアップ」`。
+# ★行全体の長さで締めると、飾り(ファイル名+区切り)の分だけ閾値を緩めねばならず、
+#   38字の『記述』まで指示と読む隙ができる(実測で閾値40が薄氷であった)。
+#   鉤括弧が在るならその中身こそが人の書いた指示ゆえ、そこだけを測る。
+_AURORA_QUOTED_RE = re.compile(r"[「『]([^「」『』]{1,60})[」』]")
+
+
+def _aurora_noun_stop_request(query):
+    """末尾の行(または其処の鉤括弧の中身)が保存動詞で言い切られている=体言止めの指示か。
+
+    ★これ自体を True(即断)にはせぬ。step6 の分類器へ回すための『灰色の入口』である
+      ——「Auroraにアップ」は指示だが、「資料はAuroraにアップ」は報告かもしれぬ。
+      その見分けは語彙表でなく意味判定の仕事にござる(fail-closed は起票せぬ側で保たれる)。
+    """
+    lines = [ln.strip() for ln in (query or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    last = lines[-1]
+    q = _AURORA_QUOTED_RE.findall(last)
+    cand = q[-1].strip() if q else last          # 鉤括弧が在れば中身が人の書いた指示
+    if len(cand) > _AURORA_NOUN_STOP_MAX:
+        return False
+    return bool(_AURORA_NOUN_STOP_VERB_RE.search(cand))
 
 
 def _wants_aurora_save_llm(query):

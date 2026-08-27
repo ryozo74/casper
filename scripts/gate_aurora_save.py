@@ -40,6 +40,8 @@ WANT = ["_AURORA_SAVE_REQ_RE", "_AURORA_READ_RE", "_wants_aurora_save",
         "_COMPLETION_COMM_RE", "_COMPLETION_AURORA_ONLY_RE", "_COMPLETION_GENERIC_RE",
         "_COMPLETION_VERB_MUTATE_RE", "_COMPLETION_MUTATE_RE", "_COMPLETION_DOC_NOUN_RE",
         "_DECLINE_LOG",   # 2026-08-26: 本ゲートは以前から NameError で落ちていた(=何も守れていなかった)
+        "_aurora_noun_stop_request", "_AURORA_NOUN_STOP_VERB_RE", "_AURORA_NOUN_STOP_MAX",
+        "_AURORA_QUOTED_RE",   # 2026-08-27: 体言止めの保存指示を陰性確定させぬ入口
         # ↑2026-08-26: 資料/議事録の削除・編集・更新を「した」と偽る主張の検問
 
         "_completion_claim_line_hit", "_COMPLETION_GAP_RE",
