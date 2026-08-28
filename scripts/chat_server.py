@@ -987,8 +987,13 @@ def _aurora_save_unknown_choices():
             ]}
 
 
+# 【殿御下命2026-08-28】実測: 「見出しを太字にしたり表で整えたりして」で決定的経路が
+# **一度も発火しなかった**(cards=0 が5turn)。表に整形系の語彙が一つも無かったゆえ。
+# ★人は「直す」とは言わぬ。「見やすくして」「表にして」「整えて」と言う。
 _AURORA_EDIT_INTENT_RE = re.compile(
-    r"(追加|追記|足し|加え|修正|直し|直す|変更|書き換え|置き換え|消し|消して|削除|更新|差し替え)")
+    r"(追加|追記|足し|加え|修正|直し|直す|変更|書き換え|置き換え|消し|消して|削除|更新|差し替え|"
+    r"整え|整理|整形|体裁|見やすく|読みやすく|太字|強調|表に|表で|箇条書き|見出し|"
+    r"レイアウト|まとめ直|書き直|清書|フォーマット)")
 # モデルが道具を呼ばず、本文を地の文へ書いてしまった時の取り出し口。
 _AURORA_BODY_KW_RE = re.compile(r'body\s*=\s*("""|\'\'\'|"|\')(.+?)\1', re.S)
 
@@ -2850,6 +2855,75 @@ def _resolve_send_mentions(text, held_lines, pending_actions):
     _has_send_card = any((a.get("tool") or "") == "send_message" for a in (pending_actions or []))
     note = _SEND_HELD_DRAFTED_MSG if _has_send_card else _DM_BODY_INCOMPLETE_MSG
     return (text + "\n\n" + note).strip() if text else note
+
+
+# 「承認ボタンを押すと保存されます」——**カードの存在を約束する文**。
+# 【殿御下命2026-08-28】実測(14:57:54): cards=0 の turn で
+# 「承認ボタンを押すと Aurora に保存されます」と告げていた。殿は押すべき物を探して見つからず、
+# 「カードが出ないときがある」と仰せになった。
+# ★完了検問は「保存しました」という**済んだ嘘**を打ち消すが、
+#   「これから出ます」という**出る嘘**は見ていなかった。約束も真実値である。
+_CARD_PROMISE_RE = re.compile(
+    r"(承認(ボタン|カード)|保存(ボタン|カード)|下の?(ボタン|カード)|下記の?(ボタン|カード))"
+    r"[^。\n]{0,24}(押|出|表示|反映|保存|実行|確定)|"
+    r"(押すと|押していただ|承認いただ)[^。\n]{0,24}(保存|反映|書き込|実行|送信)")
+
+
+# 道具呼びの生の姿(JSON / Python の代入)。**人に見せる物ではない。**
+# 【殿御下命2026-08-28】実測(14:51:26・14:52:27): doc_id と body を抱えた生JSONが
+# そのまま画面へ流れた(838字・1188字)。殿には何をどうすべきか判らぬ塊にござる。
+# ★中身は承認カードのプレビュー(編集できる本文欄)で見せる。地の文には要らぬ。
+_RAW_TOOLCALL_JSON_RE = re.compile(
+    r"(?:```[a-zA-Z]*\s*)?\{[^{}]{0,4000}?[\"']?(?:doc_id|to_user_id|actor_id)[\"']?\s*:"
+    r"[^{}]{0,8000}?\}(?:\s*```)?", re.S)
+_RAW_ASSIGN_RE = re.compile(
+    r"(?m)^[ \t]*(?:doc_id|body|title|to_user_id|actor_id)[ \t]*=[ \t]*"
+    r'(?:"""|\'\'\'|"|\').*?(?:"""|\'\'\'|"|\'),?[ \t]*$', re.S)
+_RAW_CALL_OPEN_RE = re.compile(r"(?m)^[ \t]*(?:aurora_append|aurora_create|send_message)[ \t]*\([ \t]*$")
+
+
+def _strip_raw_toolcall(text):
+    """生の道具呼びを本文から剥ぐ。"""
+    t = _RAW_TOOLCALL_JSON_RE.sub("", str(text or ""))
+    t = _RAW_ASSIGN_RE.sub("", t)
+    t = _RAW_CALL_OPEN_RE.sub("", t)
+    t = re.sub(r"(?m)^[ \t]*\)[ \t]*$", "", t)
+    t = re.sub(r"(?m)^[ \t]*```[ \t]*$", "", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def _guard_card_promise(text, pending_actions, uid=None):
+    r"""カードが立っておらぬのに『承認ボタンが出る』と約束した文を打ち消す。
+
+    ★カードが在る turn では触らぬ(約束は裏づけられている)。
+    ★無い turn では、約束の行を抜き、**台帳を照会して本当の状態**を告げる。
+      承認待ちが他に在るならそこへ導き、無いなら『立てられなんだ』と正直に言う。
+    ★『もう一度お申し付けを』の壊れたループへは戻さぬ——何をすれば立つのかを具体に示す。
+    """
+    if not text or pending_actions:
+        return text
+    lines = text.splitlines()
+    hits = [bool(_CARD_PROMISE_RE.search(ln)) for ln in lines]
+    if not any(hits):
+        return text
+    kept = "\n".join(ln for ln, h in zip(lines, hits) if not h)
+    kept = re.sub(r"\n{3,}", "\n\n", kept).strip()
+    n = 0
+    try:
+        if casper_outbox and str(uid or "").strip():
+            n = len([r for r in casper_outbox.pending(uid)
+                     if r.get("tool") in ("send_message", "aurora_create", "aurora_append")])
+    except Exception:
+        n = 0
+    if n:
+        note = (f"※この応答では承認カードを立てておりませぬ。ただし承認待ちが **{n}件** ござる"
+                "——画面右下の「🔐 承認待ち」から実物を開けまする。")
+    else:
+        note = ("※**承認カードは出ておりませぬ**（承認待ち 0件）。押す物はござらぬゆえ、"
+                "お探しにならずともよろしゅうござる。\n"
+                "恐れ入るが、直したい箇所を**どの節を・どう**まで添えてお申し付けくだされ"
+                "（例:「2. BOKAN 担当事項を表に整えて」）。その場でカードをお出しいたしまする。")
+    return (kept + "\n\n" + note).strip() if kept else note
 
 
 def _guard_completion_claims(text, pending_actions, uid=None):
@@ -11513,6 +11587,7 @@ class H(BaseHTTPRequestHandler):
             # 抜けており、雲に座る間は「保存しました」と言い切っても誰も止めなかった。
             # 雲では**必ず**カード0件ゆえ、完了主張は例外なく嘘である。[]を渡して fail-closed に倒す。
             ans = _guard_completion_claims(ans, [], uid=who.get("uid"))
+            ans = _guard_card_promise(ans, [], uid=who.get("uid"))
             if _web_query:                                        # cmd_501: WebSearchを許可したturnのみ札付け出口検問
                 ans = casper_web.grounding_gate(ans, {"ok": True, "urls": casper_web._URL_RE.findall(raw or "")})
             ans, diagram = render_diagram(ans)
@@ -12282,6 +12357,12 @@ class H(BaseHTTPRequestHandler):
         final = _guard_unrostered_person_claim(final)                # 出口検問(AC2・cmd_508): roster外のファイル名幹(profile_u_*)が人として主語に立つ文を差し止め
         _person_slot_guarded = final != _pre; _pre = final
         final = _guard_completion_claims(final, pending_actions, uid=who.get("uid"))     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
+        # 【殿御下命2026-08-28】『これから出る』という約束も真実値。カード無き約束を打ち消す。
+        final = _guard_card_promise(final, pending_actions, uid=who.get("uid"))
+        final = _strip_raw_toolcall(final)          # 生の道具呼びは人に見せぬ(中身はカードで見せる)
+        if not final.strip() and pending_actions:
+            final = ("修正版を下書きいたしました。**まだ書き込んでおりませぬ**——"
+                     "この下の承認カードで本文をお確かめの上、ボタンを押してくだされ。")
         _grd = final != _pre; _pre = final
         _enum_src = final                                            # cmd_499(記録用): 検問前の列挙行を控える(検問が削っても番号突合は生かす)
         final = _validate_choices(final, pending_actions, choices=(choices_obj or attn_cards), injected=sysadd)   # Q2: 裸の選択要求(装置なし)を削除+中立誘導(不変条件①)
