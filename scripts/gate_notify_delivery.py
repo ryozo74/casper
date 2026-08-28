@@ -27,6 +27,14 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+# 【殿御下命2026-08-29・丙】loopback だけでは最早内部機構を名乗れぬ。合鍵を提げて呼ぶ。
+# ★合鍵は casper_secrets.host_secret() が無ければ作る——ゆえハーネスが黙って匿名へ落ちることは無い。
+try:
+    import casper_secrets as _casper_secrets
+    HOST_SECRET = _casper_secrets.host_secret()
+except Exception:
+    HOST_SECRET = ""
 import casper_notify
 
 SRC = os.path.join(HERE, "chat_server.py")
@@ -179,7 +187,8 @@ def _reachable():
 
 
 def _get_notifications(uid, retries=3):
-    req = urllib.request.Request(BASE + "/api/notifications", headers={"X-Actor-User-Id": str(uid)})
+    req = urllib.request.Request(BASE + "/api/notifications", headers={"X-Actor-User-Id": str(uid),
+                                          "X-Casper-Host-Secret": HOST_SECRET})
     last_exc = None
     for _ in range(retries):
         t0 = time.time()
@@ -197,7 +206,8 @@ def _mark_read(uid, keys=None, retries=3):
     last_exc = None
     for _ in range(retries):
         req = urllib.request.Request(BASE + "/api/notifications/read", data=payload,
-                                      headers={"X-Actor-User-Id": str(uid), "Content-Type": "application/json"})
+                                      headers={"X-Actor-User-Id": str(uid), "Content-Type": "application/json",
+                                               "X-Casper-Host-Secret": HOST_SECRET})
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.loads(r.read().decode("utf-8"))

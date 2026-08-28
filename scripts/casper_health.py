@@ -125,16 +125,33 @@ def _probe_last_success():
             "reason": ""}
 
 
+LAST_SKIPPED_SYNTHETIC = 0     # 直近の _load() が分母から外した合成トラフィックの件数(黙って落とさぬ)
+
+
 def _load():
-    out = []
+    """トレースを読む。★【殿御下命2026-08-29・丁】`synthetic: true` の行は**分母から外す**。
+
+    2026-08-28、母艦の上で走らせた検証が本番を素手で撃ち、kiyotomo殿の発話を本人名義で再生した。
+    その turn は health の率ものの母数に混ざり、rag_zero も棄権率も**人の実感と別の物**を測っていた。
+    ★名札(synthetic)を立てただけでは消費者なきセンサーになる——外す側の配線をここに置く。
+    ★黙って減らさぬ: 外した件数を LAST_SKIPPED_SYNTHETIC に残し health.md へ書く。
+    ★既存行に synthetic キーは無い=Falsy=人として数える(従前の解釈のまま・遡って書き換えぬ)。
+    """
+    global LAST_SKIPPED_SYNTHETIC
+    out, skipped = [], 0
     if os.path.exists(TRACE):
         for ln in open(TRACE, encoding="utf-8"):
             ln = ln.strip()
             if ln:
                 try:
-                    out.append(json.loads(ln))
+                    r = json.loads(ln)
                 except Exception:
-                    pass
+                    continue
+                if r.get("synthetic"):
+                    skipped += 1
+                    continue
+                out.append(r)
+    LAST_SKIPPED_SYNTHETIC = skipped
     return out
 
 
@@ -267,6 +284,7 @@ def analyze():
         return {"today": None, "baseline_days": 0, "deviations": [], "today_rates": {},
                  "current_window": {"n": 0, "minutes": WINDOW_MINUTES, "status": "empty"},
                  "n": 0, "gen_event": {"status": "empty", "fired": [], "streak_warn": 0, "streak_ok": 0},
+                 "synthetic_skipped": LAST_SKIPPED_SYNTHETIC,
                  "probe": _probe_last_success()}
     today = datetime.date.today().isoformat()
     by_day = {}
@@ -310,7 +328,8 @@ def analyze():
 
     return {"today": today, "baseline_days": len(hist_days), "deviations": deviations,
             "today_rates": tr, "current_window": current_window, "n": len(rows),
-            "gen_event": gen_event, "probe": probe}
+            "gen_event": gen_event, "probe": probe,
+            "synthetic_skipped": LAST_SKIPPED_SYNTHETIC}   # 【丁】分母から外した合成の件数(黙って減らさぬ)
 
 
 def _fmt_probe_line(probe):
@@ -358,7 +377,8 @@ def write_health_md(a):
         return f"- {label}: {tr.get(key, 0):.0%}{note}"
     lines = [f"# Casper セルフヘルス — {a.get('today')}",
              f"> 更新 {stamp} / 総トレース {a.get('n', 0)}件 / ベースライン {a.get('baseline_days', 0)}日分"
-             f" / 直近{cw.get('minutes', WINDOW_MINUTES)}分窓 n={cw.get('n', 0)}",
+             f" / 直近{cw.get('minutes', WINDOW_MINUTES)}分窓 n={cw.get('n', 0)}"
+             + (f" / 合成 {a.get('synthetic_skipped', 0)}件を分母から除外" if a.get("synthetic_skipped") else ""),
              "", f"## 状態: {status}", ""]
     if cw.get("status") == "empty":
         probe_line = _fmt_probe_line(a.get("probe"))
@@ -435,6 +455,9 @@ if __name__ == "__main__":
         print(open(HEALTH_MD, encoding="utf-8").read() if os.path.exists(HEALTH_MD) else "(health.md 未生成)")
     else:
         a = run()
+        if a.get("skipped"):            # tick未経過は「異常」ではない——率ものの鍵を引いて転ばぬ(2026-08-29)
+            print(f"⏸ 見送り: {a.get('reason', '')}")
+            sys.exit(0)
         cw = a.get("current_window", {})
         ge = a.get("gen_event", {})
         if cw.get("status") == "empty":

@@ -22,6 +22,14 @@ ENDPOINT = os.environ.get("CASPER_EVAL_ENDPOINT", "http://localhost:8770/api/cha
 ACTOR = os.environ.get("CASPER_EVAL_ACTOR", "28")
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+# 【殿御下命2026-08-29・丙】loopback だけでは最早内部機構を名乗れぬ。合鍵を提げて呼ぶ。
+# ★合鍵は casper_secrets.host_secret() が無ければ作る——ゆえハーネスが黙って匿名へ落ちることは無い。
+try:
+    import casper_secrets as _casper_secrets
+    HOST_SECRET = _casper_secrets.host_secret()
+except Exception:
+    HOST_SECRET = ""
 try:
     import casper_outbox                                     # fixture(下書きseed)用・真実源への直接投入
 except Exception:
@@ -45,7 +53,8 @@ def run_chat(messages, thread="eval"):
     選択カード(choices・Q1)は各optionを cards に {tool:'choices',...} として畳み込む(has_choices検査用)。"""
     body = json.dumps({"messages": messages, "thread": thread}).encode()
     req = urllib.request.Request(ENDPOINT, data=body,
-                                 headers={"Content-Type": "application/json", "X-Actor-User-Id": ACTOR})
+                                 headers={"Content-Type": "application/json", "X-Actor-User-Id": ACTOR,
+                                          "X-Casper-Host-Secret": HOST_SECRET})
     text, cards = "", []
     with urllib.request.urlopen(req, timeout=90) as r:
         for line in r:

@@ -40,6 +40,15 @@ import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+# 【殿御下命2026-08-29・丙】loopback だけでは最早内部機構を名乗れぬ。合鍵を提げて呼ぶ。
+# ★合鍵は casper_secrets.host_secret() が無ければ作る——ゆえハーネスが黙って匿名へ落ちることは無い。
+try:
+    import casper_secrets as _casper_secrets
+    HOST_SECRET = _casper_secrets.host_secret()
+except Exception:
+    HOST_SECRET = ""
 BASE = "http://127.0.0.1:8770"
 
 
@@ -141,6 +150,7 @@ def _aurora_upload(filename, title, content, dry_run=True):
         ["curl", "-s", "-X", "POST", BASE + "/api/aurora/upload",
          "-H", "Content-Type: application/json",
          "-H", "X-Actor-User-Id: 9999999",
+         "-H", "X-Casper-Host-Secret: " + HOST_SECRET,
          "--data-binary", "@-"],
         input=payload.encode("utf-8"), capture_output=True, timeout=30)
     try:

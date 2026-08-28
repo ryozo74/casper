@@ -27,6 +27,14 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 CASPER_DIR = os.path.dirname(HERE)                          # projects/casper/scripts
 sys.path.insert(0, CASPER_DIR)
+
+# 【殿御下命2026-08-29・丙】loopback だけでは最早内部機構を名乗れぬ。合鍵を提げて呼ぶ。
+# ★合鍵は casper_secrets.host_secret() が無ければ作る——ゆえハーネスが黙って匿名へ落ちることは無い。
+try:
+    import casper_secrets as _casper_secrets
+    HOST_SECRET = _casper_secrets.host_secret()
+except Exception:
+    HOST_SECRET = ""
 import casper_breaker                                        # cmd_509第2便: allow()ガード用
 
 # cmd_507症状②: chat_server.pyをimportした際に常駐スレッド+HTTP待受が起動し、検証プロセスと
@@ -112,7 +120,8 @@ def run_chat(messages, thread, uid):
     run_chat()と同一契約(NDJSONストリーム: message/replace/confirm/choices/table を復元)。"""
     body = json.dumps({"messages": messages, "thread": thread}).encode()
     req = urllib.request.Request(ENDPOINT, data=body,
-                                 headers={"Content-Type": "application/json", "X-Actor-User-Id": uid})
+                                 headers={"Content-Type": "application/json", "X-Actor-User-Id": uid,
+                                          "X-Casper-Host-Secret": HOST_SECRET})
     text, cards = "", []
     with urllib.request.urlopen(req, timeout=120) as r:
         for line in r:
@@ -149,7 +158,8 @@ def reject_card(pid, uid):
     使わない(軍師実測済)。"""
     body = json.dumps({"id": pid, "approve": False}).encode()
     req = urllib.request.Request(CONFIRM_ENDPOINT, data=body,
-                                 headers={"Content-Type": "application/json", "X-Actor-User-Id": uid})
+                                 headers={"Content-Type": "application/json", "X-Actor-User-Id": uid,
+                                          "X-Casper-Host-Secret": HOST_SECRET})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 

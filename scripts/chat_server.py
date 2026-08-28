@@ -200,9 +200,11 @@ PROFILE_BUILT = {}                        # ukey -> 最終生成ts(クールダ�
 
 # 平文token退避(M2秘匿): 機微値を ext4 home の ~/.config/casper/secrets.env(0600) から os.environ へ載せる。
 # 以降の全ての os.environ.get(TOKEN/SECRET) が home 値を第一優先で拾う(9p上の平文ファイルは fallback に降格)。
+_casper_secrets = None
 try:
     import casper_secrets as _casper_secrets
     _casper_secrets.load_into_env()
+    _casper_secrets.host_secret()          # 起動時に内部機構の合鍵を確定(不在なら生成し 0600 で永続化)
 except Exception:
     pass
 
@@ -733,6 +735,14 @@ def _dm_body_complete(query, body):
 
 
 # cmd_494 1-3: False/None時の聞き返し文面(fail-closed)。カードを立てず、次に何をすればよいかを示す。
+# 【殿御下命2026-08-29・丙】uid 空で書込カードを立てられなんだ時の**理由と逃げ道**。
+# ★弾く時は必ず理由と逃げ道を(2026-08-28の教訓)。「中身が足りぬ」と言えば理由の取り違えになる。
+_NO_ACTOR_MSG = ("どなたからの御依頼か機構が名乗りを確かめられませなんだゆえ、"
+                 "承認カード(下書き)をお出しできませなんだ。承認待ちは持ち主ごとに預かる造りゆえ、"
+                 "名乗りの無いカードは**どなたの画面にも出ませぬ**——立てても届かぬものは立てませぬ。\n"
+                 "恐れ入るが、**ログインの上**もう一度お申し付けくだされ。"
+                 "その場で承認カードをお出しいたしまする。")
+
 _DM_BODY_INCOMPLETE_MSG = ("お送りする本文に、頼まれた中身がまだ入っておりませぬ。"
                            "何を書いてお送りすればよいか、内容をお聞かせくだされ。")
 
@@ -750,15 +760,21 @@ def _register_pending(tool, args, uid, summary, thread=None, origin="user", quer
                 return None
     # 【Fable診断2026-08-27】trace の cards は「立った」を数え「**届く**」を数えていない。
     # uid 空で起票されたカードは誰の画面にも出ぬ孤児になる(実測4枚が proposed のまま残存)。
-    # ★止めはせぬ(起票は正当な経路から来る)。だが**黙って作らぬ**——刻んで数えられるようにする。
+    # ★【殿御下命2026-08-29・丙】刻むだけでは足りぬ。**uid 空では起票させぬ**。
+    #   台帳の照会(casper_outbox.pending / 承認トレイ)は悉く uid で引く——ゆえ持ち主の無いカードは
+    #   *構造的に* 誰の画面へも届かぬ。届かぬ物を立てて「立てました」と数えるのは、
+    #   機構が自ら嘘を製造すること(失敗とゼロを同じ出口へ流す型)に他ならぬ。
+    #   ★道具名で場合分けはせぬ(語彙表の穴を生む)。「持ち主が無い」という**台帳の性質**で断つ。
+    #   逃げ道は _guard_card_promise / _resolve_send_mentions が理由つきで示す(無言のNoneにせぬ)。
     if not str(uid or "").strip():
         try:
             with open(os.path.join(HERE, "casper_orphan_card.jsonl"), "a", encoding="utf-8") as _f:
                 _f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
-                                     "tool": tool, "origin": origin,
+                                     "tool": tool, "origin": origin, "blocked": True,
                                      "query": str(query or "")[:120]}, ensure_ascii=False) + "\n")
         except Exception:
             pass
+        return None
     if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
         try:
             pid = casper_outbox.propose(tool, args, uid, summary, thread=thread,
@@ -1879,7 +1895,8 @@ def _trace_payload(trace_id, query, actor, thread, routed, fastpath, echoed, vch
                     gen_sec, salvaged, validated, gloss, guarded_claim, abstained,
                     digests_fired, final_len, cards, fewshot_used, topic=None,
                     stream_claim_held=0, web_fired=False, pending_actions=None,
-                    turn_start_ts=None, send_intent_gate=None, llm_calls=None):
+                    turn_start_ts=None, send_intent_gate=None, llm_calls=None,
+                    synthetic=False, actor_origin=""):
     """casper_trace.emitへ渡すpayload本体の組立(cmd_487是正: 配線をgateでast抽出検査可能にする)。
     ★au_decision/au_routeは _AU_LAST_ROUTE から読む(呼出側の値でなくここで直接参照することで、
     この2キーを消す/読み違える突然変異がここ1箇所を検査するだけで捕まる)。
@@ -1892,6 +1909,8 @@ def _trace_payload(trace_id, query, actor, thread, routed, fastpath, echoed, vch
     _declines = [d for d in (_DECLINE_LOG.get(thread) or [])
                  if turn_start_ts is None or float(d.get("ts") or 0) >= turn_start_ts]
     return {"trace_id": trace_id, "query": query, "actor": actor, "thread": thread,
+            # 【丁】合成の名札。casper_health は synthetic 行を**分母から外す**(消費者を同じ便で配線)。
+            "synthetic": bool(synthetic), "actor_origin": actor_origin,
             "routed": bool(routed), "action": (routed or {}).get("tool"),
             "fastpath": fastpath, "echoed": echoed, "vch": vch,
             "injected_facts": injected_facts, "resp_ids": resp_ids, "cont": cont,
@@ -3016,7 +3035,7 @@ _SEND_HELD_DRAFTED_MSG = ("下書きしました。画面下の承認ボタン�
                           "**まだ送信しておりませぬ**——お確かめの上お進みくだされ。")
 
 
-def _resolve_send_mentions(text, held_lines, pending_actions):
+def _resolve_send_mentions(text, held_lines, pending_actions, uid=None):
     """cmd_494 5便: ストリームで_semit/_flush_pendが保留した送信言及行(held_lines、原文のqwen生成行)を、
     final一括テキスト(text)からも同一の行単位で除去し、turn終了時に確定したpending_actionsを見て
     ①送信系カードが1件でも成立(pid確定)→正直な下書き告知文 ②不成立→_DM_BODY_INCOMPLETE_MSG、
@@ -3031,7 +3050,12 @@ def _resolve_send_mentions(text, held_lines, pending_actions):
     text = "".join(_kept)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     _has_send_card = any((a.get("tool") or "") == "send_message" for a in (pending_actions or []))
-    note = _SEND_HELD_DRAFTED_MSG if _has_send_card else _DM_BODY_INCOMPLETE_MSG
+    if _has_send_card:
+        note = _SEND_HELD_DRAFTED_MSG
+    elif not str(uid or "").strip():
+        note = _NO_ACTOR_MSG          # 【丙】理由を取り違えぬ——中身の不足でなく**名乗りの不在**である
+    else:
+        note = _DM_BODY_INCOMPLETE_MSG
     return (text + "\n\n" + note).strip() if text else note
 
 
@@ -3093,7 +3117,9 @@ def _guard_card_promise(text, pending_actions, uid=None):
                      if r.get("tool") in ("send_message", "aurora_create", "aurora_append")])
     except Exception:
         n = 0
-    if n:
+    if not str(uid or "").strip():
+        note = _NO_ACTOR_MSG          # 【丙】uid 無しでは台帳に持ち主が無く、カードは誰の画面へも出ぬ
+    elif n:
         note = (f"※この応答では承認カードを立てておりませぬ。ただし承認待ちが **{n}件** ござる"
                 "——画面右下の「🔐 承認待ち」から実物を開けまする。")
     else:
@@ -4107,24 +4133,42 @@ def _email_to_uid(email):
     return uid
 
 
+def _host_trusted(handler):
+    """内部機構(gate / eval / 自律投稿)からの呼びか否かを判ずる **唯一の関**。
+
+    【殿御下命2026-08-29・丙】以前は「client_address が 127.0.0.1 なら無条件に信ずる」造りであった。
+    ★実害(2026-08-28): 同じ母艦の上で走らせた検証が `X-Actor-User-Id: 31` を付けて本番を撃ち、
+      kiyotomo殿の発話が一字一句そのまま**本人名義で**再生され、孤児カードを6枚生み、
+      しかも観測にはただの利用者として映った。**成りすましが観測に映らぬ**のが最も悪い。
+    ★ゆえ loopback は最早いかなる権威も与えぬ。合鍵(X-Casper-Host-Secret)の一致のみが内部を名乗れる。
+      合鍵は casper_secrets.host_secret() が起動時に必ず用意する(不在なら生成)ゆえ、
+      正当なハーネスが黙って匿名へ落ちることは無い。
+    """
+    if _casper_secrets is None:
+        return False                                   # 合鍵の機構が無い＝内部経路も無い(fail-closed)
+    try:
+        return _casper_secrets.host_secret_matches(handler.headers.get("X-Casper-Host-Secret", ""))
+    except Exception:
+        return False
+
+
 def identify(handler):
     """発信元を識別。本人確定は **JWT 検証** のみ(名前選択だけの成りすまし防止)。
-    優先: X-Actor-User-Id(組込み時 host が検証済) > 検証済 score_token/casper_token(JWT) > 匿名 sid。"""
+    優先: X-Actor-User-Id(**合鍵を提げた内部機構のみ**) > 検証済 score_token/casper_token(JWT) > 匿名 sid。"""
     ck = http.cookies.SimpleCookie()
     try:
         ck.load(handler.headers.get("Cookie", "") or "")
     except Exception:
         pass
     # 【送信者詐称の是正・M2秘匿(2026-07-15)】X-Actor-User-Id は誰でも付けられるヘッダゆえ、無条件に信じると
-    # LAN上の第三者が任意uid(例:殿=28)へ成りすませる(bind=0.0.0.0:8770=LAN公開)。現状 inbound で本ヘッダを正当に
-    # 送る送り手は皆無(唯一の設定箇所 casper_mcp は Casper→Calendar の outbound)。ゆえ信じるのは①loopback発
-    # ②host共有secret一致 の時のみに機構で限定し、それ以外は JWT(casper_token)検証のみを認証とする(なりすまし機構否定)。
+    # LAN上の第三者が任意uid(例:殿=28)へ成りすませる(bind=0.0.0.0:8770=LAN公開)。
+    # 【2026-08-29・丙】かつては「loopback発」も信じたが、母艦の上の検証が本番を素手で撃ち、
+    # 本人名義の再生を観測に映らぬまま作った(8/28実害)。ゆえ **合鍵一致のみ** に絞った。
+    # 【殿御下命2026-08-29・丙】loopback 無条件信頼は廃した。判定は _host_trusted() 一箇所に集める。
     _xactor = (handler.headers.get("X-Actor-User-Id", "") or "").strip()
-    _cip = handler.client_address[0] if getattr(handler, "client_address", None) else ""
-    _origin_ok = _cip in ("127.0.0.1", "::1", "localhost")
-    _hsec = os.environ.get("CASPER_HOST_SECRET", "")
-    _secret_ok = bool(_hsec) and (handler.headers.get("X-Casper-Host-Secret", "") == _hsec)
-    uid = _xactor if (_xactor and (_origin_ok or _secret_ok)) else ""   # 信頼できるoriginのみ header を採用
+    _host_ok = _host_trusted(handler)
+    uid = _xactor if (_xactor and _host_ok) else ""     # 合鍵を提げた内部機構のみ header を採用
+    actor_origin = "host" if uid else ""                # ★名札: この turn の主体が何処から来たか
     email = ""
     authed = bool(uid)
     if not uid:
@@ -4134,6 +4178,7 @@ def identify(handler):
             email = payload.get("sub") or ""
             authed = True                                              # トークン有効=認証成功
             uid = str(payload.get("uid") or _email_to_uid(email) or "")  # token の uid 優先(login で Calendar /api/me から確定)
+            actor_origin = "jwt"
     sid = ck["casper_sid"].value if "casper_sid" in ck else ""
     new_sid = ""
     if not sid:
@@ -4141,7 +4186,9 @@ def identify(handler):
         new_sid = sid
     ip = handler.client_address[0] if getattr(handler, "client_address", None) else ""
     # 本人キー: uid 優先・無ければ email(認証済) ・最後に sid
-    return {"uid": uid, "email": email, "authed": authed, "sid": sid, "ip": ip, "new_sid": new_sid}
+    # actor_origin/synthetic は **名札**(Fable処方・丁): 合成トラフィックを人の発話と同じ分母で数えぬ為に持ち回る。
+    return {"uid": uid, "email": email, "authed": authed, "sid": sid, "ip": ip, "new_sid": new_sid,
+            "actor_origin": (actor_origin or "anon"), "synthetic": bool(_host_ok)}
 
 
 def calendar_digest(query):
@@ -7272,6 +7319,9 @@ def log_convo(who, role, content, extra=None):
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
                "uid": who.get("uid", ""), "email": who.get("email", ""), "ukey": _user_key(who),
                "sid": who.get("sid", ""), "ip": who.get("ip", ""),
+               # 【殿御下命2026-08-29・丁】合成トラフィックの名札。ip での代理判別(=172.17.0.1なら人)を
+               # やめ、機構が名乗った値を刻む。8/28 は合成が人の発話を本人名義で再生し台帳に紛れた。
+               "actor_origin": who.get("actor_origin", ""), "synthetic": bool(who.get("synthetic")),
                "role": role, "content": str(content)[:2000]}
         if extra:
             rec.update(extra)
@@ -11221,9 +11271,7 @@ class H(BaseHTTPRequestHandler):
             # 【Fable監査2026-07-23 認可穴①の是正】autonomous(uid=101名義の自律投稿)は「なりすまし機構」ゆえ、
             # identify と同じく **loopback発 or host-secret一致** の内部機構からのみ許す。これが無いと bind=0.0.0.0
             # (LAN公開)上の第三者が autonomous:true を付けて uid101 名義で任意スレへ投稿できる(M2秘匿の再導入)。
-            _cip = self.client_address[0] if getattr(self, "client_address", None) else ""
-            _hsec = os.environ.get("CASPER_HOST_SECRET", "")
-            _trusted = (_cip in ("127.0.0.1", "::1", "localhost")) or (bool(_hsec) and self.headers.get("X-Casper-Host-Secret", "") == _hsec)
+            _trusted = _host_trusted(self)   # 【丙】loopback では最早許さぬ。合鍵一致のみ(identify と同一の関)
             autonomous = bool(req.get("autonomous"))   # True=Casper自律投稿(uid=101名義・内部機構のみ)/既定=承認者本人名義(二値actor)
             if autonomous and not _trusted:
                 self._json({"ok": False, "error": "自律投稿は内部機構からのみ許されまする（本人名義でお試しくだされ）"}); return
@@ -12508,7 +12556,7 @@ class H(BaseHTTPRequestHandler):
             # 告知文(「送信されます」等)がまた_send_mention_line_hitに拾われ、二重差替で文末の句読点
             # 断片だけが残る事故になる(実測)。_salvが立っていない(salvageは何もできず、カード成立/不成立が
             # 別経路——MCP tool_calls等——で決まった)時のみ、ここで送信言及行を確定文へ差し替える。
-            final = _resolve_send_mentions(final, _held_claims, pending_actions)
+            final = _resolve_send_mentions(final, _held_claims, pending_actions, uid=who.get("uid"))
             _pre = final
         try:                                                         # DM本文が指示語で済ませ材料を欠くなら、機構が当の表を添える
             for _a in pending_actions:
@@ -12642,6 +12690,7 @@ class H(BaseHTTPRequestHandler):
                              "asset": sorted(set(re.findall(r"/asset/([^\s\)\"'\]]+)", final)))[:40]}
                 casper_trace.emit(_trace_payload(
                     trace_id=_tid, query=str(ll_user)[:200], actor=who.get("uid"), thread=thr,
+                    synthetic=bool(who.get("synthetic")), actor_origin=who.get("actor_origin", ""),
                     routed=routed,
                     fastpath=_fastpath, echoed=_ech, vch=_vch,   # 決定的fast path/echo検問/裸選択検問の発火
                     injected_facts=_inj, resp_ids=_resp_ids, cont=_cont,   # 注入事実/応答ID/継続回数
