@@ -1198,6 +1198,71 @@ def aurora_edit_compose(pin, instruction):
     return out[:20000], ""
 
 
+def aurora_turn_sources(msgs, pin=None, extra=""):
+    """この turn で『人が実際に示した材料』を集める。捏造の照合台にする。
+
+    ★モデルの記憶は材料ではない。人が打った文・貼った本文・機構が取得した資料だけを数える。
+    """
+    src = []
+    for m in (msgs or [])[-8:]:
+        if m.get("role") == "user" and m.get("content"):
+            src.append(str(m["content"]))
+    if pin and pin.get("material"):
+        src.append(str(pin["material"]))
+    if extra:
+        src.append(str(extra))
+    return "\n".join(src)
+
+
+def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
+    r"""内容を運ぶ Aurora 書込の**単一の関**。
+
+    【Fable診断2026-08-27・構造の一手】
+    「outbox に注ぐ口が8つ以上ある。8/27 の捏造カード三枚はすべてモデル自身の tool_calls が
+      捏造 body を args に載せ、そのまま _register_pending に届いたもの。
+      compose の検問はこの経路を素通りする。」
+    「**モデル起源の args を outbox に直接登録することを禁じよ。**
+      モデルの tool_call は『意図の合図』に降格させ、body は常に同じパイプラインで機構が組み直す。」
+
+    ★私は新しい道(compose)を作りながら**古い道を塞いでいなかった**。捏造は今も古い道から入れた。
+    ★この関を通さねば台帳へ入れぬ。入口は幾つ在ってよいが、**執行路は一本**である。
+
+    返り: (tool, args, reason)。reason が非空なら**起票せぬ**(fail-closed)。
+    """
+    a = dict(args or {})
+    if tool == "aurora_append":
+        # ★正本が在るのだから、body を模型に書かせる理由が無い。**モデルの body は捨てる。**
+        #   実測(8/27 14:21/14:25): モデルの body は実在せぬ参加者・節を並べた作り話であった。
+        if not pin or not pin.get("doc_id"):
+            return tool, a, "どの資料を直すのか機構が特定できておりませぬ(資料のURLを添えてくだされ)"
+        body, why = aurora_edit_compose(pin, instruction)
+        if not body:
+            return tool, a, (why or "修正版をこしらえられませなんだ")
+        return tool, {"doc_id": pin["doc_id"], "body": body}, ""
+
+    if tool == "aurora_create":
+        # ★新規には正本が無い。ゆえに『捨てて組み直す』ができぬ。代わりに
+        #   **この turn の材料に接地しているか**を検める(retrieve-then-render の書込側)。
+        body = str(a.get("body") or "")
+        if len(body.strip()) < 20:
+            return tool, a, "本文が空に近うござる"
+        known = (sources or "") + " " + str(a.get("title") or "") + " " + (instruction or "")
+        known_l = known.lower()
+        new = []
+        for t in set(_PROPER_TOKEN_RE.findall(body)):
+            if len(t) < 3 or t in known or t.lower() in known_l:
+                continue
+            if any(t[i:i + 3].lower() in known_l for i in range(len(t) - 2)):
+                continue          # 複合語の差は新出と数えぬ(コンソール→コンソールデータ)
+            new.append(t)
+        if new:
+            return tool, a, ("この turn の材料に無い語が本文に現れており申す("
+                             + " / ".join(new[:5]) + ")。書き起こしになっておらぬか確かめが要り申す")
+        return tool, a, ""
+
+    return tool, a, ""
+
+
 def aurora_append_salvage(final, pin, query):
     r"""【殿御下命2026-08-27】錨が生きておるのに道具が呼ばれなんだ turn を救う。
 
@@ -1294,8 +1359,18 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
             args = {"title": title, "body": body}
             if who.get("uid"):
                 args["actor_id"] = who["uid"]
+            # ★【Fable診断の本丸】入口は幾つ在ってよいが**執行路は一本**。この古い道も同じ関を通す。
+            #   ★正直に記す: この経路の body は**殿が画面で見たばかりの応答そのもの**ゆえ、
+            #     接地の検問はほぼ素通りする(材料に応答自身を含めるため)。ここでの値打ちは
+            #     『検問が漏れなく当たる』ことではなく、**今後の手当が一箇所で全経路に効く**こと。
+            _t2, args, _wr = aurora_write_guard("aurora_create", args, None, str(query or ""),
+                                                sources=(str(query or "") + "\n" + str(f or "")), who=who)
+            if _wr:
+                return final, None
             summary = _action_summary("aurora_create", args)
             pid = _register_pending("aurora_create", args, who.get("uid"), summary, origin="user", query=query, trace_id=trace_id)
+            if pid is None:
+                return final, None
             pending_actions.append({"id": pid, "tool": "aurora_create", "args": args, "summary": summary})
             if _from_table:                               # 機構が本文を確定した=qwenの散文は捨て、簡潔に告げる
                 return (f"「{title}」として Aurora に起票する下書きを用意いたした（{len(table_md.splitlines())}行の表）。"
@@ -12017,20 +12092,42 @@ class H(BaseHTTPRequestHandler):
                                             args["doc_id"] = cur["doc_id"]
                                         else:
                                             args.pop("doc_id", None)
-                                summary = _action_summary(efn, args)
-                                if efn == "aurora_append":
-                                    # ★版差し替えは中身を丸ごと入れ替える。黙って通さず表に立てる。
-                                    summary += aurora_shrink_note(args.get("doc_id", ""), args.get("body", ""))
-                                    summary += aurora_body_drift_note(args.get("doc_id", ""), args.get("body", ""))
-                                pid = _register_pending(efn, args, who.get("uid"), summary,
-                                                        origin="user", query=str(ll_user)[:400], trace_id=_tid)
-                                PENDING_ACTIONS[pid]["thread"] = thr
-                                PENDING_ACTIONS[pid]["title"] = args.get("title", "")
-                                pending_actions.append({"id": pid, "tool": efn, "args": args, "summary": summary})
-                                result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
-                                          "⚠️ **まだ書き込んでおらぬ**。承認ボタンを押すまで実行されぬ。"
-                                          "**絶対に『作成しました/書きました/実行しました』等の完了報告をするな**(嘘になる)。"
-                                          "『○○を下書きしました。下の承認ボタンを押すと書き込まれます』と案内せよ。同じ操作を再呼出するな。")
+                                # ★【Fable診断の本丸】モデル起源の body を台帳へ直に入れさせぬ。
+                                #   tool_call は『意図の合図』に降格し、内容は機構が組み直す/接地を検める。
+                                #   実測(8/27): 捏造カード三枚はすべてこの口から入っていた。
+                                _pin_w = (cur if (cur and cur.get("doc_id")) else
+                                          aurora_pin_get_any(aurora_pin_key(thr, who),
+                                                             aurora_pin_user_key(who)))
+                                if _pin_w and not _pin_w.get("material") and cur:
+                                    _pin_w = aurora_pin_get_any(aurora_pin_key(thr, who),
+                                                                aurora_pin_user_key(who)) or _pin_w
+                                efn, args, _wreason = aurora_write_guard(
+                                    efn, args, _pin_w, str(ll_user),
+                                    sources=aurora_turn_sources(msgs, _pin_w), who=who)
+                                if _wreason:
+                                    # ★continue で抜けてはならぬ——この for は tool 結果を
+                                    #   working へ積んでモデルへ返す輪ゆえ、飛ばせばモデルが待ち続ける。
+                                    result = ("[未登録] " + _wreason +
+                                              "\n★資料を壊さぬための足止めにござる。**書き込んでおらぬ。**"
+                                              "完了を断ずるな。直したい箇所を具体に示すよう促せ。")
+                                else:
+                                    summary = _action_summary(efn, args)
+                                    if efn == "aurora_append":
+                                        # ★版差し替えは中身を丸ごと入れ替える。黙って通さず表に立てる。
+                                        summary += aurora_shrink_note(args.get("doc_id", ""), args.get("body", ""))
+                                        summary += aurora_body_drift_note(args.get("doc_id", ""), args.get("body", ""))
+                                    pid = _register_pending(efn, args, who.get("uid"), summary,
+                                                            origin="user", query=str(ll_user)[:400], trace_id=_tid)
+                                    if pid is None:
+                                        result = "[未登録] 中身が欠けているため下書きを起票しなかった。完了を断ずるな。"
+                                    else:
+                                        PENDING_ACTIONS[pid]["thread"] = thr
+                                        PENDING_ACTIONS[pid]["title"] = args.get("title", "")
+                                        pending_actions.append({"id": pid, "tool": efn, "args": args, "summary": summary})
+                                        result = (f"[承認待ち・未実行] 「{summary}」を下書き登録した(id={pid})。"
+                                                  "⚠️ **まだ書き込んでおらぬ**。承認ボタンを押すまで実行されぬ。"
+                                                  "**絶対に『作成しました/書きました/実行しました』等の完了報告をするな**(嘘になる)。"
+                                                  "『○○を下書きしました。下の承認ボタンを押すと書き込まれます』と案内せよ。同じ操作を再呼出するな。")
                         elif fn == "calendar_lookup":      # RO 401 恒久回避: MCP(write token)経由でライブ照会
                             result = _calendar_lookup_mcp(args, who.get("uid"))
                         else:
