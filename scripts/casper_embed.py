@@ -81,8 +81,57 @@ def embed_one(text):
                 pass
 
 
-def embed_batch(texts):
-    """複数テキストをバッチ埋め込み(/api/embed)。[[float],...] or None。"""
+# ══════════════════════════════════════════════════════════════════════════════
+# 【殿御下命2026-08-29・丁】「混雑を不在と名乗るな」
+# 実害(2026-08-26): `.139` の /api/generate と /api/embed が90秒超で無応答になった時、
+# 再埋込は `skipped(bge-m3不在・字面索引のみ最新)` と刻んだ。**在庫は在った**
+# (/api/tags に bge-m3 を確認済)。混雑・無応答・不在が **同じ一つの出口** に流れていた。
+# ★鉄則「失敗とゼロを別の出口へ」の違反。以後、不在を名乗るのは
+#   **在庫照会が『無い』と答えた時のみ**とする。照会できねば断じぬ。
+# ══════════════════════════════════════════════════════════════════════════════
+def model_in_stock(timeout=3):
+    """埋込モデルの在庫照会(/api/tags)。返り: True=在る / False=無い / **None=照会できなんだ**。
+    ★三値である事が肝。None を False(=不在)へ倒せば、届かぬ事を不在と名乗る嘘が生まれる。"""
+    try:
+        with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=timeout) as r:
+            d = json.load(r)
+        names = [str(m.get("name") or "") for m in (d.get("models") or [])]
+        base = MODEL.split(":")[0]
+        return any(n == MODEL or n.split(":")[0] == base for n in names)
+    except Exception:
+        return None
+
+
+def _diagnose_embed_failure(exc=None):
+    """埋込が成らなんだ理由を **在庫を訊いてから** 名づける。
+    返り: "model_absent" / "unreachable" / "busy" / "timeout" / "error"。"""
+    stock = model_in_stock()
+    if stock is False:
+        return "model_absent"      # 在庫照会が『無い』と答えた——この時のみ不在を名乗ってよい
+    if stock is None:
+        return "unreachable"       # 在庫すら訊けぬ=機そのものへ届いておらぬ(不在ではない)
+    code = getattr(exc, "code", None)
+    if code in (429, 503):
+        return "busy"              # 在庫は在る。混んでいるだけである
+    if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+        return "timeout"           # 在庫は在る。行列を通れなんだ
+    return "error"
+
+
+# 出口ごとの名乗り。★どれも「字面索引のみ最新」だが、**何故そうなったかを取り違えぬ**。
+EMBED_SKIP_MSG = {
+    "model_absent": "skipped(bge-m3不在・字面索引のみ最新)",
+    "busy":         "skipped(埋込サーバが混雑・在庫は在り・字面索引のみ最新)",
+    "timeout":      "skipped(埋込が時間内に返らず・在庫は在り・字面索引のみ最新)",
+    "unreachable":  "skipped(埋込サーバへ届かず・在庫照会も不可・字面索引のみ最新)",
+    "empty":        "skipped(埋込が空を返した・在庫は在り・字面索引のみ最新)",
+    "error":        "skipped(埋込が失敗・在庫は在り・字面索引のみ最新)",
+}
+
+
+def embed_batch_ex(texts):
+    """バッチ埋め込みの実体。返り: **(vectors|None, reason)**。reason は EMBED_SKIP_MSG の鍵か "ok"。
+    ★失敗とゼロを別の出口へ——呼び手が『何故成らなんだか』を取り違えぬようにする唯一の関。"""
     _prompt_chars = sum(min(len(t), 2000) for t in texts)
     _inflight_handle = None
     if casper_llm_client:
@@ -104,20 +153,27 @@ def embed_batch(texts):
                 casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d)
             except Exception:
                 pass
-        return d.get("embeddings")
-    except Exception:
+        _vecs = d.get("embeddings")
+        return (_vecs, "ok") if _vecs else (None, "empty")   # 空返しも失敗——「在るのに0件」と名乗らせぬ
+    except Exception as _e:
         if casper_llm_client:
             try:
                 casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA)
             except Exception:
                 pass
-        return None
+        return None, _diagnose_embed_failure(_e)
     finally:
         if casper_llm_client and _inflight_handle:
             try:
                 casper_llm_client.inflight_end(_inflight_handle)
             except Exception:
                 pass
+
+
+def embed_batch(texts):
+    """複数テキストをバッチ埋め込み(/api/embed)。[[float],...] or None。
+    ★理由も要る呼び手は embed_batch_ex を使え(こちらは従前の契約を保つ薄い包み)。"""
+    return embed_batch_ex(texts)[0]
 
 
 def _pid_alive(pid):
@@ -195,9 +251,10 @@ def build(batch=32):
     out = []
     for i in range(0, len(chunks), batch):
         grp = chunks[i:i + batch]
-        vecs = embed_batch([e["t"] for e in grp])
+        vecs, _why = embed_batch_ex([e["t"] for e in grp])
         if not vecs:
-            print("  バッチ埋め込み失敗(モデル未導入?)。中断。", file=sys.stderr)
+            print("  バッチ埋め込み失敗: " + EMBED_SKIP_MSG.get(_why, EMBED_SKIP_MSG["error"]) + "。中断。",
+                  file=sys.stderr)
             return 0
         for e, v in zip(grp, vecs):
             out.append({"src": e["src"], "title": e.get("title", ""), "t": e["t"], "v": v})
@@ -233,9 +290,11 @@ def reindex():
     reembedded = 0
     for i in range(0, len(miss_txt), 32):                      # 変更/新規分のみバッチ埋込
         gi, gt = miss_idx[i:i + 32], miss_txt[i:i + 32]
-        vecs = embed_batch(gt)
-        if not vecs:                                           # bge-m3 未導入 → 埋込skip(旧index温存)
-            return {"chunks": len(chunks), "reembedded": 0, "embed": "skipped(bge-m3不在・字面索引のみ最新)"}
+        vecs, _why = embed_batch_ex(gt)
+        if not vecs:                                           # 埋込が成らず → skip(旧index温存)
+            # ★何故成らなんだかを取り違えぬ。不在を名乗るのは在庫照会が『無い』と答えた時のみ。
+            return {"chunks": len(chunks), "reembedded": 0,
+                    "embed": EMBED_SKIP_MSG.get(_why, EMBED_SKIP_MSG["error"]), "reason": _why}
         for j, v in zip(gi, vecs):
             out[j]["v"] = v; reembedded += 1
     out = [e for e in out if e.get("v") is not None]
@@ -571,7 +630,7 @@ def search(query, k=8, budget=3800):
         return casper_rag.search(query, k=k, budget=budget)   # sqlite未生成→字面
     qv = embed_one(query)
     if qv is None:
-        return casper_rag.search(query, k=k, budget=budget)   # bge-m3不在→字面
+        return casper_rag.search(query, k=k, budget=budget)   # クエリ埋込が成らず→字面(理由は問わず退避)
     cands = casper_rag.candidates(query, n=60)                 # 字面recall(速い)
     if not cands:
         return casper_rag.search(query, k=k, budget=budget)
