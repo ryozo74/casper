@@ -1426,6 +1426,62 @@ def aurora_turn_sources(msgs, pin=None, extra=""):
     return "\n".join(src)
 
 
+def _load_pending(pid):
+    """承認待ち一枚を引き当てる **唯一の関**(プレビューと執行で解釈が割れぬよう一本にする)。
+    真実源=outbox(永続)。in-memory の PENDING_ACTIONS は高速キャッシュ。
+    再起動(auto-reload多発)でもキャッシュが飛ぶだけで、proposed な物は outbox から拾える。"""
+    pend = PENDING_ACTIONS.get(pid)
+    if pend is None and casper_outbox:
+        orec = casper_outbox.get(pid)
+        if orec and orec.get("state") == "proposed":
+            pend = {"tool": orec["tool"], "args": orec["args"], "uid": orec["uid"],
+                    "summary": orec.get("summary", ""), "thread": orec.get("thread")}
+    return pend
+
+
+def aurora_render_for_write(args, actor_uid):
+    """承認カードのプレビューと実際の書込が **同じ絵** を出すことを機構で保証する唯一の関。
+
+    【殿御下命2026-08-29・乙】kiyotomo殿は8/28に三度「承認カードの時点で Aurora でどう表示されるか
+    見せられぬか」と仰せになった。★Fable曰く **実行と同一のレンダラで描け**——別関数で描けば
+    「プレビューでは太字だったのに実物は違う」という**新しい嘘**が生まれる。
+    ゆえ chat_server から casper_aurora.make_note を呼ぶ箇所はこの一関のみとし、
+    /api/aurora/preview も /api/confirm の執行もここを通す(gate_aurora_preview.py が一箇所である事を検める)。
+    """
+    a = args or {}
+    return casper_aurora.make_note(a.get("title", ""), a.get("body", ""),
+                                   author=_uid_to_name(actor_uid), tags=a.get("tags"))
+
+
+def aurora_written_note(tool, args, result):
+    """承認後の**帰還文**。書けた物だけを名乗る(真実値・推し量って足さぬ)。
+
+    【殿御下命2026-08-29・乙】従前は生の JSON を『✅ 実行しました: {...}』と貼っていた。
+    殿方には何が起きたか判らぬ。★版・URL は **結果から読めた時のみ** 添える(読めねば黙る)。
+    """
+    a = args or {}
+    try:
+        rd = json.loads(result) if isinstance(result, str) else (result or {})
+    except Exception:
+        rd = {}
+    if not isinstance(rd, dict):
+        rd = {}
+    title = str(a.get("title") or "").strip()
+    verb = "Aurora に新しい資料として書き込み申した" if tool == "aurora_create" else "Aurora の資料を新しい版へ書き改め申した"
+    parts = [f"✅ {('「' + title + '」を') if title else ''}{verb}。"]
+    ver = rd.get("version") or rd.get("version_no") or rd.get("v")
+    if ver:
+        parts.append(f"版は v{ver} にござる。")
+    ref = rd.get("slug") or rd.get("id") or a.get("doc_id")
+    try:
+        base = casper_aurora.doc_base() if casper_aurora else ""
+    except Exception:
+        base = ""
+    if base and ref:
+        parts.append(f"{base}/doc/{ref}")
+    return " ".join(parts)
+
+
 def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
     r"""内容を運ぶ Aurora 書込の**単一の関**。
 
@@ -11551,18 +11607,33 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
             return
+        if self.path == "/api/aurora/preview":     # 【乙】承認前に「Auroraでどう見えるか」を実物で見せる
+            # 【殿御下命2026-08-29】kiyotomo殿が8/28に三度所望。★描くのは執行と同一の関
+            # (aurora_render_for_write)——別に描けば「プレビューでは太字だったのに」という嘘が増える。
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            who = identify(self)
+            pend = _load_pending(str(req.get("id") or ""))
+            if not pend:
+                self._json({"ok": False, "error": "提案が見つかりませぬ(期限切れか既処理)"}); return
+            if pend.get("tool") not in ("aurora_create", "aurora_append"):
+                self._json({"ok": False, "error": "この操作に資料の見え方はござらぬ"}); return
+            if not str(who.get("uid") or "").strip():
+                self._json({"ok": False, "error": "どなたか判じられませなんだ(ログインの上お確かめくだされ)"}); return
+            if pend.get("uid") and str(who["uid"]) != str(pend["uid"]):
+                self._json({"ok": False, "error": "本人のみ検められまする"}); return
+            a = dict(pend.get("args") or {})
+            if req.get("body") is not None:        # ★編集中の本文をそのまま描く(見たままが保存される)
+                a["body"] = str(req.get("body"))
+            self._json({"ok": True, "title": a.get("title", ""),
+                        "html": aurora_render_for_write(a, who.get("uid") or pend.get("uid"))})
+            return
         if self.path == "/api/confirm":            # Stage2: 承認待ち副作用操作の実行/却下
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
             who = identify(self)
             pid = req.get("id", ""); approve = bool(req.get("approve"))
-            # 真実源=outbox(永続)。in-memoryは高速キャッシュ。再起動(reload多発)でもoutboxから拾える。
-            pend = PENDING_ACTIONS.get(pid)
-            if pend is None and casper_outbox:
-                orec = casper_outbox.get(pid)
-                if orec and orec.get("state") == "proposed":
-                    pend = {"tool": orec["tool"], "args": orec["args"], "uid": orec["uid"],
-                            "summary": orec.get("summary", ""), "thread": orec.get("thread")}
+            pend = _load_pending(pid)    # 真実源=outbox(永続)。in-memoryは高速キャッシュ
             if not pend:
                 self._json({"ok": False, "error": "提案が見つかりませぬ(期限切れか既処理)"}); return
             if pend["uid"] and who.get("uid") and str(who["uid"]) != pend["uid"]:
@@ -11593,8 +11664,8 @@ class H(BaseHTTPRequestHandler):
                 if pend["tool"] in ("aurora_create", "aurora_append"):   # Aurora書込は casper_aurora 経由(write token・別endpoint)
                     a = pend["args"] or {}
                     uname = _uid_to_name(actor)            # 投稿者は username(casper でなく本人名)
-                    html = casper_aurora.make_note(a.get("title", ""), a.get("body", ""),
-                                                   author=uname, tags=a.get("tags"))
+                    # 【乙】プレビューと執行は同一の関で描く(別関数で描けば新しい嘘が生まれる・Fable)
+                    html = aurora_render_for_write(a, actor)
                     if pend["tool"] == "aurora_create":
                         result = casper_aurora.create(a.get("title", ""), html, author_id=uname, tags=a.get("tags"))
                     else:                                  # aurora_append = 既存ノートの修正(新版)
@@ -11659,7 +11730,11 @@ class H(BaseHTTPRequestHandler):
                 if casper_outbox:                          # 状態を確定(=『送信済』の唯一の真実源)
                     (casper_outbox.mark_sent(pid, str(result)[:500]) if ok
                      else casper_outbox.mark_failed(pid, str(result)[:500]))
-                self._json({"ok": ok, "executed": True, "tool": pend["tool"], "result": str(result)[:2000]})
+                _msg = (aurora_written_note(pend["tool"], pend["args"], result)
+                        if (ok and pend["tool"] in ("aurora_create", "aurora_append")) else "")
+                self._json({"ok": ok, "executed": True, "tool": pend["tool"],
+                            "message": _msg,                       # 【乙】承認後の帰還文(書けた物だけを名乗る)
+                            "result": str(result)[:2000]})
             except Exception as e:
                 if casper_outbox:
                     casper_outbox.mark_failed(pid, str(e)[:500])   # executing→failed(再試行可・状態を残す)
