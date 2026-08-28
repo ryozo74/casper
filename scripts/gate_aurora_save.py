@@ -93,7 +93,9 @@ def _called_names(fn_node):
 
 
 _BUILTIN_NAMES = set(vars(__builtins__)) if isinstance(__builtins__, type(sys)) else set(__builtins__)
-_PROVIDED = seen | _BUILTIN_NAMES | {"re", "os", "json", "urllib"}
+# 2026-08-28: 注記が台帳(outbox)を照会するようになった。台帳は本ゲートの検分対象外ゆえ
+# 身代わりを M へ据えており(下)、ここでも「与えられている名」として扱う。
+_PROVIDED = seen | _BUILTIN_NAMES | {"re", "os", "json", "urllib", "casper_outbox"}
 _visited, _unresolved = set(), {}
 _queue = list(ENTRYPOINTS)
 while _queue:
@@ -114,6 +116,9 @@ if _unresolved:
 
 M = {}
 exec("import re, os, json, urllib.request", M)
+# 2026-08-28: 注記が台帳(outbox)を照会するようになった。ここでは常に0件の身代わりを置く
+# (本ゲートは注記の文言でなく保存判定を検めるゆえ、台帳は空でよい)。
+M["casper_outbox"] = type("_OB", (), {"pending": staticmethod(lambda uid=None: [])})
 exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
 _wants = M["_wants_aurora_save"]
 _guard = M["_guard_completion_claims"]

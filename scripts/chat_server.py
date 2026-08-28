@@ -748,6 +748,17 @@ def _register_pending(tool, args, uid, summary, thread=None, origin="user", quer
             _cmpl = _dm_body_complete(_q, _body)
             if _cmpl is not True:                           # False/None(判定不能)を等しく fail-closed で倒す(cmd_486の掟)
                 return None
+    # 【Fable診断2026-08-27】trace の cards は「立った」を数え「**届く**」を数えていない。
+    # uid 空で起票されたカードは誰の画面にも出ぬ孤児になる(実測4枚が proposed のまま残存)。
+    # ★止めはせぬ(起票は正当な経路から来る)。だが**黙って作らぬ**——刻んで数えられるようにする。
+    if not str(uid or "").strip():
+        try:
+            with open(os.path.join(HERE, "casper_orphan_card.jsonl"), "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                                     "tool": tool, "origin": origin,
+                                     "query": str(query or "")[:120]}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
     if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
         try:
             pid = casper_outbox.propose(tool, args, uid, summary, thread=thread,
@@ -782,6 +793,59 @@ def _last_assistant(msgs):
         if m.get("role") == "assistant":
             return str(m.get("content") or "")
     return ""
+
+
+# 承認カードそのものについての問い。★これに**モデルを答えさせぬ**。
+# 【Fable診断2026-08-27】実測: 15:17〜15:40、uid=31 宛の承認待ちカードが**実在したまま**、
+# 利用者は「承認ボタンは？」と九度問い、機構は答えを持ちながら口が開かなかった。
+# 再浮上の機構(_surface_pending_drafts)は在ったが、発火語が「下書き/承認待ち」であり、
+# 利用者の言う「承認ボタン」「承認カード」「Auroraに保存は？」に一つも合致しなかった。
+# ★『センサーには消費者を同じ便で』の五度目の再発。語彙の鍵穴を広げるのでなく、
+#   **カードについての問いは常に台帳を照会して実物で答える**決定的経路にする。
+_CARD_ASK_RE = re.compile(
+    r"(承認(カード|ボタン|待ち)|保存(ボタン|カード)|ボタン.{0,6}(出|でて|でな|無い|ない|どこ)|"
+    r"カード.{0,6}(出|でて|でな|無い|ない|どこ|表示)|"
+    r"(出ない|でない|出てこない|でてこない|表示されない|見当たら))", re.I)
+
+
+def card_ask_answer(who, pending_actions):
+    """承認カードについて問われた時、**台帳の実物**で答える。
+
+    ★モデルに答えさせぬ(実測 15:22:55: 長広舌の一般論を返し、殿の役に立たなかった)。
+    ★在る時は実物のカードを再描画する。無い時は「0件」と正直に名乗り、
+      「もう一度お申し付けを」の壊れたループへ再誘導せぬ。
+    返り: 案内文(str) / 判ぜぬ時は ""
+    """
+    if not casper_outbox:
+        return ""
+    # ★誰か判らぬ相手に台帳を開かぬ。uid 空で起票された孤児カードが存在し(実測4枚)、
+    #   これを無記名の閲覧者へ見せれば**他人の下書きを他人に見せる**ことになる。
+    if not str(who.get("uid") or "").strip():
+        return ("どなたか判じられませなんだゆえ、承認待ちをお出しできませぬ"
+                "（ログインの上、今一度お確かめくだされ）。")
+    try:
+        props = [r for r in casper_outbox.pending(who.get("uid"))
+                 if r.get("tool") in ("send_message", "aurora_create", "aurora_append")]
+    except Exception:
+        return ""
+    if not props:
+        return ("ただいま承認待ちは**0件**にござる。\n\n"
+                "★『カードが出ておらぬ』のでなく、**立てるべき下書きがそもそも無い**状態にござる。"
+                "直前の御依頼で下書きを作れなんだ時は、その理由を申し上げているはず——"
+                "見当たらねば、直したい箇所をもう一度お示しくだされ"
+                "（例:「2. BOKAN 担当事項に〇〇を追加」のように、どの節を・どう、まで）。")
+    props.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    lines = []
+    for i, r in enumerate(props[:6], 1):
+        pid = r["id"]
+        args = r.get("args") or {}
+        PENDING_ACTIONS[pid] = {"tool": r["tool"], "args": args, "uid": r.get("uid"),
+                                "summary": r.get("summary"), "thread": r.get("thread")}
+        pending_actions.append({"id": pid, "tool": r["tool"], "args": args,
+                                "summary": r.get("summary")})
+        lines.append(f"{i}. {_draft_excerpt(r['tool'], args)}（{str(r.get('ts', ''))[11:16]}）")
+    return ("承認待ちが **" + str(len(props)) + "件** ござる。この下に実物を出しまする——"
+            "本文をお確かめの上、ボタンを押してくだされ。\n\n" + "\n".join(lines))
 
 
 def _surface_pending_drafts(who, pending_actions, limit=6):
@@ -2691,7 +2755,7 @@ def _resolve_send_mentions(text, held_lines, pending_actions):
     return (text + "\n\n" + note).strip() if text else note
 
 
-def _guard_completion_claims(text, pending_actions):
+def _guard_completion_claims(text, pending_actions, uid=None):
     """P1(Fable処方・fail-closed): アクション完了主張は"真実値テキスト"。承認カード(=アクション台帳の
     レシート)が無いのに送信/報告等を断じた文を打ち消す。既成事実化を salvage の網羅性でなく構造で封じる
     ——qwenがどんな未知の書式でツールをテキスト化しても、カードが無ければ完了主張は通さない。
@@ -2710,11 +2774,26 @@ def _guard_completion_claims(text, pending_actions):
     _any_comm = any(hit and not is_au for hit, is_au in _hits)
     text = "\n".join(ln for ln, (hit, _) in zip(text.splitlines(), _hits) if not hit)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    # 【Fable診断2026-08-27】注記は**台帳を照会してから**書く。
+    # 実測の害: この注記は outbox を見ておらず、承認待ちが在る時に言えば嘘、
+    # 無い時に「もう一度お申し付けを」と言えば**壊れたループへの再誘導**になっていた
+    # (15:52〜16:08 で実演済み)。★注記は指示でなく**状態の申告**にする。
+    # ★命令文の形をしていたため、利用者がこの注記をそのままチャットに貼り返す事故も起きた
+    #   (2026-08-26 22:12・kuromaru殿)。
+    _tail = "承認カードが出ておらねば、もう一度お申し付けを。"
+    try:
+        if casper_outbox and uid:
+            _n = len([r for r in casper_outbox.pending(uid)
+                      if r.get("tool") in ("send_message", "aurora_create", "aurora_append")])
+            if _n:
+                _tail = (f"承認待ちが {_n}件 ござる——画面右下の「🔐 承認待ち」から実物を開けまする。")
+    except Exception:
+        pass
     if _any_aurora and not _any_comm:
-        note = "※Auroraへの保存はまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。"
+        note = "※Auroraへの保存はまだ実行しておりませぬ。" + _tail
     else:
         # 通信系が混じる(またはAurora以外)場合は主語を固定せず汎用注記へ——事実と異なる主語を語らせぬ(欠陥2)。
-        note = "※上記アクションはまだ実行しておりませぬ。承認カードが出ておらねば、もう一度お申し付けを。"
+        note = "※上記アクションはまだ実行しておりませぬ。" + _tail
     return (text + "\n\n" + note).strip()
 
 
@@ -8654,6 +8733,56 @@ _AURORA_PIN_TTL = int(os.environ.get("CASPER_AURORA_PIN_TTL", "1800"))   # 30分
 _AURORA_PIN_RELEASE_RE = re.compile(r"(新規|新しく|新しい|別の資料|別の文書|違う資料|もう[1一]つ|new doc)")
 
 
+_AURORA_PIN_FILE = os.path.join(HERE, "casper_aurora_pin.json")
+_AURORA_PIN_LOG = os.path.join(HERE, "casper_aurora_pin.jsonl")
+
+
+def _pin_log(event, key, **kw):
+    """錨の生き死にを刻む。
+
+    【Fable診断2026-08-27】pin は RAM のみで、自艦の auto-reload が消していた。
+    利用者との会話の最中に三度デプロイして三度状態を拭った疑いがあるが、
+    **錨の実在ログが無いゆえ断定できなかった**。以後は set/hit/expire/release/wipe を刻む
+    ——観測できぬ機構は、次に壊れた時もまた「推し量り」で終わる。
+    """
+    try:
+        with open(_AURORA_PIN_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                                "event": event, "key": key, **kw}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _pin_save():
+    """錨を disk へ。★再読込(auto-reload)を跨いで生き延びさせる。"""
+    try:
+        tmp = _AURORA_PIN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_AURORA_PIN, f, ensure_ascii=False)
+        os.replace(tmp, _AURORA_PIN_FILE)
+    except Exception:
+        pass
+
+
+def _pin_load():
+    """起動時に錨を戻す。期限切れは載せぬ。"""
+    try:
+        if not os.path.exists(_AURORA_PIN_FILE):
+            return 0
+        with open(_AURORA_PIN_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        now = time.time()
+        n = 0
+        for k, v in (d or {}).items():
+            if isinstance(v, dict) and now - float(v.get("ts", 0)) <= _AURORA_PIN_TTL:
+                _AURORA_PIN[k] = v
+                n += 1
+        _pin_log("load", "", restored=n)
+        return n
+    except Exception:
+        return 0
+
+
 def aurora_pin_key(thread, who):
     """錨の鍵。thread が在ればそれ、無ければ session。
     ★thread だけを鍵にすると、thread を持たぬ経路で錨が一切効かぬ(実測: 8/26 のカードは
@@ -8664,9 +8793,23 @@ def aurora_pin_key(thread, who):
     return "sid:" + str((who or {}).get("sid") or "")
 
 
+def aurora_pin_user_key(who):
+    """人ごとの控えの鍵。
+
+    【Fable診断2026-08-27】kiyotomo殿は一午後に**5回**新スレッドを開かれた(実測)。
+    開くたび thread の錨が外れ、そのたびURLの貼り直しを強いていた。
+    ★人は「さっきまで扱っていた資料」を続けて直したいのであって、
+      スレッドを開き直したから別の資料になるわけではない。thread の錨が無い時の受け皿を置く。
+    """
+    u = str((who or {}).get("uid") or "").strip()
+    return ("u:" + u) if u else ""
+
+
 def aurora_pin_set(key, ref, material=""):
     if not key or not ref or not ref.get("doc_id"):
         return
+    _pin_log("set", key, doc_id=ref.get("doc_id"), title=ref.get("title", ""),
+             material_len=len(material or ""))
     _AURORA_PIN[key] = {"doc_id": ref["doc_id"], "title": ref.get("title", ""),
                         "slug": ref.get("ref", ""),
                         # ★包み紙(【Aurora資料: 題】/著者行/タグ行)を落として持つ。
@@ -8676,6 +8819,14 @@ def aurora_pin_set(key, ref, material=""):
     if len(_AURORA_PIN) > 200:                       # 際限なく溜めぬ(古い順に落とす)
         for k in sorted(_AURORA_PIN, key=lambda x: _AURORA_PIN[x]["ts"])[:100]:
             _AURORA_PIN.pop(k, None)
+    _pin_save()
+
+
+def aurora_pin_set_for(key, user_key, ref, material=""):
+    """thread の錨と人ごとの控えを同じ便で置く(片方だけ置いて食い違わせぬ)。"""
+    aurora_pin_set(key, ref, material=material)
+    if user_key and user_key != key:
+        aurora_pin_set(user_key, ref, material=material)
 
 
 def aurora_pin_get(key):
@@ -8684,12 +8835,22 @@ def aurora_pin_get(key):
     if not p:
         return None
     if time.time() - p.get("ts", 0) > _AURORA_PIN_TTL:
+        _pin_log("expire", key, doc_id=p.get("doc_id"))
         _AURORA_PIN.pop(key, None)
+        _pin_save()
         return None
     return p
 
 
-def aurora_pinned_digest(key, query):
+def aurora_pin_get_any(key, user_key):
+    """thread の錨 → 無ければ人ごとの控え。新スレッドを開いても資料を見失わぬ。"""
+    p = aurora_pin_get(key)
+    if p:
+        return p
+    return aurora_pin_get(user_key) if user_key else None
+
+
+def aurora_pinned_digest(key, query, user_key=""):
     """発話にURLが無くとも、錨が生きておればその資料を注入する。
 
     ★これが無いと『貼る→追加→書け』の二手目以降で本文が消え、モデルが記憶から作文する。
@@ -8698,11 +8859,14 @@ def aurora_pinned_digest(key, query):
     if _AURORA_URL_RE.search(query or ""):
         return ""                                    # URLが在る turn は本家(aurora_url_digest)が出す
     if _AURORA_PIN_RELEASE_RE.search(query or ""):
+        _pin_log("release", key)
         _AURORA_PIN.pop(key, None)
+        _pin_save()
         return ""
-    p = aurora_pin_get(key)
+    p = aurora_pin_get_any(key, user_key)
     if not p:
         return ""
+    _pin_log("hit", key, doc_id=p.get("doc_id"))
     out = ("\n\n## 【いま扱っている Aurora 資料(機構が保持・これが一次資料)】\n"
            f"doc_id: {p['doc_id']}\n題: {p.get('title') or '(無題)'}\n")
     if p.get("material"):
@@ -8717,7 +8881,7 @@ def aurora_pinned_digest(key, query):
     return out
 
 
-def aurora_url_digest(query, pin_key=None):
+def aurora_url_digest(query, pin_key=None, user_key=""):
     """【貼られた資料は機構が取りに行く】殿が Aurora の資料URLを貼ったなら、その本文を注入する。
     qwen の tool 選択(aurora_get)に委ねると、URLを渡されても読まずに周辺を作文する——実測
     2026-07-27 19:04: 19ステータス定義の資料URLを渡されたのに Score のタスク一覧を並べ、次には
@@ -8733,7 +8897,7 @@ def aurora_url_digest(query, pin_key=None):
         try:
             _r2 = aurora_doc_ref(u)
             if _r2 and _r2.get("found"):
-                aurora_pin_set(pin_key, _r2, material=_AURORA_URL_MEMO[u])
+                aurora_pin_set_for(pin_key, user_key, _r2, material=_AURORA_URL_MEMO[u])
         except Exception:
             pass
         return _AURORA_URL_MEMO[u]
@@ -8760,7 +8924,7 @@ def aurora_url_digest(query, pin_key=None):
     _ref = aurora_doc_ref(u)
     if _ref and _ref.get("found") and _ref.get("doc_id"):
         # ★錨を据える。これが無いと次の turn で本文も doc_id も消え、モデルが作文する。
-        aurora_pin_set(pin_key, _ref, material=r.get("material") or "")
+        aurora_pin_set_for(pin_key, user_key, _ref, material=r.get("material") or "")
         out += (f"\n\n### この資料は直せる(doc_id={_ref['doc_id']})\n"
                 "修正を頼まれたら **aurora_append** を呼べ(doc_id は上の値をそのまま使う)。"
                 "**『編集機能が無い/できない』とは言うな——道具は在る。**\n"
@@ -9599,6 +9763,27 @@ class H(BaseHTTPRequestHandler):
             who = identify(self); uid = who.get("uid")
             self._json(casper_push.get_prefs(uid) if (casper_push and uid) else {})
             return
+        elif self.path == "/api/pending":               # 承認待ちトレイ(本人のもののみ)
+            # 【Fable診断2026-08-27】カードは作られた turn のストリーミング内でしか描画されず、
+            # リロード・新スレッドで承認待ちが視界から永久に消えていた(実測: 8/26 夕に立った
+            # 二枚が翌日 13:38 まで宙に浮いた)。★カードに恒久の住所を与える。
+            _w = identify(self)
+            _out = []
+            try:
+                if casper_outbox and _w.get("uid"):
+                    for r in casper_outbox.pending(_w.get("uid")):
+                        if r.get("tool") not in ("send_message", "aurora_create", "aurora_append"):
+                            continue
+                        _a = r.get("args") or {}
+                        PENDING_ACTIONS[r["id"]] = {"tool": r["tool"], "args": _a,
+                                                    "uid": r.get("uid"), "summary": r.get("summary"),
+                                                    "thread": r.get("thread")}
+                        _out.append({"id": r["id"], "tool": r["tool"], "args": _a,
+                                     "summary": r.get("summary"), "ts": r.get("ts")})
+            except Exception:
+                pass
+            _out.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+            self._json({"pending": _out, "n": len(_out)})
         elif self.path == "/api/notifications":         # M3: 先回り通知(未読)。本人のもののみ。
             who = identify(self)
             uid = who.get("uid")
@@ -11223,7 +11408,7 @@ class H(BaseHTTPRequestHandler):
             # 結線されておらず、Aurora保存・DM送信・起票はいずれも起こり得ぬ。にも関わらず完了検問だけが
             # 抜けており、雲に座る間は「保存しました」と言い切っても誰も止めなかった。
             # 雲では**必ず**カード0件ゆえ、完了主張は例外なく嘘である。[]を渡して fail-closed に倒す。
-            ans = _guard_completion_claims(ans, [])
+            ans = _guard_completion_claims(ans, [], uid=who.get("uid"))
             if _web_query:                                        # cmd_501: WebSearchを許可したturnのみ札付け出口検問
                 ans = casper_web.grounding_gate(ans, {"ok": True, "urls": casper_web._URL_RE.findall(raw or "")})
             ans, diagram = render_diagram(ans)
@@ -11303,9 +11488,10 @@ class H(BaseHTTPRequestHandler):
         if _gate.get("digest"):                          # 理解ゲート: その人の既定ファセット/別名を前提として注入(入力の接地)
             sysadd += _gate["digest"]
         _pin_key = aurora_pin_key(thr, who)              # 資料の錨(turnを跨ぐ)
-        _au_note = aurora_url_digest(ll_user, pin_key=_pin_key)   # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
+        _pin_ukey = aurora_pin_user_key(who)             # 人ごとの控え(スレッドを開き直しても見失わぬ)
+        _au_note = aurora_url_digest(ll_user, pin_key=_pin_key, user_key=_pin_ukey)   # 貼られたAurora資料URL→機構が本文を取得して一次資料として注入
         if not _au_note:                                 # URLが無いturn→錨が生きておればそれを注入
-            _au_note = aurora_pinned_digest(_pin_key, ll_user)
+            _au_note = aurora_pinned_digest(_pin_key, ll_user, user_key=_pin_ukey)
         sysadd += _au_note
         _au_resolved = "これが一次資料" in _au_note        # cmd_493: 一次資料が確定した turn か(取得失敗時は False=vault併用を妨げぬ)
         sysadd += deixis_table_digest(ll_user, msgs)      # 『この表』→直前の自分の応答の表を機構が名指して渡す
@@ -11606,13 +11792,23 @@ class H(BaseHTTPRequestHandler):
             elif _material and not routed:          # 材料の投げ入れ→事実＋選択肢(決定的・qwen非経由)
                 _mreply, choices_obj = material_choices(_material)
                 routed = {"_choices": True, "reply": _mreply}
+        # 【Fable診断2026-08-27】承認カードについての問いは、台帳の実物で答える(最優先)。
+        # ★モデルに答えさせぬ。実測 15:17〜15:40、カードが実在したまま殿は九度問われ、
+        #   機構は答えを持ちながら口が開かなかった。
+        if not routed and not choices_obj and _CARD_ASK_RE.search(ll_user or ""):
+            try:
+                _ca = card_ask_answer(who, pending_actions)
+                if _ca:
+                    routed = {"_surfaced": True, "reply": _ca}
+            except Exception:
+                pass
         # 【殿御下命2026-08-27】資料修正の決定的経路。
         # 実害(15:22〜16:08): 錨で現本文は渡っていたのに、モデルが道具を呼ばず「承認カードが
         # 表示されます」と約束だけを返し、14turn連続で cards=0。殿は九度「ボタンが出ない」と
         # 訴えられた。★欠けていたのは『モデルが道具を呼ぶ』という運だけ。運に頼るのをやめる。
         if not routed and not choices_obj and not _snz and not _assign_short:
             try:
-                _pe = aurora_pin_get(aurora_pin_key(thr, who))
+                _pe = aurora_pin_get_any(aurora_pin_key(thr, who), aurora_pin_user_key(who))
                 if (_pe and _pe.get("material") and _AURORA_EDIT_INTENT_RE.search(ll_user or "")
                         and not _AURORA_PIN_RELEASE_RE.search(ll_user or "")):
                     _eb, _ereason = aurora_edit_compose(_pe, ll_user)
@@ -11803,7 +11999,7 @@ class H(BaseHTTPRequestHandler):
                                 else:
                                     # 【殿御下命2026-08-27】発話にURLが無い turn でも、錨が生きておれば其れを使う。
                                     # 実害: 「貼る→追加→書け」の二手目以降で資料を見失い、モデルが作文した。
-                                    _pn = aurora_pin_get(aurora_pin_key(thr, who))
+                                    _pn = aurora_pin_get_any(aurora_pin_key(thr, who), aurora_pin_user_key(who))
                                     if _pn:
                                         cur = {"doc_id": _pn["doc_id"], "title": _pn.get("title", "")}
                                 new_intent = bool(re.search(r"新規|新しく|新しい|別の|別に|もう[1一]つ|new doc", ll_user or ""))
@@ -11894,7 +12090,7 @@ class H(BaseHTTPRequestHandler):
         # 【殿御下命2026-08-27】道具が呼ばれなんだ修正turnを機構が拾う(既存salvageはcreate専用ゆえ)。
         if not pending_actions:
             try:
-                _pin2 = aurora_pin_get(aurora_pin_key(thr, who))
+                _pin2 = aurora_pin_get_any(aurora_pin_key(thr, who), aurora_pin_user_key(who))
                 _sb = aurora_append_salvage(final, _pin2, str(ll_user))
                 if _sb:
                     _aargs = {"doc_id": _pin2["doc_id"], "body": _sb}
@@ -11949,7 +12145,7 @@ class H(BaseHTTPRequestHandler):
         _gloss = final != _pre; _pre = final
         final = _guard_unrostered_person_claim(final)                # 出口検問(AC2・cmd_508): roster外のファイル名幹(profile_u_*)が人として主語に立つ文を差し止め
         _person_slot_guarded = final != _pre; _pre = final
-        final = _guard_completion_claims(final, pending_actions)     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
+        final = _guard_completion_claims(final, pending_actions, uid=who.get("uid"))     # P1: カード無き完了主張を打ち消し(既成事実化の構造封じ)
         _grd = final != _pre; _pre = final
         _enum_src = final                                            # cmd_499(記録用): 検問前の列挙行を控える(検問が削っても番号突合は生かす)
         final = _validate_choices(final, pending_actions, choices=(choices_obj or attn_cards), injected=sysadd)   # Q2: 裸の選択要求(装置なし)を削除+中立誘導(不変条件①)
@@ -12700,6 +12896,11 @@ if __name__ == "__main__" and not _NO_DAEMON:
     _signal.signal(_signal.SIGINT, _on_term_signal)
 
     _start_https()
+    # 【Fable診断2026-08-27】錨を disk から戻す。RAM だけに置けば、自艦の auto-reload が
+    # 利用者との会話の最中に状態を拭う(実測: 15:22 のデプロイ直後、TTL内のはずの錨が無く
+    # 「承認カードだして」が捏造の新規作成に化けた)。治療しながら患者を揺らしていた。
+    _restored = _pin_load()
+    print(f"[pin] 錨を戻し申した: {_restored}件", flush=True)
     # cmd_510第3便(観測の機構・軍師addendum設計): 真の復帰時刻をchat_server自身に自己申告させる
     # (pidfile自己申告=cmd_509第1便と同じ型)。HTTPで外から叩いて確認しない
     # (観測のために本番へ負荷をかけては本末転倒・軍師addendum「retrieve-then-renderと同じ思想」)。

@@ -28,7 +28,9 @@ WANT = ["_AURORA_URL_RE", "_AURORA_URL_MEMO", "aurora_url_digest", "seiri_aurora
         "aurora_doc_ref", "_AURORA_DOC_URL_RE", "_AURORA_DOC_ID_RE",
         # 2026-08-27: 解決した資料を turn を跨いで保つ錨
         "aurora_pin_set", "aurora_pin_get", "aurora_pin_key", "_AURORA_PIN",
-        "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE"]
+        "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE",
+        "aurora_pin_set_for", "aurora_pin_get_any", "aurora_pin_user_key",
+        "_pin_log", "_pin_save", "_AURORA_PIN_FILE", "_AURORA_PIN_LOG"]
 
 # cmd_495: 固有名は pack から受け取る(gate_pjname.pyと同じ流儀・cmd_491 AC3の趣旨を本ゲートにも適用)。
 _examples = pack_config.get("examples", {}) or {}
@@ -50,7 +52,8 @@ if missing:
     sys.exit(1)
 
 M = {}
-exec("import re, os, json", M)
+exec("import re, os, json, time, datetime", M)
+M["HERE"] = HERE   # 錨のファイル定義が参照する
 exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
 _digest = M["aurora_url_digest"]
 _memo = M["_AURORA_URL_MEMO"]

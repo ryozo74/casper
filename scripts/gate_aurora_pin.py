@@ -35,6 +35,9 @@ sys.path.insert(0, HERE)
 SRC = os.path.join(HERE, "chat_server.py")
 SRC_TEXT = open(SRC, encoding="utf-8").read()
 
+import tempfile as _tf
+TMP2 = _tf.mkdtemp(prefix="gate_pin_files_")
+
 results = []
 
 
@@ -77,11 +80,15 @@ class _Au:
 WANT_F = ["aurora_pin_key", "aurora_pin_set", "aurora_pin_get", "aurora_pinned_digest",
           "aurora_valid_doc_id", "aurora_body_drift_note", "aurora_shrink_note",
           "aurora_append_salvage", "_aurora_plain", "aurora_edit_compose",
-          "_strip_material_wrapper", "aurora_canonical_body"]
+          "_strip_material_wrapper", "aurora_canonical_body",
+          # 2026-08-28: 錨の永続と観測・人ごとの控え
+          "_pin_log", "_pin_save", "_pin_load", "aurora_pin_user_key",
+          "aurora_pin_set_for", "aurora_pin_get_any"]
 WANT_A = ["_AURORA_PIN", "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE", "_AURORA_URL_RE",
           "_DOC_ID_RE", "_AURORA_EDIT_INTENT_RE", "_AURORA_BODY_KW_RE",
           "_MATERIAL_WRAPPER_RE", "_META_BLOCK_RE", "_H1_RE", "_DECOR_META_RE",
-          "_STRUCT_HEAD_RE", "_INSTR_QUOTED_RE", "_INSTR_ADD_RE", "_PROPER_TOKEN_RE"]
+          "_STRUCT_HEAD_RE", "_INSTR_QUOTED_RE", "_INSTR_ADD_RE", "_PROPER_TOKEN_RE",
+          "_AURORA_PIN_FILE", "_AURORA_PIN_LOG"]
 
 
 def build(src_text):
@@ -96,7 +103,8 @@ def build(src_text):
     if missing:
         return None, missing
     M = {}
-    exec("import re, os, json, time", M)
+    exec("import re, os, json, time, datetime", M)
+    M["HERE"] = TMP2   # 錨のファイルは一時場所へ(本番不変)
     exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
     return M, []
 
@@ -190,7 +198,8 @@ _route = SRC_TEXT[SRC_TEXT.index("# aurora_create / aurora_append = 書込 → �
 _route = _route[:_route.index('elif fn == "calendar_lookup"')]
 chk("⑦ 起票側でも偽の doc_id を機構の値で置き換える",
     "if not aurora_valid_doc_id(args.get(\"doc_id\")):" in _route)
-chk("⑦ URLの無い turn では錨から doc_id を採る", "aurora_pin_get(aurora_pin_key(thr, who))" in _route)
+chk("⑦ URLの無い turn では錨から doc_id を採る",
+    "aurora_pin_get_any(aurora_pin_key(thr, who), aurora_pin_user_key(who))" in _route)
 chk("⑦ 本文の乖離検問が承認カードに載る", "aurora_body_drift_note(" in _route)
 
 
@@ -287,7 +296,7 @@ chk("⑩ 推論機が落ちても例外で落ちず、理由を名乗る(沈黙�
 
 _fp = SRC_TEXT[SRC_TEXT.index("資料修正の決定的経路"):][:1900]
 chk("⑩ 結線: 錨＋修正意図で発火する",
-    "_AURORA_EDIT_INTENT_RE.search(ll_user" in _fp and "aurora_pin_get(" in _fp)
+    "_AURORA_EDIT_INTENT_RE.search(ll_user" in _fp and "aurora_pin_get_any(" in _fp)
 chk("⑩ 結線: こしらえた本文で aurora_append のカードを立てる",
     '_register_pending("aurora_append"' in _fp)
 chk("⑩ 結線: 縮み検問・乖離検問も通す",
@@ -299,7 +308,8 @@ chk("⑩ 結線: 既に routed/選択カードが在れば触らぬ",
 
 # ── ★突然変異 ────────────────────────────────────────────────────────────
 print("\n--- 突然変異検証 ---")
-mut = SRC_TEXT.replace("    p = aurora_pin_get(key)\n    if not p:\n        return \"\"",
+# ★錨の引き方は二段(thread→人ごとの控え)になった。変異はその入口を潰す。
+mut = SRC_TEXT.replace("    p = aurora_pin_get_any(key, user_key)\n    if not p:\n        return \"\"",
                        "    p = None\n    if not p:\n        return \"\"", 1)
 assert mut != SRC_TEXT, "変異が当たっていない(ゲートの自己点検)"
 M2, _ = build(mut)
