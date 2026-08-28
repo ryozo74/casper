@@ -77,7 +77,7 @@ def build(src_text):
     if missing:
         return None, missing
     M = {}
-    exec("import re, os, json, time, datetime", M)
+    exec("import re, os, json, time, datetime, threading", M)
     M["HERE"] = TMP
     M["casper_outbox"] = _OB
     M["PENDING_ACTIONS"] = {}

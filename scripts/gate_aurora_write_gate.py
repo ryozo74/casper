@@ -54,7 +54,7 @@ FABRICATED = ("# SORAFUNE 様 定例MTG 議事録\n\n**参加者:** 武井(ryoji
 
 WANT_F = ["aurora_write_guard", "aurora_turn_sources", "aurora_edit_compose",
           "aurora_canonical_body", "_strip_material_wrapper"]
-WANT_A = ["_PROPER_TOKEN_RE", "_INSTR_QUOTED_RE", "_MATERIAL_WRAPPER_RE",
+WANT_A = ["_PROPER_TOKEN_RE", "_INSTR_QUOTED_RE", "_INSTR_REMOVE_RE", "_MATERIAL_WRAPPER_RE",
           "_DECOR_META_RE", "_STRUCT_HEAD_RE"]
 
 
@@ -175,6 +175,28 @@ chk("⑥ 古い道(salvage)も同じ関を通る",
 _sv = SRC_TEXT[SRC_TEXT.index('_t2, args, _wr = aurora_write_guard('):][:600]
 chk("⑥ salvage も弾かれたら起票せぬ", "if _wr:" in _sv and "return final, None" in _sv)
 chk("⑥ 起票できなんだ時(pid None)も pending へ積まぬ", "if pid is None:" in _sv)
+
+
+# ── ⑦ Fable検分(2026-08-28)で指された残る口 ─────────────────────────────
+print("── ⑦ Fable検分で指された残る口 ──")
+# ★【未解決として記す】純和文の捏造(固有名ゼロ)は今も素通りする(Fable実測)。
+#   量で見る手を試したが、材料に人の発話だけを数えれば正当な起票まで止まり、
+#   注入分まで数えれば検問が無効になった。**塞げておらぬ事実をゲートに刻んで残す**
+#   ——緑を見て「塞がった」と誤らぬために。
+_pure = ("来月の納品を前倒しすることが決まりました。担当は制作部が引き継ぎます。"
+         "併せて検収の日程も見直すこととし、関係者へ周知いたします。")
+_t, _a, _w = M["aurora_write_guard"]("aurora_create", {"title": "決定事項", "body": _pure},
+                                     None, "保存して", sources="今日の打合せの記録を残して")
+chk("⑦ 【未解決】固有名を含まぬ純和文の捏造は**今も通る**(この行が緑=穴が開いたまま)",
+    _w == "")
+
+# ★append salvage の口も関を通っているか(Fable: 見出し50%だけで台帳へ入っていた)
+_as = SRC_TEXT[SRC_TEXT.index("_sb = aurora_append_salvage(final"):]
+_as = _as[:_as.index("final, _au_choices = _salvage_text_toolcall")]
+chk("⑦ ★append salvage も関を通る", "aurora_write_guard(" in _as)
+chk("⑦ 弾かれたら起票せぬ", "_wr3" in _as and "_aargs = None" in _as)
+chk("⑦ 関が組み直した本文で検問・要約を作る(元の地の文でなく)",
+    '_aargs.get("body", "")' in _as)
 
 # ── ★突然変異 ────────────────────────────────────────────────────────────
 print("\n--- 突然変異検証 ---")

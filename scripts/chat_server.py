@@ -1000,6 +1000,10 @@ _H1_RE = re.compile(r"(?is)<h1[^>]*>.*?</h1>")
 
 # 指示の中の「人が示した文言」。鉤括弧か『〜を追加/追記』の目的語。
 _INSTR_QUOTED_RE = re.compile(r"[「『\"']([^「」『』\"'\n]{2,120})[」』\"']")
+# 削除・置換の指示。引用が「消す対象/置換元」を指しているゆえ、逐語検問を掛けてはならぬ。
+_INSTR_REMOVE_RE = re.compile(
+    r"(削除|消し|消す|消して|除い|取り除|抜い|変更|置換|置き換え|差し替え|直し|直す|書き換え|"
+    r"に変え|へ変え|でなく|ではなく)")
 _INSTR_ADD_RE = re.compile(r"(?:に|へ)?\s*([^\n。、]{4,120}?)\s*(?:を|の)?\s*(?:追加|追記|足し|加え)")
 # 固有名らしき token(カタカナ列・英数語)。漢字は普通の語と紛れるゆえ採らぬ(誤検出を避ける)。
 _PROPER_TOKEN_RE = re.compile(r"[ァ-ヴー]{3,}|[A-Za-z][A-Za-z0-9_-]{2,}")
@@ -1159,10 +1163,14 @@ def aurora_edit_compose(pin, instruction):
         if len(kept) < max(2, int(len(heads) * 0.5)):
             lost = [h for h in heads if h not in kept][:4]
             return None, ("元の見出しが大きく失われまする(消える見出し: "
-                          + " / ".join(lost) + ")。修正でなく作り直しになっており申す")
+                          + " / ".join(lost) + ")。修正でなく作り直しになっており申す。\n"
+                          "★全面の書き直しをお望みなら「**新しい資料として作って**」とお申し付けくだされ"
+                          "——元の資料は残したまま、別の資料として起こしまする")
     if len(out) < len(mat) * 0.4:            # 極端に痩せた=指示に無い部分まで落ちている
         return None, (f"本文が {len(mat)}字 → {len(out)}字 に痩せまする。"
-                      "指示に無い所まで落ちておらぬか確かめが要り申す")
+                      "指示に無い所まで落ちておらぬか確かめが要り申す。\n"
+                      "★要約版がお望みなら「**新しい資料として作って**」とお申し付けくだされ"
+                      "——元の資料はそのまま残りまする")
     # 【Fable診断2026-08-27】見出しの生存だけでは破られる型が二つある。実測一件あり。
     # ★① 節内の言い換え: 承認済みv2で、殿の「UE＋コンソールデータを提供」が
     #    「UE＋コンソール: SORAFUNE様に提供。」へ**無断で書き換えられた**。見出しは全生存ゆえ検問は通った。
@@ -1170,7 +1178,12 @@ def aurora_edit_compose(pin, instruction):
     # ★逐語検問は**人が鉤括弧で括った時だけ**に絞る。地の文から「足す語」を切り出す試みは
     #   場所の指定まで巻き込み(実測:「2. BOKAN 担当事項にUE＋コンソールを…」を丸ごと拾った)、
     #   正当な修正を弾いた。**正しい修正を止める検問は、無いより悪い。**
-    _q = _INSTR_QUOTED_RE.findall(instruction or "")
+    # ★【Fable検分2026-08-28】鉤括弧は「入れる文言」だけでなく**「指す文言」**にも使われる。
+    #   「『8月: 契約書締結』の行を削除して」——この引用は**消す対象**であって残す文言ではない。
+    #   方向を区別せねば、引用つきの削除・置換の指示が**構造的に全滅**する(Fable実測)。
+    #   ★正しい修正を止める検問は、無いより悪い。三度目の絞り直し。
+    _q = ([] if _INSTR_REMOVE_RE.search(instruction or "")
+          else _INSTR_QUOTED_RE.findall(instruction or ""))
     _lit = [x.strip() for x in _q if 4 <= len(x.strip()) <= 120]
     for _x in _lit:
         if _x not in out:
@@ -1258,6 +1271,15 @@ def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
         if new:
             return tool, a, ("この turn の材料に無い語が本文に現れており申す("
                              + " / ".join(new[:5]) + ")。書き起こしになっておらぬか確かめが要り申す")
+        # 【Fable検分2026-08-28・**未解決**】固有名だけを見るゆえ、**純和文の捏造は素通りする**。
+        # Fable実測:「来月の納品を前倒しすることが決まりました。担当は制作部が引き継ぎます」は
+        # 材料に一語も無くとも通る。
+        # ★量(材料に対する本文の膨らみ)で見る手を試したが、二つとも成らなんだ:
+        #   ・材料に人の発話だけを数えると、注入された Calendar/議事録から正当に起こす資料まで止まる
+        #   ・注入分まで材料に数えると sources が常に巨大になり、検問が無効になる
+        #   ★過剰に止める検問は無いより悪い(この二日で二度踏んだ)。**塞げておらぬと記して残す。**
+        #   要るのは量でも固有名でもなく『内容語がどれだけ材料に在るか』の照合であり、
+        #   それは形態素の解析を伴う——別の手当として立てるべきもの。
         return tool, a, ""
 
     return tool, a, ""
@@ -8831,7 +8853,10 @@ def _pin_log(event, key, **kw):
 def _pin_save():
     """錨を disk へ。★再読込(auto-reload)を跨いで生き延びさせる。"""
     try:
-        tmp = _AURORA_PIN_FILE + ".tmp"
+        # ★【Fable検分2026-08-28】tmp名が固定だと二スレッドの save が交錯し、壊れたJSONが
+        #   os.replace される。_pin_load は例外を握って0を返すゆえ、次の再読込で**全錨が無言で消える**
+        #   ——auto-reload が状態を拭う病を、今度は破損経由で再演し得る。スレッド毎の名にする。
+        tmp = "%s.%d.tmp" % (_AURORA_PIN_FILE, threading.get_ident())
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_AURORA_PIN, f, ensure_ascii=False)
         os.replace(tmp, _AURORA_PIN_FILE)
@@ -8934,8 +8959,12 @@ def aurora_pinned_digest(key, query, user_key=""):
     if _AURORA_URL_RE.search(query or ""):
         return ""                                    # URLが在る turn は本家(aurora_url_digest)が出す
     if _AURORA_PIN_RELEASE_RE.search(query or ""):
-        _pin_log("release", key)
+        # ★【Fable検分2026-08-28】thread鍵だけを落とすと、人ごとの控えから旧資料が復活し
+        #   「別の資料に移ったつもりが前の資料を直している」が起きる。**両鍵を落とす。**
+        _pin_log("release", key, user_key=user_key)
         _AURORA_PIN.pop(key, None)
+        if user_key:
+            _AURORA_PIN.pop(user_key, None)
         _pin_save()
         return ""
     p = aurora_pin_get_any(key, user_key)
@@ -12190,10 +12219,20 @@ class H(BaseHTTPRequestHandler):
                 _pin2 = aurora_pin_get_any(aurora_pin_key(thr, who), aurora_pin_user_key(who))
                 _sb = aurora_append_salvage(final, _pin2, str(ll_user))
                 if _sb:
+                    # ★【Fable検分2026-08-28】この口が関を通っておらなんだ。
+                    #   モデルの地の文をそのまま body に据え、検問は「見出し50%生存」だけ
+                    #   ——Fable が『止められぬ型』と断じた当の検問のみで台帳へ入っていた。
+                    #   ★関は一本。ここも通す(append ゆえ body は機構が組み直される)。
                     _aargs = {"doc_id": _pin2["doc_id"], "body": _sb}
+                    _t3, _aargs, _wr3 = aurora_write_guard(
+                        "aurora_append", _aargs, _pin2, str(ll_user),
+                        sources=aurora_turn_sources(msgs, _pin2), who=who)
+                    if _wr3:
+                        _aargs = None
+                if _sb and _aargs:
                     _asum = _action_summary("aurora_append", _aargs)
-                    _asum += aurora_shrink_note(_pin2["doc_id"], _sb)
-                    _asum += aurora_body_drift_note(_pin2["doc_id"], _sb)
+                    _asum += aurora_shrink_note(_pin2["doc_id"], _aargs.get("body", ""))
+                    _asum += aurora_body_drift_note(_pin2["doc_id"], _aargs.get("body", ""))
                     _apid = _register_pending("aurora_append", _aargs, who.get("uid"), _asum,
                                               origin="user", query=str(ll_user)[:400], trace_id=_tid)
                     if _apid:

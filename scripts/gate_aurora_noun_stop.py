@@ -59,7 +59,7 @@ def build(src_text, llm_verdict=True):
     if missing:
         return None, missing
     M = {}
-    exec("import re, os, json, time, datetime", M)
+    exec("import re, os, json, time, datetime, threading", M)
     M["HERE"] = HERE
     M["_wants_aurora_save_llm"] = lambda q: llm_verdict      # 分類器は呼ばぬ(経路だけ検める)
     exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)

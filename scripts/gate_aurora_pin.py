@@ -55,7 +55,13 @@ REAL_URL = f"http://nina_notepc_02.local:8100/doc/{REAL_SLUG}"
 CUR_STYLE = ("<style>@import url('https://fonts.googleapis.com/css2?family=Outfit');"
              + "body{font-family:-apple-system;max-width:1000px;margin:40px auto;line-height:1.7}"
              + "h1{border-bottom:3px solid #333}" * 30 + "</style>")
+# ★【Fable検分2026-08-28】aurora_canonical_body の**主分岐**(<div class="meta">で切る方)が
+#   どのゲートでも試されていなかった。本番の note_html は必ず meta div を持つ
+#   (casper_aurora.py:302)。fixture に無ければ、_META_BLOCK_RE が壊れても全ゲート緑のまま
+#   **41a93c3 が治した当の病(著者行が本文へ漏れる)が再発する**。本番の形にする。
 CUR_HTML = (CUR_STYLE + "<h1>SORAFUNE 様 MTG 議事録</h1>"
+            + '<div class="meta">著者: kiyotomo / 作成: 2026-08-27<br>'
+            + '<span class="tag">SORAFUNE</span><span class="tag">議事録</span></div>'
             "<h2>1. シナリオ・コンセプト</h2><p>場所: 体育館等</p>"
             "<h2>2. BOKAN 担当事項</h2><p>Flight Simulator</p>"
             "<h2>3. スケジュール</h2><p>8月: 契約書締結</p>"
@@ -87,7 +93,7 @@ WANT_F = ["aurora_pin_key", "aurora_pin_set", "aurora_pin_get", "aurora_pinned_d
 WANT_A = ["_AURORA_PIN", "_AURORA_PIN_TTL", "_AURORA_PIN_RELEASE_RE", "_AURORA_URL_RE",
           "_DOC_ID_RE", "_AURORA_EDIT_INTENT_RE", "_AURORA_BODY_KW_RE",
           "_MATERIAL_WRAPPER_RE", "_META_BLOCK_RE", "_H1_RE", "_DECOR_META_RE",
-          "_STRUCT_HEAD_RE", "_INSTR_QUOTED_RE", "_INSTR_ADD_RE", "_PROPER_TOKEN_RE",
+          "_STRUCT_HEAD_RE", "_INSTR_QUOTED_RE", "_INSTR_ADD_RE", "_INSTR_REMOVE_RE", "_PROPER_TOKEN_RE",
           "_AURORA_PIN_FILE", "_AURORA_PIN_LOG"]
 
 
@@ -103,7 +109,7 @@ def build(src_text):
     if missing:
         return None, missing
     M = {}
-    exec("import re, os, json, time, datetime", M)
+    exec("import re, os, json, time, datetime, threading", M)
     M["HERE"] = TMP2   # 錨のファイルは一時場所へ(本番不変)
     exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
     return M, []
@@ -221,7 +227,10 @@ chk("⑧ 錨が無ければ拾わぬ", M["aurora_append_salvage"](added, None, "
 chk("⑧ 本文の無い錨では拾わぬ(骨格が読めぬゆえ推測で書き換えぬ)",
     M["aurora_append_salvage"](added, {"doc_id": REAL_ID, "material": ""}, "追加して") is None)
 
-_sv = SRC_TEXT[SRC_TEXT.index("道具が呼ばれなんだ修正turnを機構が拾う(既存salvageはcreate専用ゆえ)"):][:1600]
+# ★三度目の窓ずれ。固定字数で切るのをやめ、次の処理までで切る
+#   (関を一本通した分だけ長くなり、検査対象が窓から外れた——機構は在るのにゲートが赤くなる)。
+_sv = SRC_TEXT[SRC_TEXT.index("道具が呼ばれなんだ修正turnを機構が拾う(既存salvageはcreate専用ゆえ)"):]
+_sv = _sv[:_sv.index("final, _au_choices = _salvage_text_toolcall")]
 chk("⑧ 結線: 拾った本文で aurora_append のカードを立てる",
     '_register_pending("aurora_append"' in _sv)
 chk("⑧ 結線: 拾った回にも縮み検問・乖離検問を通す",
@@ -293,6 +302,10 @@ M["ollama_chat"] = _boom
 rb_ = M["aurora_edit_compose"](PIN2, INSTR)
 chk("⑩ 推論機が落ちても例外で落ちず、理由を名乗る(沈黙せぬ)",
     rb_[0] is None and bool(rb_[1]))
+# ★身代わりを元へ戻す。戻さねば以後の検体がすべて「推論機が落ちた」に化け、
+#   後続の検問を検めたことにならぬ(実測でこれを踏み、⑪が四つ赤くなった)。
+M["ollama_chat"] = lambda msgs, **k: (GEN.__setitem__("prompt", msgs[0]["content"])
+                                      or {"message": {"content": GEN["out"]}})
 
 _fp = SRC_TEXT[SRC_TEXT.index("資料修正の決定的経路"):][:1900]
 chk("⑩ 結線: 錨＋修正意図で発火する",
@@ -305,6 +318,42 @@ chk("⑩ 結線: 生成ループを跳ばして決定的に返す", '"_surfaced"
 chk("⑩ 結線: 『新規/別の資料』の時は発火せぬ", "_AURORA_PIN_RELEASE_RE.search(ll_user" in _fp)
 chk("⑩ 結線: 既に routed/選択カードが在れば触らぬ",
     "if not routed and not choices_obj" in _fp)
+
+
+# ── ⑪ Fable検分(2026-08-28)で指された型 ─────────────────────────────────
+print("── ⑪ Fable検分の型 ──")
+chk("⑪ ★正本の主分岐(meta divで切る)が働く=著者行が本文へ漏れぬ",
+    "著者: kiyotomo" not in (M["aurora_canonical_body"](REAL_ID)[0] or ""))
+chk("⑪ タグ行も漏れぬ", "SORAFUNE議事録" not in (M["aurora_canonical_body"](REAL_ID)[0] or "").replace(" ", ""))
+chk("⑪ 本文は残る", "1. シナリオ" in (M["aurora_canonical_body"](REAL_ID)[0] or ""))
+
+# ★引用つきの削除・置換の指示(Fable実測で誤BLOCKした型)
+GEN["out"] = CUR_MD.replace("## 3. スケジュール\n8月: 契約書締結\n\n", "## 3. スケジュール\n")
+chk("⑪ ★『「8月: 契約書締結」の行を削除して』が通る(引用は消す対象ゆえ)",
+    M["aurora_edit_compose"](PIN2, "「8月: 契約書締結」の行を削除して")[0] is not None)
+GEN["out"] = CUR_MD.replace("Flight Simulator", "フライトシム")
+chk("⑪ ★『「Flight Simulator」を「フライトシム」に変更して』が通る",
+    M["aurora_edit_compose"](PIN2, "「Flight Simulator」を「フライトシム」に変更して")[0] is not None)
+GEN["out"] = added
+chk("⑪ 引用つきの追加では逐語検問が依然効く(方向を取り違えぬ)",
+    M["aurora_edit_compose"](PIN2, "「UE＋コンソールデータを提供」を追加して")[0] is not None)
+GEN["out"] = CUR_MD          # 指示の文言が入っておらぬ本文
+chk("⑪ 引用つきの追加で文言が入らねば止める",
+    M["aurora_edit_compose"](PIN2, "「まったく別の文言ZZZ」を追加して")[0] is None)
+
+# ★弾いた理由に逃げ道が書かれているか(Fable: 正規の抜け道が一本も無い)
+GEN["out"] = FABRICATED
+_r = M["aurora_edit_compose"](PIN2, "章立てを作り直して")
+chk("⑪ ★弾いた理由に『新しい資料として作る』逃げ道が書かれている",
+    _r[0] is None and "新しい資料として作って" in _r[1])
+
+# ★release は人ごとの控えも外す
+M["_AURORA_PIN"].clear()
+_uk2 = M["aurora_pin_user_key"](WHO2) if "WHO2" in dir() else "u:31"
+M["aurora_pin_set_for"]("th:x", _uk2, REF, material=CUR_MD)
+M["aurora_pinned_digest"]("th:x", "これは新規で作って", user_key=_uk2)
+chk("⑪ ★『新規で』と言えば人ごとの控えも外れる(旧資料が復活せぬ)",
+    M["aurora_pin_get_any"]("th:NEW", _uk2) is None)
 
 # ── ★突然変異 ────────────────────────────────────────────────────────────
 print("\n--- 突然変異検証 ---")

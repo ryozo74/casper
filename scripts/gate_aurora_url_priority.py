@@ -52,7 +52,7 @@ if missing:
     sys.exit(1)
 
 M = {}
-exec("import re, os, json, time, datetime", M)
+exec("import re, os, json, time, datetime, threading", M)
 M["HERE"] = HERE   # 錨のファイル定義が参照する
 exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
 _digest = M["aurora_url_digest"]
