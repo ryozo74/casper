@@ -87,6 +87,9 @@ WANT_F = ["aurora_pin_key", "aurora_pin_set", "aurora_pin_get", "aurora_pinned_d
           "aurora_valid_doc_id", "aurora_body_drift_note", "aurora_shrink_note",
           "aurora_append_salvage", "_aurora_plain", "aurora_edit_compose",
           "_strip_material_wrapper", "aurora_canonical_body",
+          # 2026-08-28(甲): 正本の取り直しが使う逆写像。抜き忘れると canonical_body が
+          # NameError で転び、錨の検めが「機構が在るのに赤」になる(窓ずれと同型の事故)
+          "_html_to_md",
           # 2026-08-28: 錨の永続と観測・人ごとの控え
           "_pin_log", "_pin_save", "_pin_load", "aurora_pin_user_key",
           "aurora_pin_set_for", "aurora_pin_get_any"]

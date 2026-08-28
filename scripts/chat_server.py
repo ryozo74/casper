@@ -1063,6 +1063,184 @@ def _strip_material_wrapper(text, title=""):
     return "\n".join(lines[drop:]).strip()
 
 
+def _html_to_md(html_src):
+    """描画済みHTML → `casper_aurora._md_body` が読み戻せる Markdown（同関数の**逆写像**）。
+
+    ★なぜ要るか(2026-08-28 実測・殿御下命の甲): 正本の取り直しが全タグを剥いでいた。
+      表は枡目が繋がって潰れ(「項目」+「内容」→**「項目内容」**)、太字も見出しも消えた。
+      その潰れた地の文が**次の版の材料**になるゆえ、往復のたびに化粧が焼ける。
+      kiyotomo殿が八度「表にして」と打たれた資料(d78e9ca6)は v11 で
+      <table> 0個・<strong> 0個 に成り果てていた。書込は毎回 sent と刻まれており、
+      **帳簿は緑・現物は白紙**であった。
+    ★対応表は `_md_body` が実際に吐く形だけを正とする(h2..h5 / ul>li /
+      table>thead>th,tbody>td / strong / code / a)。往復で形が保たれる事は
+      gate_aurora_roundtrip.py が機械で証める(旧実装で赤くなる事も同時に証める)。
+    ★知らぬタグは**中身の字だけを拾う**(消さぬ・捏造せぬ)。読取り側ゆえ fail-open——
+      逆写像が転んでも旧来の素剥ぎへ退き、本文そのものは決して失わぬ。
+    ★一関数に閉じてある: gate_aurora_pin.py は chat_server から関数だけをASTで抜いて
+      検める造りゆえ、機構が class と関数に割れていると検めの網から落ちる。
+    """
+    from html.parser import HTMLParser
+
+    class _P(HTMLParser):
+        """`casper_aurora._md_body` の**逆写像**。描画済みHTML → 同じ意味のMarkdown。
+
+        ★なぜ要るか(2026-08-28 実測・殿御下命の甲): 正本の取り直しが全タグを剥いでいた。
+          表は枡目が繋がって潰れ(「項目」+「内容」→**「項目内容」**)、太字も見出しも消えた。
+          その潰れた地の文が**次の版の材料**になるゆえ、往復のたびに化粧が焼ける。
+          kiyotomo殿が八度「表にして」と打たれた資料(d78e9ca6)は、v11 で
+          <table> 0個・<strong> 0個 に成り果てていた。書込は毎回 sent と刻まれており、
+          **帳簿は緑・現物は白紙**であった。
+        ★対応表は `_md_body` が実際に吐く形だけを正とする(h2..h5 / ul>li /
+          table>thead>th,tbody>td / strong / code / a)。往復で形が保たれる事を
+          gate_aurora_roundtrip.py が機械で証める。
+        ★知らぬタグは**中身の字だけを拾う**(消さぬ・捏造せぬ)。読取り側ゆえ fail-open。
+        """
+
+        _SKIP = {"script", "style", "head", "title", "meta", "link", "noscript"}
+        _INLINE = {"strong": "**", "b": "**", "code": "`"}
+
+        def __init__(self):
+            HTMLParser.__init__(self, convert_charrefs=True)
+            self.blocks = []          # 完成した Markdown 行
+            self._buf = []            # 進行中のインライン
+            self._skip = 0
+            self._a = []              # <a href> の入れ子
+            self._h = 0               # 見出しの深さ(0=見出しでない)
+            self._li = False
+            self._tbl = None          # {"head": [...] or None, "rows": [[...]]}
+            self._row = None
+            self._cell = None         # 枡目の中は独立の緩衝へ(表の外へ漏らさぬ)
+            self._row_head = False
+
+        # ---- 緩衝 ----
+        def _emit(self, s):
+            (self._cell if self._cell is not None else self._buf).append(s)
+
+        def _flush(self):
+            """進行中のインラインを1ブロックとして確定する。表の枡目の中では何もせぬ。"""
+            if self._cell is not None:
+                return
+            t = re.sub(r"[ \t]{2,}", " ", "".join(self._buf)).strip()
+            self._buf = []
+            if not t:
+                self._h = 0
+                self._li = False
+                return
+            if self._h:
+                # _md_body: `#`*n → <h{n+1}>。ゆえに h{k} → `#`*(k-1)(題の h1 は本文に来ぬ)
+                self.blocks.append("#" * max(1, min(4, self._h - 1)) + " " + t)
+            elif self._li:
+                self.blocks.append("- " + t)
+            else:
+                self.blocks.append(t)
+            self._h = 0
+            self._li = False
+
+        def _close_table(self):
+            tbl, self._tbl = self._tbl, None
+            if not tbl:
+                return
+            head, rows = tbl["head"], tbl["rows"]
+            if head is None and rows:
+                head = rows.pop(0)                     # thead を持たぬ表は先頭行を見出しに充てる
+            if not head:
+                return
+            w = len(head)
+            self.blocks.append("| " + " | ".join(head) + " |")
+            self.blocks.append("|" + "|".join(["---"] * w) + "|")
+            for r in rows:
+                r = (r + [""] * w)[:w]                 # 欠けた枡は空で埋め、余りは落とす(列ずれを作らぬ)
+                self.blocks.append("| " + " | ".join(r) + " |")
+
+        # ---- HTMLParser ----
+        def handle_starttag(self, tag, attrs):
+            if tag in self._SKIP:
+                self._skip += 1
+                return
+            if self._skip:
+                return
+            if tag in self._INLINE:
+                self._emit(self._INLINE[tag])
+            elif tag == "a":
+                href = dict(attrs).get("href") or ""
+                self._a.append(href)
+                if href:
+                    self._emit("[")
+            elif tag == "br":
+                self._emit(" ")
+            elif tag in ("th", "td"):
+                self._cell = []
+                self._row_head = self._row_head or (tag == "th")
+            elif tag == "tr":
+                self._row = []
+            elif tag == "table":
+                self._flush()
+                self._tbl = {"head": None, "rows": []}
+            elif tag == "li":
+                self._flush()
+                self._li = True
+            elif tag in ("ul", "ol", "p", "div", "section", "article", "blockquote"):
+                self._flush()
+            elif re.fullmatch(r"h[1-6]", tag):
+                self._flush()
+                self._h = int(tag[1])
+
+        def handle_endtag(self, tag):
+            if tag in self._SKIP:
+                self._skip = max(0, self._skip - 1)
+                return
+            if self._skip:
+                return
+            if tag in self._INLINE:
+                self._emit(self._INLINE[tag])
+            elif tag == "a":
+                href = self._a.pop() if self._a else ""
+                if href:
+                    self._emit("](" + href + ")")
+            elif tag in ("th", "td"):
+                c = re.sub(r"\s+", " ", "".join(self._cell or [])).strip()
+                self._cell = None
+                if self._row is not None:
+                    self._row.append(c.replace("|", r"\|"))
+            elif tag == "tr":
+                row, self._row = self._row, None
+                head_row, self._row_head = self._row_head, False
+                if self._tbl is not None and row:
+                    if head_row and self._tbl["head"] is None:
+                        self._tbl["head"] = row
+                    else:
+                        self._tbl["rows"].append(row)
+            elif tag == "table":
+                self._close_table()
+            elif tag in ("li", "p", "div", "section", "article", "blockquote") or re.fullmatch(r"h[1-6]", tag):
+                self._flush()
+
+        def handle_data(self, data):
+            if self._skip or not data:
+                return
+            self._emit(re.sub(r"[ \t\r\n]+", " ", data))
+
+        def result(self):
+            self._close_table()
+            self._flush()
+            return re.sub(r"\n{3,}", "\n\n", "\n".join(self.blocks)).strip()
+
+    try:
+        p = _P()
+        p.feed(str(html_src or ""))
+        p.close()
+        out = p.result()
+        if out:
+            return out
+    except Exception:
+        pass
+    import html as _h                                  # ★退路: 逆写像が転んでも本文は失わぬ
+    t = re.sub(r"<br\s*/?>", "\n", str(html_src or ""))
+    t = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|table|ul|ol|th|td)>", "\n", t)
+    return _h.unescape(re.sub(r"<[^>]+>", "", t))
+
+
 def aurora_canonical_body(doc_id):
     """Aurora の**正本の本文だけ**を取り直す。返り: (本文, version) / 失敗は (None, None)。
 
@@ -1076,7 +1254,6 @@ def aurora_canonical_body(doc_id):
     """
     if not doc_id:
         return None, None
-    import html as _htmlmod                        # ★module級には無い(seiri_aurora_fetch内と同じ作法)
     try:
         import casper_aurora as _au
         raw = _au.get(doc_id)
@@ -1103,9 +1280,10 @@ def aurora_canonical_body(doc_id):
         m2 = _H1_RE.search(body)
         if m2:
             body = body[m2.end():]
-    body = re.sub(r"<br\s*/?>", "\n", body)
-    body = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|table|ul|ol)>", "\n", body)
-    body = _htmlmod.unescape(re.sub(r"<[^>]+>", "", body))
+    # ★2026-08-28(甲): ここが全タグを剥いでいた。表は「項目」+「内容」→「項目内容」と
+    #   潰れ、太字と見出しは消え、その地の文が次の版の材料になっていた(往復ごとに化粧が焼ける)。
+    #   `_md_body` の逆写像へ替え、往復で構造が保たれるようにする。
+    body = _html_to_md(body)
     body = _strip_material_wrapper(body, title=doc.get("title") or "")
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
     return (body or None), ver
