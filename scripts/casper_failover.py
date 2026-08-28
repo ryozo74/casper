@@ -54,6 +54,14 @@ SWITCH_CAP_PER_HOUR = 1
 ACTIVE_PROBE_TIMEOUT = 5                  # 定常probe(常駐モデルへ1トークン)
 TAGS_PROBE_TIMEOUT = 5                    # 候補probe(/api/tagsのみ・生成せず)
 SWITCH_GEN_TIMEOUT = 120                  # ★切替判断時のみ。冷間ロード(51秒/17.3GB)を見切らぬ値
+# ★probeは本番と同じ形で訊く(2026-08-29の誤診の根)。値は本番(chat_server)と同一を既定とする。
+PROBE_NUM_CTX = int(os.environ.get("CASPER_NUM_CTX", "12288"))
+PROBE_KEEP_ALIVE = os.environ.get("CASPER_KEEP_ALIVE", "-1")
+try:
+    PROBE_KEEP_ALIVE = int(PROBE_KEEP_ALIVE)          # "-1" は数値。"10m" 等の文字列もそのまま通す
+except ValueError:
+    pass
+HOME_GEN_PROBE_MIN_SEC = 120              # ★退避中のHOME生成probeの間引き(高価ゆえ・no silent capsで理由は刻む)
 PS_PROBE_TIMEOUT = 2                      # ★三値化判定: timeout直後の/api/ps照会(軽い・病んでる時に叩くため短く)
 COLD_CONFIRM_RATE_LIMIT_SEC = 10 * 60     # ★cold判定時のみ、confirm probe(120秒)をこの間隔で1回に制限
 COLD_STATE_FILE = os.path.join(HERE, "casper_cold_state.json")   # ★coldカウンタ+confirm rate-limitの専用台帳(breaker.jsonとは別・cold≠failをbreakerへ持ち込まない)
@@ -114,12 +122,28 @@ def _http_json(url, timeout, method="GET", body=None):
 
 def probe_generate(endpoint, model, timeout):
     """1トークン生成probe。max_tokens=1・最短prompt。
-    ★keep_alive="10m"を明示(Fable第三診)。ACTIVEの温存は殿の体感レイテンシのための
-    意図された政策——旧実装は未指定(Ollama既定5分)で32秒毎のprobeが偶然温めていたが、
-    「明示せぬ温存」は最悪の形(probe間隔や実装を変えた日に気づかず体感が悪化する)ゆえ
-    ここで政策として刻む。HOMEはprobe_tags(/api/tagsのみ)で温めない設計は変更せず。"""
+
+    ★【殿御下命2026-08-29・実測で判明した誤診の根】probeは**本番と同じ形で訊く**。
+    2026-08-29 03:52 の実測: 同じ .139 へ同じ4秒の窓で
+      ・本番(chat_server: num_ctx=12288 / keep_alive=-1) → HTTP200・0.1〜0.6秒
+      ・旧probe(num_ctx**なし** / keep_alive="10m")     → HTTP503 即答 4/4
+        `{"error":"server busy, please try again. maximum pending requests exceeded"}`
+    num_ctx を足すだけで 4/4 が 200 に変わった。**唯一の差は num_ctx** であった。
+    Ollama は (model, options) ごとに runner を持つゆえ、num_ctx の違う要求は
+    **別ランナーの積み直し**を求める。17.3GB常駐の隣に二つ目は載らず、行列が溢れて即 503。
+    ＝probeは「健やかな座席」に**答えられぬ形で問い、その沈黙を病と誤診**しておった。
+    chat_server:3419 が既に「num_ctx は対話/pinger と統一(Fable): 不一致はランナー再作成
+    =実質再ロードで温存を壊す(冷間の真犯人)」と定めておる。その掟をprobeも守る。
+
+    ★keep_alive も本番に合わせて -1(常駐)。旧実装の "10m" は、本番が -1 で釘付けにした
+    ランナーの寿命を probe が10分へ**引き下げて**しまう(測る者が測られる物を変えていた)。
+    ※候補席(HOME以外)へこれを打つと、その席にもモデルが常駐する。これは意図した選択である
+      ——候補を叩くのは「移る/戻る」を決める時だけであり、冷えたまま移れば殿を51秒待たせる。
+      本番と違う値にしたい時は CASPER_KEEP_ALIVE / CASPER_NUM_CTX で上書きできる。
+    """
     body = json.dumps({"model": model, "stream": False, "prompt": "ping",
-                       "keep_alive": "10m", "options": {"num_predict": 1}}).encode()
+                       "keep_alive": PROBE_KEEP_ALIVE,
+                       "options": {"num_ctx": PROBE_NUM_CTX, "num_predict": 1}}).encode()
     url = endpoint.rstrip("/") + "/api/generate"
     ok, data, ms = _http_json(url, timeout, method="POST", body=body)
     return ok, ms
@@ -260,10 +284,28 @@ def cmd_probe_active(args):
 
 
 def cmd_probe_home(args):
-    """HOME(CASPER_HOME_OLLAMA)へ/api/tagsのみ+在庫照合→record(gen_key/emb_key)。
-    ★ACTIVE==HOMEの時もrecordして構わない(record()は冪等に近い加点)——常時HOMEを見続けることが
-    『退避後にHOMEの復旧を検知できない』欠陥の再発防止そのもの。
-    在庫欠如は「到達したが答えられぬ」ため failとして記録する(退避の必要条件を破る)。"""
+    """HOME(CASPER_HOME_OLLAMA)へ/api/tagsのみ+在庫照合。
+
+    ★【殿御下命2026-08-29・実測で判明した台帳の嘘】旧実装は **在庫が在るだけで gen の欄へ
+      ok=True を書いて**おった。record(ok=True) は fails を 0 に戻すゆえ、ACTIVE==HOME の時は
+      毎周期こうなる:
+        probe-active: 生成失敗 → fails=1
+        probe-home  : 在庫あり → ok → **fails=0**
+      FAIL_TO_OPEN=3 に永久に届かず、**HOMEに居る限り座席は赤くなれぬ**。実測(2026-08-29 03:47〜):
+      `verdict:"fail"` が4周期続いても state は green のまま、判定は「退避不要」であった。
+    ★在庫は『生成が通る』の証拠にならぬ。tags は行列を通らぬ口ゆえ、行列が詰まっても即答する
+      (2026-08-26 の焼付きと同じ型)。**未確認をtrueと名乗るな。**
+
+    ゆえに欄を分ける:
+      ・在庫の可否 → 専用キー `stock:host:port`(観測は残す。混ぜぬ)
+      ・gen キー   → **在庫が無い時だけ fail を刻む**(不在は確かに生成不能の証拠。離れるのは速く)
+                     在庫が在る時は触らぬ。ACTIVE==HOME なら probe-active が本物の生成で判ずる。
+      ・退避中に限り、HOMEへ**本物の生成probe**を間引きつつ打つ(戻るのは遅く・証拠は本物で)。
+        ※雲に居る間は supervisor の cloud_return_check も probe-generate を打つ。二重でも
+          間引きが効くゆえ安全側。GPU→GPU退避時はこちらが唯一の復帰路になる。
+      ・emb キー   → 従前どおり在庫で記録(4d86b1a が塞いだ『雲に居る間 emb を誰も叩かず
+                     fails=63 で固着し復席条件を満たせぬ』穴を再発させぬ)。
+    """
     env = _read_env()
     home = env.get("CASPER_HOME_OLLAMA", "")
     if not home:
@@ -274,13 +316,39 @@ def cmd_probe_home(args):
     hostport = _hostport(home)
     gk = B.gen_key(*hostport.split(":", 1))
     ek = B.emb_key(*hostport.split(":", 1))
+    sk = "stock:" + hostport
     reach_ok, ms, have = probe_tags(home, [model, embed_model], TAGS_PROBE_TIMEOUT)
     stock_ok = reach_ok and have.get(model, False)
     embed_stock_ok = reach_ok and have.get(embed_model, False)
-    gen_state = B.record(gk, ok=stock_ok, latency_ms=ms)
+
+    B.record(sk, ok=stock_ok, latency_ms=ms)               # 在庫は在庫の欄へ(生成の欄と混ぜぬ)
     emb_state = B.record(ek, ok=embed_stock_ok, latency_ms=ms)
-    print(json.dumps({"gen_key": gk, "emb_key": ek, "reachable": reach_ok, "ms": ms,
-                      "stock": have, "gen_state": gen_state, "emb_state": emb_state}))
+
+    evacuated = _hostport(env.get("CASPER_OLLAMA", "")) != hostport
+    gen_action, gen_probe = "untouched", None
+    if not stock_ok:
+        B.record(gk, ok=False, latency_ms=ms)              # 在庫欠如=確かに生成不能。刻んでよい
+        gen_action = "fail(在庫欠如)"
+    elif evacuated:
+        st = _load_state()
+        now = time.time()
+        if now - float(st.get("home_gen_probe_ts") or 0) >= HOME_GEN_PROBE_MIN_SEC:
+            st["home_gen_probe_ts"] = now
+            _save_state(st)
+            g_ok, g_ms = probe_generate(home, model, SWITCH_GEN_TIMEOUT)
+            B.record(gk, ok=g_ok, latency_ms=g_ms)
+            gen_action = "本物の生成probeで判定"
+            gen_probe = {"ok": g_ok, "ms": g_ms}
+        else:
+            gen_action = f"間引き(前回から{int(now - float(st.get('home_gen_probe_ts') or 0))}秒<{HOME_GEN_PROBE_MIN_SEC}秒)"
+    else:
+        gen_action = "触らぬ(ACTIVE==HOME。生成の可否は probe-active が判ずる)"
+
+    print(json.dumps({"gen_key": gk, "emb_key": ek, "stock_key": sk, "reachable": reach_ok,
+                      "ms": ms, "stock": have, "evacuated": evacuated,
+                      "gen_action": gen_action, "gen_probe": gen_probe,
+                      "gen_state": B.state(gk), "emb_state": emb_state,
+                      "stock_state": B.state(sk)}, ensure_ascii=False))
     return 0
 
 
