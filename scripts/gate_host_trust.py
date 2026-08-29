@@ -41,9 +41,13 @@ def chk(name, cond):
 
 
 WANT_F = ["_host_trusted", "identify", "_register_pending",
-          "_guard_card_promise", "_resolve_send_mentions", "_send_mention_line_hit"]
+          "_guard_card_promise", "_resolve_send_mentions", "_send_mention_line_hit",
+          # 台帳の口は接地の注記を足す(本体の検めは gate_aurora_grounding.py)
+          "aurora_grounding_note", "aurora_material_recall", "aurora_ungrounded_facts",
+          "aurora_fact_tokens", "_aurora_body_key"]
 WANT_PREFIX = ("_CARD_PROMISE", "_SEND_MENTION", "_SEND_HELD", "_DM_BODY_INCOMPLETE",
-               "_NO_ACTOR", "_DM_QUOTED", "PENDING_ACTIONS", "_EMAIL_UID_CACHE")
+               "_NO_ACTOR", "_DM_QUOTED", "PENDING_ACTIONS", "_EMAIL_UID_CACHE",
+               "_FACT_", "_AURORA_MATERIAL")
 
 _LEDGER_DIR = tempfile.mkdtemp(prefix="gate_host_trust_")
 
@@ -53,7 +57,8 @@ class _OB:
     rows = []
 
     @staticmethod
-    def propose(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None):
+    def propose(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None,
+                grounding=None):        # grounding: 接地の証跡(gate_aurora_grounding.py が本体を検める)
         rec = {"id": "pid%d" % (len(_OB.rows) + 1), "tool": tool, "uid": str(uid or ""), "ts": "t"}
         _OB.rows.append(rec)
         return rec
@@ -88,7 +93,7 @@ def build(src_text):
     if missing:
         return None, missing
     M = {}
-    exec("import re, os, json, uuid, datetime, http.cookies", M)
+    exec("import re, os, json, uuid, datetime, http.cookies, threading", M)
     exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
     M["_casper_secrets"] = casper_secrets                # 本物の合鍵機構を挿す(身代わりにせぬ)
     M["casper_outbox"] = _OB
@@ -243,11 +248,11 @@ chk("★変異(loopback信頼を戻す): 母艦の上から uid=31 に成りす�
 _old_block = '''        except Exception:
             pass
         return None
-    if casper_outbox:'''
+    # ★接地の注記は**この一点**で足す'''
 assert SRC_TEXT.count(_old_block) == 1, "変異が当たっていない(ゲートの自己点検)"
 mut2 = SRC_TEXT.replace(_old_block, '''        except Exception:
             pass
-    if casper_outbox:''')
+    # ★接地の注記は**この一点**で足す''')
 M3, _ = build(mut2)
 _OB.rows = []
 chk("★変異(孤児の門を殺す): 持ち主なきカードが立ってしまう(赤化実証)",

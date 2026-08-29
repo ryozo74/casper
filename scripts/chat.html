@@ -607,8 +607,19 @@ function renderConfirm(b, pa){
     rc.style.cssText='font-size:14px;margin-bottom:8px;padding:8px 10px;border:1px solid #ef4444;border-radius:8px;background:rgba(239,68,68,.12)';
   }
   const editable = pa.args && typeof pa.args.body==='string';   // 本文を持つ副作用(DM/Aurora)は編集可
+  // 【2026-08-29】機構からの注記(材料に無い事実の語・本文が縮む等)を**必ず**人の目へ。
+  // ★編集可のカードでは要約を '──' で切り詰めるゆえ、末尾に足された注記は永久に届かなんだ。
+  //   ゆえ注記は独立の欄(pa.notes)で受け、切り詰めの**外**に帯として描く。
+  let nt=null;
+  const notes=(pa.notes||'').trim();
+  if(notes){
+    nt=document.createElement('div');
+    nt.textContent=notes;
+    nt.style.cssText='font-size:13px;line-height:1.6;margin-bottom:8px;padding:8px 10px;border:1px solid #ef4444;border-radius:8px;background:rgba(239,68,68,.12);white-space:pre-wrap';
+  }
   const s=document.createElement('div');
-  s.textContent = editable ? (pa.summary||pa.tool).split('──')[0].trim() : (pa.summary||pa.tool);
+  s.textContent = editable ? (pa.summary||pa.tool).split('──')[0].trim()
+                           : (pa.summary||pa.tool).replace(notes,'').trim();   // 注記の二重表示を避ける
   s.style.cssText='font-size:14px;margin-bottom:8px;white-space:pre-wrap';
   let ta=null, talb=null;
   if(editable){
@@ -676,7 +687,7 @@ function renderConfirm(b, pa){
   ng.onclick=async()=>{ ok.disabled=ng.disabled=true; await jpost('/api/confirm',{id:pa.id,approve:false}); rEl.textContent='却下しました';
     if(window.refreshPendingTray) window.refreshPendingTray(); };
   bs.appendChild(ok); bs.appendChild(ng); if(pvBtn) bs.appendChild(pvBtn);
-  c.appendChild(h); if(rc) c.appendChild(rc); c.appendChild(s);
+  c.appendChild(h); if(rc) c.appendChild(rc); if(nt) c.appendChild(nt); c.appendChild(s);   // 注記は要約より先(押す前に目へ入る位置)
   if(ta){ c.appendChild(talb); c.appendChild(ta); }
   if(pvWrap) c.appendChild(pvWrap);
   c.appendChild(bs); c.appendChild(rEl);

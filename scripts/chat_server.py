@@ -775,16 +775,32 @@ def _register_pending(tool, args, uid, summary, thread=None, origin="user", quer
         except Exception:
             pass
         return None
+    # ★接地の注記は**この一点**で足す(cmd_494 と同じ理由: 起票の口は十を超えるゆえ、
+    #   個々の呼出側に足せば必ずどれかが漏れる)。同時に、何に接地していたかを台帳へ刻む
+    #   ——従前 outbox は本文だけを刻み材料を刻まなんだゆえ、後から誰も接地を検められなんだ。
+    _gnote, _gung, _gmat = aurora_grounding_note(tool, args)
+    if _gnote:
+        summary = str(summary or "") + _gnote
+    _grd = ({"ungrounded": _gung, "material": (_gmat or "")[:6000],
+             "material_len": len(_gmat or ""), "guarded": True} if _gmat is not None else
+            ({"ungrounded": None, "material": None, "material_len": 0, "guarded": False}
+             if tool in ("aurora_create", "aurora_append") else None))
     if casper_outbox:                              # 永続outbox=真実源(再起動でも承認待ちが消えず・冪等・状態機械)
         try:
             pid = casper_outbox.propose(tool, args, uid, summary, thread=thread,
-                                        origin=origin, query=query, trace_id=trace_id)["id"]
+                                        origin=origin, query=query, trace_id=trace_id,
+                                        grounding=_grd)["id"]
         except Exception:
             pid = uuid.uuid4().hex[:12]
     else:
         pid = uuid.uuid4().hex[:12]
     PENDING_ACTIONS[pid] = {"tool": tool, "args": args, "uid": str(uid or ""), "summary": summary,
-                            "origin": origin, "query": query, "trace_id": trace_id}
+                            "origin": origin, "query": query, "trace_id": trace_id,
+                            # ★注記は**独立の欄**でも運ぶ。画面は編集可のカードで要約を
+                            #   split('──')[0] に切り詰めるゆえ、末尾へ足した注記は人の目に
+                            #   永久に届かなんだ(既存の aurora_shrink_note も同じ穴に落ちておった)。
+                            #   台帳・トレイには要約に含めたまま残す(後から数えられるように)。
+                            "notes": _gnote or ""}
     if len(PENDING_ACTIONS) > 50:                  # 古いものから間引き(メモリキャッシュの肥大防止・真実源はoutbox)
         for k in list(PENDING_ACTIONS)[:-50]:
             PENDING_ACTIONS.pop(k, None)
@@ -1482,7 +1498,109 @@ def aurora_written_note(tool, args, result):
     return " ".join(parts)
 
 
-def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
+# ── 純和文の捏造を『止めず・黙らせず』人の目へ映す(殿御下命2026-08-29) ──────────────
+# 【穴】下の aurora_write_guard は **片仮名/英字の固有名しか見ぬ**。ゆえに
+#   「来月の納品を前倒しすることが決まりました。担当は制作部が引き継ぎます」の類は
+#   材料に一語も無くとも素通りする(Fable検分2026-08-28。この関の中に『塞げておらぬ』と
+#   我が手で記して残した当の穴である)。
+# 【実測(将軍・2026-08-29/実在の aurora_create 37件に当てた)】
+#   ・「材料に無い**内容語**」で堰き止める案は**成らぬ**。承認された正本ほど不在語が多く
+#     (平均9.8語)、却下された方が少ない(3.0語)——信号が逆を向いておる。蔵書30207片の
+#     文書頻度(DF)で篩っても向きは変わらなんだ。正典に書いた仮説は実測で否まれた。
+#   ・不在語を**日付・数量・状態**の三種に絞ると境界が立つ:
+#       承認済 4/11件・計 6語(公開/完了/承認/8月 …骨組み寄りの弱い語)
+#       却下   4/14件・計10語(実施済み/提供済み/検討中/確認済み・上旬/月中)
+#       期限切 7/12件・計34語(納品済/承認済/制作中/確認中・676件/705件)
+#     捏造の正体は語彙ではなく**状態と数の主張**であった。
+# 【ゆえに止めぬ】この篩でも承認済11件のうち4件が鳴る。堰き止めれば正しい資料を止める
+#   ——★正しい修正を止める検問は無いより悪い(この二週で三度踏んだ)。
+#   aurora_shrink_note と同じ作法を採る: **止めはせぬが、黙って通さぬ。**
+#   承認カードに「材料に無い事実の語」を並べ、押す前の人の目に映す。
+# ★空白は同じ行の空白のみ(\s* は改行を跨ぎ「0729\n本」の如き語を作る——実データで踏んだ)
+_FACT_DATE_RE = re.compile(r"(?:[0-9０-９]{1,4}[ 　]*[年月日]|来月|今月|翌月|先月|月末|月初|"
+                           r"上旬|中旬|下旬|来週|今週|翌週|年度末|期末)")
+_FACT_QTY_RE = re.compile(r"[0-9０-９]+[ 　]*(?:件|本|人|名|回|点|円|%|％|時間|分|秒)")
+_FACT_STATE_RE = re.compile(r"(?:[一-龥ァ-ヶ]{1,6}(?:済み?|中)|完了|承認|決定|確定|着手|開始|"
+                            r"終了|中止|延期|前倒し|納品|本番|公開|保留|再開)")
+_AURORA_MATERIAL = {}                       # 本文の指紋 → その本文が接地していた材料
+_AURORA_MATERIAL_LOCK = threading.Lock()
+
+
+def aurora_fact_tokens(text):
+    """本文から『事実を運ぶ語』(日付・数量・状態)だけを抜く。
+
+    ★骨組みの語(概要・参加者・本文・目的…)は初めから見ぬ——実測でそれらは
+      承認された正本にこそ多く現れ、捏造の目印にならなんだ。
+    """
+    out = set()
+    for rx in (_FACT_DATE_RE, _FACT_QTY_RE, _FACT_STATE_RE):
+        for t in rx.findall(text or ""):
+            t = t.strip()
+            if len(t) >= 2:
+                out.add(t)
+    return sorted(out)
+
+
+def _aurora_body_key(body):
+    import hashlib
+    return hashlib.md5(str(body or "").encode("utf-8")).hexdigest()
+
+
+def aurora_material_remember(body, material):
+    """検問が『この本文は何に接地して作られたか』を控える。
+
+    ★台帳へ注ぐ口は幾つも在るが(_register_pending の呼出は十を超える)、**検問は一本**である。
+      ゆえ控えは検問側に置く。控えの無い本文が台帳へ着いたなら、それは
+      **検問を通らずに入った本文**——8/27 の捏造三枚が通った古い口の指紋であり、
+      黙って接地済に見せてはならぬ(失敗とゼロを同じ出口へ流さぬ)。
+    """
+    if not str(body or "").strip():
+        return
+    with _AURORA_MATERIAL_LOCK:
+        _AURORA_MATERIAL[_aurora_body_key(body)] = str(material or "")
+        if len(_AURORA_MATERIAL) > 200:                   # 上限つき(記憶を無限に肥やさぬ)
+            for k in list(_AURORA_MATERIAL)[:-200]:
+                _AURORA_MATERIAL.pop(k, None)
+
+
+def aurora_material_recall(body):
+    """控えを引く。**無い**(=検問を通っておらぬ)と、**在るが空**(=材料が無かった)を区別する。"""
+    with _AURORA_MATERIAL_LOCK:
+        return _AURORA_MATERIAL.get(_aurora_body_key(body))
+
+
+def aurora_ungrounded_facts(body, material):
+    """本文の事実語のうち、材料に見当たらぬもの。"""
+    mat = str(material or "")
+    return [t for t in aurora_fact_tokens(body) if t not in mat]
+
+
+def aurora_grounding_note(tool, args):
+    """承認カードへ足す注記と、台帳へ刻む証跡を返す → (note, ungrounded, material)。
+
+    ★これは**止める関ではない**。人の目に映す関である。
+    """
+    if tool not in ("aurora_create", "aurora_append"):
+        return "", None, None
+    body = str((args or {}).get("body") or "")
+    if not body.strip():
+        return "", None, None
+    mat = aurora_material_recall(body)
+    if mat is None:
+        return ("\n⚠ この本文が何に接地しておるか、機構に控えがござらぬ"
+                "(内容を運ぶ書込の検問を通らずに立った下書きにござる)。"
+                "中身が材料に沿うておるか、人の目でお確かめくだされ。"), None, None
+    ung = aurora_ungrounded_facts(body, mat)
+    if not ung:
+        return "", [], mat
+    note = ("\n⚠ 材料に無い『事実の語』が本文にござる: " + " / ".join(ung[:12])
+            + ("" if len(ung) <= 12 else f" ほか{len(ung) - 12}語")
+            + "\n(止めてはおりませぬ。日付・数量・状態は取り違えると実害になり申す"
+              "——材料に照らしてお確かめの上、承認くだされ)")
+    return note, ung, mat
+
+
+def aurora_write_guard(tool, args, pin, instruction, sources="", who=None, material=None):
     r"""内容を運ぶ Aurora 書込の**単一の関**。
 
     【Fable診断2026-08-27・構造の一手】
@@ -1496,6 +1614,13 @@ def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
     ★この関を通さねば台帳へ入れぬ。入口は幾つ在ってよいが、**執行路は一本**である。
 
     返り: (tool, args, reason)。reason が非空なら**起票せぬ**(fail-closed)。
+
+    material: 接地の注記(承認カードへ映す方)に使う**正直な材料**。省けば sources を用いる。
+      ★sources と別に受ける理由: 救済路(_salvage_text_toolcall)は**模型自身の応答**を
+        sources に含める(でなければ固有名の検問が正当な救済まで悉く止める)。その材料で
+        接地を測れば、捏造が己を材料として名乗る——自家中毒である。実地の生試験で露見した
+        (2026-08-29: 模型が拵えた「整理中」が材料に自分で入り、注記が永久に鳴らなんだ)。
+        **止める側の緩さは据え置き、映す側の材料だけを人の示した物に絞る。**
     """
     a = dict(args or {})
     if tool == "aurora_append":
@@ -1506,6 +1631,10 @@ def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
         body, why = aurora_edit_compose(pin, instruction)
         if not body:
             return tool, a, (why or "修正版をこしらえられませなんだ")
+        # ★この本文が何に接地したかを控える(正本＋仰せ＋この turn の材料)。承認カードで人へ映す。
+        aurora_material_remember(body, material if material is not None else
+                                 ((pin.get("material") or "") + "\n"
+                                  + (instruction or "") + "\n" + (sources or "")))
         return tool, {"doc_id": pin["doc_id"], "body": body}, ""
 
     if tool == "aurora_create":
@@ -1526,15 +1655,13 @@ def aurora_write_guard(tool, args, pin, instruction, sources="", who=None):
         if new:
             return tool, a, ("この turn の材料に無い語が本文に現れており申す("
                              + " / ".join(new[:5]) + ")。書き起こしになっておらぬか確かめが要り申す")
-        # 【Fable検分2026-08-28・**未解決**】固有名だけを見るゆえ、**純和文の捏造は素通りする**。
-        # Fable実測:「来月の納品を前倒しすることが決まりました。担当は制作部が引き継ぎます」は
-        # 材料に一語も無くとも通る。
-        # ★量(材料に対する本文の膨らみ)で見る手を試したが、二つとも成らなんだ:
-        #   ・材料に人の発話だけを数えると、注入された Calendar/議事録から正当に起こす資料まで止まる
-        #   ・注入分まで材料に数えると sources が常に巨大になり、検問が無効になる
-        #   ★過剰に止める検問は無いより悪い(この二日で二度踏んだ)。**塞げておらぬと記して残す。**
-        #   要るのは量でも固有名でもなく『内容語がどれだけ材料に在るか』の照合であり、
-        #   それは形態素の解析を伴う——別の手当として立てるべきもの。
+        # 【Fable検分2026-08-28の穴・2026-08-29 手当】固有名だけを見るゆえ、純和文の捏造
+        # (「来月の納品を前倒しすることが決まりました」)はここを素通りする。
+        # ★量で見る手も、内容語の不在で見る手も、実測で否まれた(上の _FACT_* の頭書きに数を記す)。
+        #   残る一手は**止めずに映す**こと——ここで材料を控え、承認カードが
+        #   「材料に無い事実の語」を人の目へ差し出す(aurora_grounding_note)。
+        #   ★この関は fail-open のまま据え置く。過剰に止める検問は無いより悪い。
+        aurora_material_remember(body, material if material is not None else known)
         return tool, a, ""
 
     return tool, a, ""
@@ -1640,8 +1767,12 @@ def _salvage_text_toolcall(final, who, pending_actions, query=None, trace_id=Non
             #   ★正直に記す: この経路の body は**殿が画面で見たばかりの応答そのもの**ゆえ、
             #     接地の検問はほぼ素通りする(材料に応答自身を含めるため)。ここでの値打ちは
             #     『検問が漏れなく当たる』ことではなく、**今後の手当が一箇所で全経路に効く**こと。
+            #   ★2026-08-29: 止める側(sources)には応答を含めたまま(過剰阻止を避ける)、
+            #     映す側(material)は**人が示した物だけ**に絞る。でなければ捏造が己を材料と
+            #     名乗り、承認カードの注記が構造的に鳴かぬ(生試験で実測)。
             _t2, args, _wr = aurora_write_guard("aurora_create", args, None, str(query or ""),
-                                                sources=(str(query or "") + "\n" + str(f or "")), who=who)
+                                                sources=(str(query or "") + "\n" + str(f or "")), who=who,
+                                                material=str(query or ""))
             if _wr:
                 return final, None
             summary = _action_summary("aurora_create", args)
@@ -4342,6 +4473,9 @@ def uploader_to_aurora(src_path, note, filename, uid):
     title = re.sub(r"\s+", " ", (note or "").strip())[:120] \
         or os.path.splitext(os.path.basename(filename or src_path))[0]
     args = {"title": title, "body": body[:20000], "tags": ["casper", "uploader"]}
+    # ★材料は『投じられた実体から抜いた本文そのもの』——模型が組んだ文ではない(逐語の運搬)。
+    #   控えねば承認カードが「接地の控えがござらぬ」と吠え、正当な取込のたびに狼少年になる。
+    aurora_material_remember(args["body"], body)
     summary = _action_summary("aurora_create", args)
     pid = _register_pending("aurora_create", args, uid, summary,
                             origin="user", query=f"[uploader] {filename} → Aurora")
@@ -11599,6 +11733,8 @@ class H(BaseHTTPRequestHandler):
                         self._json({"ok": False, "error": "文書が見つかりませぬ"}); return
                     md = casper_doc.to_markdown(doc)
                     args = {"title": doc.get("title", "無題"), "body": md, "tags": req.get("tags") or []}
+                    # ★材料は『人が手元で組み上げた当の文書』——逐語で写すのみゆえ新たな主張は生まれぬ。
+                    aurora_material_remember(md, md + "\n" + str(doc.get("title") or ""))
                     summary = _action_summary("aurora_create", args)
                     pid = _register_pending("aurora_create", args, who.get("uid"), summary, thread=req.get("thread"))
                     self._json({"ok": True, "confirm": {"id": pid, "tool": "aurora_create", "args": args, "summary": summary}})
@@ -12303,6 +12439,9 @@ class H(BaseHTTPRequestHandler):
                                             "お示しいただければ、今一度こしらえまする。")}
                     if _eb:
                         _eargs = {"doc_id": _pe["doc_id"], "body": _eb}
+                        # ★この口は検問(aurora_write_guard)を通らぬが、本文は同じ組直しの関から出る。
+                        #   ゆえ材料も同じ形で控える(正本＋仰せ)——控えを欠けば偽の警報になる。
+                        aurora_material_remember(_eb, (_pe.get("material") or "") + "\n" + str(ll_user or ""))
                         _esum = _action_summary("aurora_append", _eargs)
                         _esum += aurora_shrink_note(_pe["doc_id"], _eb)
                         _esum += aurora_body_drift_note(_pe["doc_id"], _eb)
@@ -12912,6 +13051,12 @@ class H(BaseHTTPRequestHandler):
                     for _k in list(_LAST_CHOICES)[:-200]:
                         _LAST_CHOICES.pop(_k, None)
             for pa in pending_actions:              # Stage2: 承認待ち操作をUIへ
+                # ★注記は台帳の口(_register_pending)で足される。呼出側の控えた summary は
+                #   注記の付く前の古い写しゆえ、**画面へ出す一点で引き直す**(でなければ
+                #   注記は台帳にだけ在って人の目には届かぬ=消費者なき警報になる)。
+                _pcache = PENDING_ACTIONS.get(pa.get("id")) or {}
+                if _pcache.get("summary"):
+                    pa = dict(pa, summary=_pcache["summary"], notes=_pcache.get("notes") or "")
                 self.wfile.write((json.dumps({"confirm": pa}, ensure_ascii=False) + "\n").encode())
             self.wfile.write(b'{"done":true}\n')
         except Exception:

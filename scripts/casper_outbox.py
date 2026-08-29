@@ -65,7 +65,7 @@ def _audience(rec):
 
 
 def propose(tool, args, uid, summary, thread=None, origin="user", query=None, trace_id=None,
-            verb=None, audience=None):
+            verb=None, audience=None, grounding=None):
     """アクションを台帳に proposed で起票。返り=レコード(id を含む)。
     origin: user(利用者の依頼)|casper(先回り提案) / query: 発端の発話 / trace_id: 対応トレース。
     verb: M4動詞名(assign/reschedule/...・任意) / audience: 承認カードを見せる uid 集合(M4権限層・
@@ -75,7 +75,11 @@ def propose(tool, args, uid, summary, thread=None, origin="user", query=None, tr
            "tool": tool, "args": args, "uid": str(uid or ""), "summary": summary,
            "thread": thread, "state": "proposed", "result": None, "updated": _now(),
            "origin": origin, "query": query, "trace_id": trace_id,
-           "verb": verb, "audience": [str(u) for u in audience] if audience else [str(uid or "")]}
+           "verb": verb, "audience": [str(u) for u in audience] if audience else [str(uid or "")],
+           # grounding: この本文が何に接地して作られたか(材料・材料に無い事実の語・検問を通ったか)。
+           # ★本文だけを刻み材料を刻まねば、後から誰も接地を検められぬ——2026-08-29 の実測が
+           #   材料を再現できず難渋した所以。病んだ瞬間の証言は、その時に刻まねば残らぬ。
+           "grounding": grounding}
     with _LOCK:
         with open(STORE, "a", encoding="utf-8") as f:      # O_APPEND(transition の再load-merge と直列化)
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

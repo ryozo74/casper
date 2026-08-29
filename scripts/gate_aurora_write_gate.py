@@ -53,9 +53,11 @@ FABRICATED = ("# SORAFUNE 様 定例MTG 議事録\n\n**参加者:** 武井(ryoji
               "- 現状: 完了\n\n## 2. 決定事項\n- フェーズ1完了報告を承認\n")
 
 WANT_F = ["aurora_write_guard", "aurora_turn_sources", "aurora_edit_compose",
-          "aurora_canonical_body", "_strip_material_wrapper"]
+          "aurora_canonical_body", "_strip_material_wrapper",
+          # 検問は材料を控える(接地の注記の土台・gate_aurora_grounding.py が本体を検める)
+          "aurora_material_remember", "_aurora_body_key"]
 WANT_A = ["_PROPER_TOKEN_RE", "_INSTR_QUOTED_RE", "_INSTR_REMOVE_RE", "_MATERIAL_WRAPPER_RE",
-          "_DECOR_META_RE", "_STRUCT_HEAD_RE"]
+          "_DECOR_META_RE", "_STRUCT_HEAD_RE", "_AURORA_MATERIAL", "_AURORA_MATERIAL_LOCK"]
 
 
 class _Au:
@@ -76,7 +78,7 @@ def build(src_text, gen_out):
     if missing:
         return None, missing
     M = {}
-    exec("import re, os, json, time, datetime", M)
+    exec("import re, os, json, time, datetime, threading", M)
     M["HERE"] = TMP
     M["BACKEND"] = "ollama"
     M["strip_think"] = lambda x: (x or "").strip()

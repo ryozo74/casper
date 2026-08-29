@@ -46,6 +46,7 @@ if len(picked) != len(WANT):
 
 TMP = tempfile.mkdtemp(prefix="gate_upl_aurora_")
 PROPOSED = []
+REMEMBERED = []
 
 
 def build(nodes):
@@ -53,6 +54,9 @@ def build(nodes):
     exec("import os, re", M)
     M["casper_extract"] = casper_extract
     M["_action_summary"] = lambda tool, a: f"Aurora ノート作成 → タイトル: {a.get('title')}"
+    # ★取込は逐語の運搬ゆえ、材料=抜いた本文そのもの(接地の注記が偽で鳴かぬように控える)。
+    #   本体の検めは gate_aurora_grounding.py。此処では呼ばれても転ばぬ事のみ見る。
+    M["aurora_material_remember"] = lambda body, material: REMEMBERED.append((body, material))
     M["_register_pending"] = lambda tool, args, uid, summary, **kw: (
         PROPOSED.append({"tool": tool, "args": args, "uid": uid, "kw": kw}) or f"pid{len(PROPOSED)}")
     # ★本物のAurora書込を握る。呼ばれたら②違反として掴まえる。
