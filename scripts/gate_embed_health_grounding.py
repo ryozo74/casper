@@ -71,12 +71,12 @@ import casper_embed  # noqa: E402  (副作用なしゆえ直接import)
 _probe_calls = []
 
 
-def _fake_probe_ok():
+def _fake_probe_ok(timeout=None):   # timeout: 冷間の確認probe(本体の三値化に追随・2026-08-30)
     _probe_calls.append(time.time())
     return True
 
 
-def _fake_probe_down():
+def _fake_probe_down(timeout=None):   # timeout: 冷間の確認probe(本体の三値化に追随・2026-08-30)
     _probe_calls.append(time.time())
     return False
 

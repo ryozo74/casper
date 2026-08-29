@@ -272,6 +272,50 @@ def scan_gen_events(rows, state):
             "fired": fired_this_tick, "new_events": new_events}
 
 
+def scan_embed_health(state):
+    """埋込機(bge-m3)の生死を health の窓へ載せる。三値: ok / down / unknown。
+
+    ★病の型(2026-08-30に発見): センサー(casper_embed.embed_alive)は在ったが、
+      結果を**記憶の中でしか**更新せず紙に残さなんだ。ゆえに落ちた刻も甦った刻も
+      後から誰も辿れず、**消費者の居らぬセンサー**であった(この一年で五度目の型)。
+      新しい届け先は作らぬ——既存の health → queue/casper_alerts.jsonl →
+      alert_dispatch → 家老の inbox へ相乗りさせる。
+    ★unknown を down とも ok とも名乗らせぬ: 「訊けなんだ」は「落ちておる」ではない
+      (掟: 失敗とゼロを別の出口へ)。ゆえ metric を分ける(embed_down / embed_unknown)。
+    ★呼ぶ側は窓が空(対話ゼロ)でも必ず通す——**対話の無い夜こそ死に気づけねばならぬ**。
+
+    返り: {"status": ok|down|unknown, "reason": str, "changed": bool, "prev": str|None}
+    """
+    status, reason = "unknown", "casper_embed を読めなんだ"
+    try:
+        import casper_embed
+        # ★観測路の関を使う(要求路 embed_alive ではない)。此処は背後の健診ゆえ、
+        #   冷間の確認probe(長い)を撃ってよい——人の番を止めぬ。
+        verdict, reason = casper_embed.embed_health_verdict()
+        # ★cold は吠えぬ。冷間は事故でなく常態である(吠えれば狼少年)。
+        status = {"ok": "ok", "cold": "ok", "down": "down"}.get(verdict, "unknown")
+    except Exception as e:
+        status, reason = "unknown", f"casper_embed を読めなんだ: {str(e)[:60]}"
+    prev = state.get("embed_status")
+    state["embed_status"] = status
+    state["embed_reason"] = reason
+    state["embed_checked_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    if prev != status:
+        state["embed_changed_at"] = state["embed_checked_at"]
+    return {"status": status, "reason": reason, "changed": prev != status, "prev": prev}
+
+
+def _embed_deviation(embed, n_window):
+    """埋込の三値を deviations の1件へ写す(ok の時は何も出さぬ)。
+    ★deviations は『いま超過中か』のスナップショット契約ゆえ、down の間は毎tick載せる。
+      開始と復旧を一度ずつ知らせるのは受け取り側(alert_dispatch)の役目——二重に持たぬ。"""
+    if embed["status"] == "ok":
+        return None
+    return {"metric": "embed_down" if embed["status"] == "down" else "embed_unknown",
+            "current": embed["reason"], "threshold": "埋込は常に生きておること",
+            "baseline_median": None, "n": n_window}
+
+
 def analyze():
     """返り: {today, baseline_days, deviations[], today_rates, current_window, n, gen_event}。
     ★cmd_516手当2: current側は直近WINDOW_MINUTES分の純粋な時間窓(fallbackなし)。
@@ -280,8 +324,14 @@ def analyze():
     分離)。率もの(guarded_claim等)はn<RATE_N_MINならinsufficient扱いとしdeviation判定しない
     (n_min=5・cmd_518手当5)。"""
     rows = _load()
+    # ★埋込の生死は対話の有無と無関係に検める(対話の無い夜こそ死に気づけねばならぬ)。
+    _st0 = _load_state()
+    _embed0 = scan_embed_health(_st0)
+    _save_state(_st0)
     if not rows:
-        return {"today": None, "baseline_days": 0, "deviations": [], "today_rates": {},
+        _dev0 = _embed_deviation(_embed0, 0)
+        return {"today": None, "baseline_days": 0, "deviations": ([_dev0] if _dev0 else []),
+                 "embed": _embed0, "today_rates": {},
                  "current_window": {"n": 0, "minutes": WINDOW_MINUTES, "status": "empty"},
                  "n": 0, "gen_event": {"status": "empty", "fired": [], "streak_warn": 0, "streak_ok": 0},
                  "synthetic_skipped": LAST_SKIPPED_SYNTHETIC,
@@ -322,11 +372,16 @@ def analyze():
                             "threshold": threshold, "baseline_median": None,
                             "streak_warn": gen_event["streak_warn"], "n": n_window})
 
+    _dev_emb = _embed_deviation(_embed0, n_window)      # 埋込の生死(ok以外の時のみ載る)
+    if _dev_emb:
+        deviations.append(_dev_emb)
+
     # ★cmd_518手当9: probe突合はn_window==0(⚪)の時のみ意味を持つ(将軍処方の設計思想)。
     # 通常時(n>=5)はhealth.mdを無関係な情報で埋めぬためNoneのまま返す(AC-P5)。
     probe = _probe_last_success() if n_window == 0 else None
 
     return {"today": today, "baseline_days": len(hist_days), "deviations": deviations,
+            "embed": _embed0,
             "today_rates": tr, "current_window": current_window, "n": len(rows),
             "gen_event": gen_event, "probe": probe,
             "synthetic_skipped": LAST_SKIPPED_SYNTHETIC}   # 【丁】分母から外した合成の件数(黙って減らさぬ)
@@ -399,6 +454,9 @@ def write_health_md(a):
         for d in a["deviations"]:
             if d["metric"] == "gen_p95_event":
                 lines.append(f"- **gen_p95_event**: {d['current']}（連続warn {d.get('streak_warn', 0)}件・n={d.get('n', cw.get('n', 0))}）")
+            elif d["metric"] in ("embed_down", "embed_unknown"):
+                _label = "埋込機が落ちておる" if d["metric"] == "embed_down" else "埋込機の生死を確かめられなんだ"
+                lines.append(f"- **{d['metric']}**: {_label}（{d['current']}）")
             else:
                 lines.append(f"- **{d['metric']}**: 現在 {d['current']} > 閾値 {d['threshold']}"
                              f"（平常 {d['baseline_median']}・n={d.get('n', cw.get('n', 0))}）")
@@ -408,9 +466,22 @@ def write_health_md(a):
 
 
 def _alert(a):
+    """逸脱を queue/casper_alerts.jsonl へ積む(受け手=alert_dispatch→家老の inbox)。
+
+    ★2026-08-30 是正: 従前は「赤が無ければ一行も書かぬ」であった。だが受け手は
+      **行のスナップショット**で『いま超過中か』を導くゆえ、収まった時に一行も来ねば
+      『治った』を伝える術が無い(受け手は行の不在から復旧を推し量っており、
+      それは**健診が止まっておる時まで吉報に化ける**危うい読みであった)。
+      ゆえ**赤が収まった最初の一度だけ**、空の deviations を持つ行を積む。
+      台帳は疎のまま(平時は一行も増えぬ)で、復旧だけが確と伝わる。"""
     fired = a.get("gen_event", {}).get("fired") or []
-    if not a.get("deviations") and not fired:
-        return
+    _st = _load_state()
+    _had = bool(_st.get("alert_had_deviations"))
+    _now_red = bool(a.get("deviations")) or bool(fired)
+    _st["alert_had_deviations"] = _now_red
+    _save_state(_st)
+    if not _now_red and not _had:
+        return                                   # 平時は書かぬ(台帳を賑やかにせぬ)
     try:
         os.makedirs(os.path.dirname(ALERTS), exist_ok=True)
         rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -476,6 +547,8 @@ if __name__ == "__main__":
         for d in a["deviations"]:
             if d["metric"] == "gen_p95_event":
                 print(f"  🔴 gen_p95_event: {d['current']} (連続warn={d.get('streak_warn', 0)})")
+            elif d["metric"] in ("embed_down", "embed_unknown"):
+                print(f"  {'🔴' if d['metric'] == 'embed_down' else '🟡'} {d['metric']}: {d['current']}")
             else:
                 print(f"  🔴 {d['metric']}: {d['current']} > {d['threshold']} (n={d.get('n', 0)})")
         print(f"→ {HEALTH_MD}")

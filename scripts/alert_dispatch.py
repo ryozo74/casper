@@ -125,6 +125,13 @@ def process(rows, state, dry_run=False, synthetic_prefix=""):
     metrics_state = state.setdefault("metrics", {})
     cursor = state.get("cursor_line", 0)
     new_rows = rows[cursor:]
+    # ★2026-08-30 是正: 新しい行が一つも無い時に『復旧』を出してはならぬ。
+    #   行の不在は「治った」ではなく「**健診の便りが無い**」である(健診が止まっておっても
+    #   吉報に化ける読みであった)。沈黙からは何も断ぜず、状態を据え置く。
+    #   復旧は casper_health が収まった時に積む一行(空の deviations)で伝わる。
+    if not new_rows:
+        return {m: ("still_active" if v.get("active") else "still_clear")
+                for m, v in metrics_state.items()}
 
     # 今回の新規行から『どのmetricが超過として現れたか』を集める(1行に複数deviations可)。
     seen_this_run = {}

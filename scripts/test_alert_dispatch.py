@@ -22,6 +22,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import alert_dispatch as AD
 
+# ★2026-08-30: 本試験は従前 **本番の state ファイル**(alert_dispatch.STATE_PATH)を読んでいた。
+#   本番で一度でも配信が走っておれば cursor/metrics が残り、AC-F1/AC-F2 が環境次第で落ちる
+#   (実際に4件が赤になり、機構の退行と見紛うた)。試験は本番の状態に触れも読みもせぬ。
+import tempfile as _tf
+AD.STATE_PATH = os.path.join(_tf.mkdtemp(prefix="test_alert_dispatch_"), "state.json")
+
 _failures = []
 
 

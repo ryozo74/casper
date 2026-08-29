@@ -66,7 +66,7 @@ importlib.reload(casper_embed)
 _probe_calls = {"n": 0}
 
 
-def _fake_probe_down():
+def _fake_probe_down(timeout=None):   # timeout: 冷間の確認probe(本体の三値化に追随・2026-08-30)
     _probe_calls["n"] += 1
     return False
 
@@ -96,7 +96,7 @@ chk("① available() = db_available() and embed_alive() の一行に集約",
 _probe_calls["n"] = 0
 
 
-def _fake_probe_up():
+def _fake_probe_up(timeout=None):   # timeout: 冷間の確認probe(本体の三値化に追随・2026-08-30)
     _probe_calls["n"] += 1
     return True
 
