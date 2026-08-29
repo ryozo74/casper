@@ -1377,7 +1377,8 @@ function fileKind(f){
   if(t.startsWith('image/')) return 'image';
   if(t.startsWith('video/')||/\.(mp4|mov|mkv|avi|webm|m4v)$/.test(n)) return 'video';
   if(/\.(html?|htm)$/.test(n)) return 'html';
-  if(/\.(md|pdf|docx?|pptx?|xlsx?|csv|txt)$/.test(n)) return 'doc';
+  if(/\.(md|txt|csv)$/.test(n)) return 'doc';       // テキスト系: f.text()で安全に読める
+  if(/\.(pdf|docx?|pptx?|xlsx?)$/.test(n)) return 'doc_bin';  // バイナリ系: f.text()禁(cmd_488)
   return 'other';
 }
 function onFilesDropped(fs){
@@ -1407,6 +1408,7 @@ function _perFileChoices(arr,btS){
     else if(k==='video') btns='<button data-a="vimeo">🎬 Vimeoへアップ</button>';
     else if(k==='html') btns='<button data-a="aurora">📚 Auroraへアップ</button>';
     else if(k==='doc') btns='<button data-a="aurora">📚 Auroraへアップ</button><button data-a="play">🎮 遊ぶ（知識化）</button>';
+    else if(k==='doc_bin') btns='<button data-a="play">🎮 遊ぶ（知識化）</button>';  // pptx/docx/xlsx/pdf: Auroraはf.text()で不可逆に壊れるため出さぬ(cmd_488)
     btns+='<button data-a="dropbox">📦 Dropboxで送る</button>';
     b.innerHTML='<div style="border:1px solid #334155;border-radius:12px;padding:13px;background:rgba(255,255,255,.03)">'
       +'<div style="margin-bottom:9px">📎 <b>'+esc(f.name)+'</b> — どのツールで扱いますか？</div>'
@@ -1424,6 +1426,10 @@ function _perFileChoices(arr,btS){
   log.scrollTop=log.scrollHeight;
 }
 async function auroraUpload(f){
+  if(fileKind(f)==='doc_bin'){    // fail-closed: バイナリはf.text()で不可逆に壊れるため断る(cmd_488・掟:未確認をtrueと名乗るな)
+    render(el('bot'),'⚠️ **'+esc(f.name)+'** はバイナリ形式(pdf/docx/pptx/xlsx等)のためAurora資料化には対応しておりませぬ。「🎮 遊ぶ（知識化）」をお使いくだされ。');
+    return;
+  }
   const base=(f.name||'').replace(/\.[^.]+$/,'');
   const b=el('bot');
   const inS='width:100%;box-sizing:border-box;margin:2px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font:inherit';
@@ -1525,10 +1531,15 @@ function takeFile(f){
     const r=new FileReader();
     r.onload=()=>{ const du=r.result; pendingFile={name:f.name, b64:du.split(',')[1], dataurl:du, isImage:true, file:f}; if(!uploaderOn){uploaderOn=true;renderTools();} renderFile(); };
     r.readAsDataURL(f);
-  } else {                                        // 動画=base64化せずFile保持(大容量はtusで直送)
+  } else if(fileKind(f)==='video'){               // 動画=base64化せずFile保持(大容量はtusで直送)
     pendingFile={name:f.name, isImage:false, file:f};
     if(!uploaderOn){uploaderOn=true;renderTools();}
     renderFile();
+  } else {                                        // 文書系(pptx/docx/xlsx/pdf等)=uploader/resolveがdata_b64必須ゆえbase64化
+    const r=new FileReader();
+    r.onload=()=>{ const du=r.result; pendingFile={name:f.name, b64:du.split(',')[1], isImage:false, file:f}; if(!uploaderOn){uploaderOn=true;renderTools();} renderFile(); };
+    r.onerror=()=>{ pendingFile={name:f.name, isImage:false, file:f}; if(!uploaderOn){uploaderOn=true;renderTools();} renderFile(); };
+    r.readAsDataURL(f);
   }
 }
 fileinp.onchange=e=>takeFile(e.target.files[0]);

@@ -37,7 +37,9 @@
   <div class="logo"><img src="/icon" alt="C"><h1>Casper</h1></div>
   <p class="sub">社内アカウント（Calendar と同じ）でログイン</p>
   <label>メール / ユーザー名</label>
-  <input id="email" autocomplete="username" placeholder="例: ryoji">
+  <!-- 例示に実在の個人名を使わぬ(殿御指摘2026-07-31: 携帯で開くと殿の名が入っておるように見える)。
+       placeholder ゆえ送信はされぬが、社員には「既に誰かが入っておる」と映り紛らわしい。 -->
+  <input id="email" autocomplete="username" placeholder="自分のユーザー名（例: yamada）">
   <label>パスワード</label>
   <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••">
   <button id="go">ログイン</button>

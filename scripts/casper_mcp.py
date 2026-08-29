@@ -22,10 +22,14 @@ PROTO = "2025-03-26"
 
 
 def _parse_sse(body):
-    """SSE 応答(data: {json})から最後の JSON-RPC 結果を取り出す。"""
+    """SSE 応答(data: {json})から最後の JSON-RPC 結果を取り出す。
+    ★str.splitlines()は使わない: data 内の JSON 文字列値に生の制御文字(例 U+0085 NEL)が
+    混入し得る(巨大バイナリをbase64化せず直接JSON文字列に埋める設計時)。splitlines()は
+    U+0085等もSSE規格外の改行として分割してしまい、data行が寸断される(cmd_487で実測確認)。
+    SSEレコード区切りは仕様上 CRLF/LF のみゆえ、それだけで分割する。"""
     last = None
-    for line in body.splitlines():
-        line = line.strip()
+    for line in re.split(r"\r\n|\n", body):
+        line = line.strip("\r")
         if line.startswith("data:"):
             try:
                 last = json.loads(line[5:].strip())
