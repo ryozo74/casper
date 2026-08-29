@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Casper → Vimeo アップロード(tus・再開可能)。studiobokan アカウントへ動画を上げ、
+"""Casper → Vimeo アップロード(tus・再開可能)。自社アカウントへ動画を上げ、
 パスワード付き公開リンクを返す。トークンは .casper_vimeo_token(upload/edit/create スコープ)。"""
 import json
 import os
@@ -96,7 +96,7 @@ def _share_links(uri, fallback=None, token=None):
 
 
 def search(query, per_page=8, token=None):
-    """studio bokan の Vimeo ライブラリ(全動画)を名前検索→[{name,link,id,uri,duration}]。"""
+    """自社の Vimeo ライブラリ(全動画)を名前検索→[{name,link,id,uri,duration}]。"""
     import urllib.parse
     # 注: /me/videos では sort=relevant は不可(Vimeo が 400 "The sort provided isn't valid")。
     # query 指定時は API が既定で関連度順に返すため sort は省略する。

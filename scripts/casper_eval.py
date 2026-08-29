@@ -316,7 +316,7 @@ def a_covers_projects(minpj=2):
 
 
 def a_not_only(name):
-    """特定PJ(name)のみに偏っていないか。本日の『marukomeしか出ない』失敗を直接検知。"""
+    """特定PJ(name)のみに偏っていないか。本日の『<PJ名>しか出ない』失敗を直接検知。"""
     def _f(text, cards):
         names = _online_pj_names()
         hit = [n for n in names if n and n in text]

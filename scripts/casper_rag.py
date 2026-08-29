@@ -70,13 +70,23 @@ def _seg_boost(segs, text):
 # パスに "legacy" を含む資料を除外: 80_legacy_score/ の生データ＋ persona_rnd_legacy_score.md の分析成果物 両方を捕捉
 # (ファイル列挙=腐る定数を避け、機構的signal=名前の"legacy"で。人物profile(_kiyotomo等)は名にlegacyを持たず温存され、
 #  正当な人物情報は残る。legacyは根拠引用として profile 内に留まり、current回答の一次には出ない)。
-_EXCLUDE_SRC = ("80_legacy_score",)
+# 病二(鏡): Casperが自動生成する社員個性プロファイル(20_people/profile_u_*.md)は本人の発話を
+# 原文引用しているため、字面検索の索引に混じると本人が同じ言葉を打つと必ず自分の調書が釣れる
+# (実害2026-08-17: tetsuo発話「この内容を共有」→自身のprofile_u_30が候補上位に混入)。
+# ★前方一致(startswith)ゆえ "20_people" とだけ書くと人物ノート全体(正当な人物情報)が消える。
+# 必ず "20_people/profile_" と限定する(profile_*以外の20_people配下ノートは温存)。
+# ★2026-08-29 復旧: この一行は cmd_508 で書かれながら commit されず、8/22 の実装消失事案で
+#   失われていた(門 gate_byoni_mirror だけが復旧commitで戻り、機構は戻らず赤のままであった)。
+_EXCLUDE_SRC = ("80_legacy_score", "20_people/profile_")
 # legacy を主題/引用する chunk の本文マーカー。人物profile(_kiyotomo等)が legacy_score/DBM2 を"源"として
 # 大量引用しRAGで拾われる漏れ(殿指摘2026-07-14)を、chunk単位で断つ。profile内の非legacy部分(役割/氏名)は残る。
 # legacyの明確なマーカーのみ(Fable審査2026-07-14: 「Score(入力|記録|上)」は現行PJの正当文「Scoreに記録済み」等まで
 # 常時消す危険=腐る定数ゆえ撤去)。status質問のlegacy漏れは二軸classifier(vault抑制)が担い、ここは knowledge経路で
 # legacy生データ/分析成果物を落とす最小限に留める。
-_EXCLUDE_TEXT_RE = re.compile(r"legacy_score|80_legacy_score|persona_rnd_legacy|旧スコア", re.I)
+# cmd_490: asset_20260701.md 内「7/18 Launch」記述は陳腐化した社内メモ断片で、Casper自身の提供状況(モバイル
+# 未実装/7/18ローンチ待ち)と誤読されRAGに混入した(tetsuo殿への誤案内の実害・2026-07-31)。ファイル単位除外は
+# 同ファイル内の他の有用な案件記録(取引先/制作パートナー等)を巻き添えにするため、chunk単位(本文マーカー)に限定。
+_EXCLUDE_TEXT_RE = re.compile(r"legacy_score|80_legacy_score|persona_rnd_legacy|旧スコア|7/18\s*Launch", re.I)
 
 
 def _excluded(src, text=""):
@@ -159,6 +169,8 @@ def top_source(query, threshold=0.32):
     segs = _segs(query)
     agg = {}
     for e in _CACHE:
+        if _excluded(e.get("src"), e.get("t")):    # search()/candidates()と同じ除外(全文注入がexclude回避せぬよう)
+            continue
         cg = _tri(e["t"])
         if not cg:
             continue

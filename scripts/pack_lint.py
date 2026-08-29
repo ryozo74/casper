@@ -11,12 +11,29 @@
 規律: これは「お説教(プロンプト)」でなく「検問(テスト)」。服従でなく機構で seam を守る。
 """
 import argparse
+import fnmatch
 import glob
 import os
 import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+class ManifestParseError(Exception):
+    """pack.yaml が YAML として読めぬ(cmd_491 AC2)。手書きパーサ(_load_manifest 本体)は
+    行パターン照合のみで文法検査をせぬゆえ、別途 yaml.safe_load で構文検問する。"""
+
+
+def _check_parseable(pack):
+    """pack.yaml が正しい YAML か検問する。壊れておれば ManifestParseError を上げる
+    (「緑」が「pack.yaml が読める」ことを保証するための独立検問・cmd_491 AC2)。"""
+    import yaml
+    path = os.path.join(HERE, "pack", pack, "pack.yaml")
+    try:
+        yaml.safe_load(open(path, encoding="utf-8"))
+    except Exception as e:
+        raise ManifestParseError(f"{path}: {type(e).__name__}: {e}") from e
 
 
 def _load_manifest(pack):
@@ -28,9 +45,11 @@ def _load_manifest(pack):
         s = raw.strip()
         if not s or s.startswith("#"):
             continue
-        # トップレベルキー
-        if re.match(r"^(vocab|components|engine_scan|exclude|include_glob):", raw) and not raw.startswith(" "):
-            section = s.split(":", 1)[0]
+        # トップレベルキー(インデント無し) — vocab/exclude 以外に来たら section を必ず抜ける
+        # (でないと org/aliases 等の後続リスト項目が vocab に紛れ込む)
+        if not raw.startswith(" "):
+            key = s.split(":", 1)[0]
+            section = key if key in ("vocab", "components", "engine_scan") else None
             continue
         if raw.startswith("  ") and s.startswith("include_glob:"):
             section = "include_glob"
@@ -41,9 +60,9 @@ def _load_manifest(pack):
         if raw.startswith("  ") and s == "exclude:":
             section = "exclude"
             continue
-        # リスト項目
+        # リスト項目(行末の "# comment" は除去してから値を取る)
         if s.startswith("- "):
-            item = s[2:].strip().strip('"').strip("'")
+            item = s[2:].split("#", 1)[0].strip().strip('"').strip("'")
             if section == "vocab":
                 vocab.append(item)
             elif section == "exclude":
@@ -51,16 +70,15 @@ def _load_manifest(pack):
     return vocab, inc, exc
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pack", default="bokan")
-    ap.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
-
-    vocab, inc, exc = _load_manifest(args.pack)
+def scan(pack="bokan"):
+    """pack語彙のengine直書きを走査する(CLI/gate/nightly共通の中核・関数として再利用可能)。
+    戻り値: (violations, n_files)。violations は (relpath, lineno, term, text) のlist。
+    ManifestParseError はそのまま上げる(呼出元がpack.yaml構文エラーを握り潰さぬこと)。"""
+    _check_parseable(pack)
+    vocab, inc, exc = _load_manifest(pack)
     if not vocab:
-        print("(vocab 未定義 — マニフェストを確認せよ)")
-        return 2
+        return None, 0  # vocab未定義(呼出元がNoneを見て「検問不能」と扱う)
+
     # マッチ器: ASCII語は語境界つき(識別子内の部分一致=偽陽性を排除。例 NINA が
     # nina_notepc_02 に誤マッチするのを防ぐ)。CJK語は\bが効かぬゆえ substring。
     needles = []
@@ -78,7 +96,8 @@ def main():
     def skip(p):
         base = os.path.basename(p)
         rel = os.path.relpath(p, HERE)
-        return base in exc or rel.startswith("pack" + os.sep) or "__pycache__" in rel
+        excluded = base in exc or any(fnmatch.fnmatch(base, pat) for pat in exc)
+        return excluded or rel.startswith("pack" + os.sep) or "__pycache__" in rel
     files = sorted({p for p in files if not skip(p)})
 
     violations = []
@@ -92,9 +111,26 @@ def main():
                 hit = pat.search(line) if pat is not None else (orig in line)
                 if hit:
                     violations.append((os.path.relpath(p, HERE), i, orig, line.strip()[:100]))
+    return violations, len(files)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pack", default="bokan")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    try:
+        violations, n_files = scan(args.pack)
+    except ManifestParseError as e:
+        print(f"❌ pack.yaml 構文検問 FAIL — YAML として読めぬ(pack={args.pack})\n  {e}")
+        return 1
+    if violations is None:
+        print("(vocab 未定義 — マニフェストを確認せよ)")
+        return 2
 
     if not violations:
-        print(f"✅ 語彙検問 PASS — engine に pack[{args.pack}] 語彙ゼロ ({len(files)}ファイル走査)")
+        print(f"✅ 語彙検問 PASS — engine に pack[{args.pack}] 語彙ゼロ ({n_files}ファイル走査)")
         return 0
 
     # 集計

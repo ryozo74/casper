@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Casper → Dropbox 転送(Transfer) — ファイルを studio bokan の Business Dropbox へ上げ、
+"""Casper → Dropbox 転送(Transfer) — ファイルを自社の Business Dropbox へ上げ、
 パスワード付き共有リンクを返す。Vimeoアップの兄弟(任意ファイル・大容量向け)。
 
 token: .casper_dropbox_token(Business team token・容量/パスワードリンク可)。社内限・書込あり。
@@ -10,13 +10,21 @@ import json
 import os
 import secrets
 import string
+import subprocess
+import sys
+import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, "..", "..", ".."))   # multi-agent-shogun-main/
+REPORTS_DIR = os.path.join(HERE, "reports")
+STATE_PATH = os.path.join(REPORTS_DIR, "_state.json")          # run_observation.py と共有(キーで名前空間分離)
+INBOX_WRITE = os.path.join(ROOT, "scripts", "inbox_write.sh")
 API = "https://api.dropboxapi.com/2"
 CONTENT = "https://content.dropboxapi.com/2"
 FOLDER = "/Casper_Transfer"                                # 転送用フォルダ(制作データ庫と分離)
 CHUNK = 140 * 1024 * 1024                                  # 140MB(単発上限150MB未満)
+_SPACE_CACHE_TTL = 300                                     # 容量照会キャッシュ(5分・cmd_513手当2)
 
 
 def _token():
@@ -35,7 +43,7 @@ def home_prefix():
     """team アカウントの『メンバーフォルダ』への接頭辞を返す(個人口なら "")。
 
     【なぜ要るか】Business team token の既定 root は **team space の直下**で、殿のメンバーフォルダ
-    (/Studio Bokan)の外にござる。そこへ置いたファイルの共有リンクは、社外の相手にサインインを
+    (自社ルート配下)の外にござる。そこへ置いたファイルの共有リンクは、社外の相手にサインインを
     求めることがある(殿御指摘2026-07-29「アカウントがないとダウンロードできない」)。
     ゆえ転送物はメンバーフォルダ配下へ置く=通常の個人共有と同じ振る舞いにする。
     root_info: root_namespace_id == home_namespace_id なら team space でない=接頭辞不要。"""
@@ -102,6 +110,130 @@ def _dl1(url):
 def _gen_password(n=8):
     aln = string.ascii_letters + string.digits
     return "".join(secrets.choice(aln) for _ in range(n))
+
+
+def _fmt_bytes(n):
+    """人が読める形へ(TiB/GiB/MiB)。cmd_513手当2: 数字は機構が取った生値をそのまま貼る——
+    ここは表示の単位変換のみで、値そのものの捏造・丸めすぎはしない(小数1桁まで)。"""
+    if n is None:
+        return "不明"
+    n = float(n)
+    for unit, div in (("TiB", 1024 ** 4), ("GiB", 1024 ** 3), ("MiB", 1024 ** 2)):
+        if n >= div:
+            return f"{n / div:.2f}{unit}"
+    return f"{n:.0f}B"
+
+
+_SPACE_CACHE = {"ts": 0.0, "data": None}                   # プロセス内キャッシュ(取得時刻も保持)
+
+
+def get_space_usage(force=False):
+    """team の容量(上限/使用量)を機構が取りに行く(cmd_513手当2: users/get_space_usage)。
+    返り {ok, used, allocated, over, checked_at} or {ok:False, error}。
+    ★数字はqwenに書かせず、ここで取った生値をそのまま呼び出し側が貼る(接地の原則)。
+    ★短時間キャッシュあり(_SPACE_CACHE_TTL秒)。古い値を新しい値のように見せぬため checked_at を必ず添える。"""
+    now = time.time()
+    if not force and _SPACE_CACHE["data"] is not None and (now - _SPACE_CACHE["ts"]) < _SPACE_CACHE_TTL:
+        return _SPACE_CACHE["data"]
+    if not _token():
+        return {"ok": False, "error": "token未設定"}
+    try:
+        st, r = _api(API + "/users/get_space_usage", body={})
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    if st != 200 or not isinstance(r, dict):
+        es = (r or {}).get("error_summary", str(r))[:200] if isinstance(r, dict) else str(r)[:200]
+        return {"ok": False, "error": es}
+    alloc_obj = r.get("allocation") or {}
+    # ★team口(Business)は容量が団体プール共有ゆえ、判定すべきは団体全体の allocation.used/allocated であり、
+    # トップレベルの used(呼出メンバー個人の消費量)ではない(実測2026-08-19: トップレベルused=44.7TiBだが
+    # 団体超過はallocation.used=46.2TiB側でのみ再現・将軍実測42.00/42.03TiBと一致するのはallocation側)。
+    if alloc_obj.get(".tag") == "team":
+        used, alloc = alloc_obj.get("used"), alloc_obj.get("allocated")
+    else:                                                    # 個人枠等・team以外の形
+        used, alloc = r.get("used"), alloc_obj.get("allocated")
+    if used is None or alloc is None:
+        return {"ok": False, "error": "get_space_usage応答に used/allocated が無い"}
+    data = {"ok": True, "used": used, "allocated": alloc, "over": max(0, used - alloc),
+             "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    _SPACE_CACHE["ts"], _SPACE_CACHE["data"] = now, data
+    return data
+
+
+def _space_usage_note():
+    """失敗メッセージに載せる『上限/使用量/超過分(取得時刻)』の一文。照会自体が失敗したら
+    数字を捏造せず正直に『容量照会できず』と名乗る(手当2★の掟)。"""
+    su = get_space_usage()
+    if not su.get("ok"):
+        return f"(容量照会できず: {su.get('error', '不明')})"
+    return (f"(上限 {_fmt_bytes(su['allocated'])} / 使用 {_fmt_bytes(su['used'])} / "
+            f"超過 {_fmt_bytes(su['over'])} ・{su['checked_at']}時点)")
+
+
+def _is_insufficient_space(err):
+    """APIエラーが容量超過(insufficient_space)かを判定する単一機構(4箇所から呼ぶ)。"""
+    if isinstance(err, dict):
+        es = err.get("error_summary", "") or json.dumps(err, ensure_ascii=False)
+    else:
+        es = str(err or "")
+    return "insufficient_space" in es
+
+
+def _classify_upload_error(err):
+    """失敗理由を人の言葉へ翻訳する単一の出口。容量超過は専用メッセージ+実測値、
+    それ以外は現状通りの『アップロード失敗: <APIの生文字列>』のまま(手当1★: 他の失敗理由と
+    混ぜない/生の文字列は付記として残す=診断のため後から読めることに意味がある)。"""
+    es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
+    if _is_insufficient_space(err):
+        _notify_space_alert_once(es)
+        return f"Dropboxの容量が上限を超えており申した{_space_usage_note()} [詳細: {es}]"
+    return f"アップロード失敗: {es}"
+
+
+def _load_state():
+    try:
+        return json.loads(open(STATE_PATH, encoding="utf-8").read())
+    except Exception:
+        return {}
+
+
+def _save_state(state):
+    try:
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, STATE_PATH)
+    except Exception:
+        pass
+
+
+def _notify_space_alert_once(raw_error):
+    """手当3(将軍追加): 同一理由(容量超過)の連続失敗を一度だけkaroへ報せる。
+    ★既存の赤の届け先(cmd_512でashigaru1が構築したinbox_write.sh経由のkaro通知)へ相乗り
+    (新しい通知経路を作らない)。★毎回は吠えぬ——_state.jsonにフラグを立て、次に容量超過が
+    解消してから再発した時のみ再度鳴らす(cmd_512瑕疵Dの教訓: 赤が日常になれば読まれなくなる)。"""
+    state = _load_state()
+    if state.get("dropbox_space_alert_active"):
+        return                                              # 既に報せ済(未解消)ゆえ今回は黙る
+    state["dropbox_space_alert_active"] = True
+    state["dropbox_space_alert_first_ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    state["dropbox_space_alert_last_error"] = raw_error
+    _save_state(state)
+    msg = f"Dropbox容量超過でアップロード失敗中{_space_usage_note()} [{raw_error}]"
+    try:
+        subprocess.run(["bash", INBOX_WRITE, "karo", msg, "observation_red", "casper_dropbox"], check=False)
+    except Exception:
+        pass
+
+
+def _clear_space_alert():
+    """容量が空いて成功に戻った時、次回また超過したら再び報せられるようフラグを下ろす。"""
+    state = _load_state()
+    if state.get("dropbox_space_alert_active"):
+        state["dropbox_space_alert_active"] = False
+        state["dropbox_space_alert_cleared_ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        _save_state(state)
 
 
 def _upload_bytes(path, data):
@@ -214,8 +346,8 @@ def transfer_stream(fh, total, filename, password=None, direct_download=True):
     path = f"{base_folder()}/{safe}"
     ok, err = upload_stream(path, fh, total)
     if not ok:
-        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
-        return {"ok": False, "error": f"アップロード失敗: {es}"}
+        return {"ok": False, "error": _classify_upload_error(err)}
+    _clear_space_alert()
     pw = password or _gen_password()
     r = _link_for(path, pw)
     if not r:
@@ -243,8 +375,8 @@ def upload_into_stream(folder, fh, total, filename):
     path = f"{base_folder()}/{_safe(folder, 'batch')}/{_safe_rel(filename)}"
     ok, err = upload_stream(path, fh, total)
     if not ok:
-        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
-        return {"ok": False, "error": f"アップロード失敗: {es}"}
+        return {"ok": False, "error": _classify_upload_error(err)}
+    _clear_space_alert()
     return {"ok": True, "path": path, "size": total}
 
 
@@ -257,8 +389,8 @@ def transfer(file_bytes, filename, password=None, direct_download=True):
     path = f"{base_folder()}/{safe}"
     ok, err = _upload_bytes(path, file_bytes)
     if not ok:
-        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
-        return {"ok": False, "error": f"アップロード失敗: {es}"}
+        return {"ok": False, "error": _classify_upload_error(err)}
+    _clear_space_alert()
     pw = password or _gen_password()
     st, r = _api(API + "/sharing/create_shared_link_with_settings",
                  body={"path": path, "settings": {"require_password": True, "link_password": pw,
@@ -297,8 +429,8 @@ def upload_into(folder, file_bytes, filename):
     path = f"{base_folder()}/{_safe(folder, 'batch')}/{_safe(filename, 'file')}"
     ok, err = _upload_bytes(path, file_bytes)
     if not ok:
-        es = (err or {}).get("error_summary", str(err))[:200] if isinstance(err, dict) else str(err)[:200]
-        return {"ok": False, "error": f"アップロード失敗: {es}"}
+        return {"ok": False, "error": _classify_upload_error(err)}
+    _clear_space_alert()
     return {"ok": True, "path": path, "size": len(file_bytes)}
 
 

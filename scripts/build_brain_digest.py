@@ -92,6 +92,12 @@ ppath = pack_paths.vault("30_culture_rules", "casper_persona_core.md")
 if os.path.exists(ppath):
     persona = open(ppath, encoding="utf-8").read().strip()
 
+# --- Casper の使い方(携帯からの入り方・通知の受け取り方) 正典 (cmd_490 手当2: 固定ファイル名のみ・globはしない) ---
+howto = ""
+hpath = pack_paths.vault("30_culture_rules", "casper_howto.md")
+if os.path.exists(hpath):
+    howto = open(hpath, encoding="utf-8").read().strip()
+
 def _engine_owns_policy():
     """engine(engine_policy.md)が policy を注入しているか /health で確認。True なら本 digest は
     policy を省く(逆混入の畳み・M5 C)。不通/未所有(旧コード稼働・ロールバック)は False に倒し
@@ -104,14 +110,22 @@ def _engine_owns_policy():
         return False
 
 
+try:
+    import pack_config as _pc
+    _default_company_description = _pc.get("default_company_description", "(会社概要は未設定)")
+except Exception:
+    _default_company_description = "(会社概要は未設定)"
+
 doc = [
     "# Casper 社内ナレッジ (左脳=Calendar / 右脳=Obsidian vault)",
     "あなたはこの会社の伴走AI Casper。以下は社内の実データ要約。これを根拠に具体的に答えよ。",
     "",
     "## 会社 (自社)",
-    company or "株式会社 studio bokan (CG・映像制作)。",
+    company or _default_company_description,
     "",
     persona,
+    "",
+    howto,
     "",
     f"## プロジェクト (Calendar・全{len(projects)})",
     f"- 完了({len(by.get('completed',[]))}): {plist('completed')}",

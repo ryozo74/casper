@@ -23,7 +23,7 @@ ALIASES = {
 }
 try:
     import pack_config
-    ALIASES.update(pack_config.aliases())   # bokan 固有別名(tkp↔nina 等)を pack/bokan/pack.yaml から合流
+    ALIASES.update(pack_config.aliases())   # pack固有別名(PJ間の呼称ゆれ等)を pack/bokan/pack.yaml から合流
 except Exception:
     pass
 

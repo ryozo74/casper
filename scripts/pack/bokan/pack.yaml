@@ -10,6 +10,16 @@ version: 0
 # ここに載る語が engine *.py に直書きされていたら seam 違反＝検問が赤にする。
 # 抽出(語彙をパック側へ移す)が進むほど violation が減り、ゼロで第一手完了。
 # 注: 誤検知を避け、bokan に強く固有な語だけを載せる(一般ビジネス語は載せない)。
+#
+# ★作法(cmd_504): 新しい .py にこの vocab の語(案件名等)を直書きするな。
+#   ・PJ名の例示が要る箇所 → pack_config.get("examples",{}).get("project_names")[0] から
+#     引き、fallback は "<PJ名>"(pack不在でも架空プレースホルダへ縮退・fail-closed)。
+#   ・criteria.json 等の外部データと語を一致させる必要がある試験のみ、fallback を
+#     そのデータ自身(例: criteria.jsonのmust_any[0])から取り、pack側と一致するかを
+#     試験の冒頭で検問せよ(ずれれば試験自体が前提崩れとして赤くなる=良い設計)。
+#   ・pack_lintは `python3 scripts/pack_lint.py` で手動確認できる他、gate_pack_lint.py
+#     (gate群)とnightly.py(⑦・日次)にも結線済。excludeを増やして緑にするのは不可
+#     (将軍の判断を仰ぐこと)。
 vocab:
   - studio bokan
   - studiobokan
@@ -27,6 +37,22 @@ aliases:              # PJ/資産の別名展開(bokan 固有分のみ。汎用�
   nina: [tkp]
 vapid_sub: "mailto:ryoji@studiobokan.com"   # Web Push VAPID subject(連絡先・配備固有)
 secrecy_codenames: [AGL, V, EVA, E122, Number_i]   # 守秘=対外非開示の版権コードネーム。engineは規則の雛形のみ持ち、この固有名リストを注入時に差込む(Fable処方)
+
+# --- 例示語(engine のプロンプト内サンプル文言用・bokan 固有分のみ) ---
+examples:
+  project_names: [marukome, FUJI]
+  project_names_kana: [マルコメ, ""]   # project_names と同じ並び(カナ⇄ローマ字試験用・cmd_491 AC3)
+  assignees: [rui, ryoji]
+
+# --- 会社概要(digest の会社紹介文が未設定時のfallback・配備固有) ---
+default_company_description: "株式会社 studio bokan (CG・映像制作)。"
+
+# --- ドメイン別トリガ語(発火regex等が読む・bokan 固有分野のみ) ---
+domain_triggers:
+  spatial_tech: [nina, ニーナ, "art-?net", aurora, LED, 空間演出, プロジェクションマッピング, プロマッピング, ドローンショー]
+# domain_labels は cmd_491 AC4 で削除(engine のどこからも参照されておらず死んだデータだった)。
+# 表示ラベルが要る場合は domain_triggers のキー(例: spatial_tech)から参照側で組み立てるか、
+# 実際に読む箇所を作った時点で再導入すること。
 
 # --- 組織図(指示系統・org_data が読む・M5: engine の構造焼き付けを pack へ) ---
 org:
@@ -75,3 +101,5 @@ engine_scan:
     - dump_users.py
     - benchmark.py
     - test_llm_db_understanding.py
+    # cmd_491 AC3: gate_*.py は固有名を pack(examples.project_names等)から受け取る形に
+    # 改めたため、この exclude から外しても検問は緑を保つ(seam の隙間を塞いだ)。

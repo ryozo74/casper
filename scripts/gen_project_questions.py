@@ -14,7 +14,7 @@ BANK = os.path.join(HERE, "project_question_bank.jsonl")
 CLAUDE_BIN = os.environ.get("CASPER_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("CASPER_BANK_MODEL", "opus")
 
-# studio bokan が手掛けるPJ種別(汎用)。新種別はここに足せば質問が増える。
+# 自社が手掛けるPJ種別(汎用)。新種別はここに足せば質問が増える。
 PROJECT_KINDS = [
     "TVCM / 広告映像",
     "MV (ミュージックビデオ)",

@@ -52,7 +52,22 @@ chk("① VFX reason=ok", reason2, "ok")
 # ============================================================
 chk("② PJ一意解決→検索せぬ", W.should_search(f"{_PJ}の状況は？", pj_status="unique"), False)
 chk("② Casper自身の問い→検索せぬ", W.should_search("Casperの使い方を教えて", asks_about_casper=True), False)
-chk("② 通常の外部の問い→検索する", W.should_search("RTAB-Mapについて教えて", pj_status="none"), True)
+# ★2026-08-29 訂正: 従前この行は「通常の外部の問いなら検索する」を期待しており、
+#   長らく赤のまま放置されていた。だが production は**意図して絞られた**——殿御裁定
+#   「社内情報をもとに検索するのはダメ」を受けた止血で、①名乗る者のみ ②明示の検索意図
+#   がある時のみ発火する白表に倒してある(casper_web.should_search)。
+#   ★門を実装に合わせて甘くするのではない。**止血が黙って緩まぬこと**を此処で検める。
+#   (恒久策=未知語判定・人名veto等は cmd_508 の宿題として残る)
+chk("② 明示の検索意図＋名乗り有り→検索する",
+    W.should_search("RTAB-Mapについて調べて", pj_status="none", uid="31"), True)
+chk("② ★名乗らぬ者には外への口を開かぬ(直叩き・試験ハーネス)",
+    W.should_search("RTAB-Mapについて調べて", pj_status="none", uid=None), False)
+chk("② ★明示の検索意図が無ければ発火せぬ(既定closed・迷えば出さぬ側へ)",
+    W.should_search("RTAB-Mapについて教えて", pj_status="none", uid="31"), False)
+chk("② ★貼り付け(改行入り)は社内文書と見なし外へ出さぬ",
+    W.should_search("次の仕様を調べて\n第1章 概要", pj_status="none", uid="31"), False)
+chk("② ★長文(120字超)も外へ出さぬ",
+    W.should_search("あ" * 121 + "を調べて", pj_status="none", uid="31"), False)
 chk("② 疑問形/依頼形でない平叙文→検索せぬ", W.should_search("今日は晴れです", pj_status="none", asks_form=False), False)
 
 # chat_server.py の実配線を模す: pj_status='unique' の turn は should_search() で止め、

@@ -64,6 +64,26 @@ def main():
     exec("import re, os, json, urllib.request, urllib.error", M)
     M["A"] = types.SimpleNamespace(model=MODEL, endpoint=ENDPOINT)
     M["OLLAMA"] = ENDPOINT.rstrip("/") + "/api/chat"
+    # ★2026-08-29 是正: 抜き出した _ollama_json は module 変数を参照する。備えねば
+    #   NameError が例外として握り潰され、**模型を一度も呼ばぬまま None** が並ぶ
+    #   ——生試験の面をした空試験になっていた(8/24の雲着座の手当以降ずっと)。
+    #   ここで local backend を明示して据える(雲着座時に呼ばぬ掟は production の話であり、
+    #   本スモークは『ローカル分類器そのもの』の正答を測る道具ゆえ ollama を名乗らせる)。
+    M["BACKEND"] = "ollama"
+    M["_OLLAMA_JSON_CALL_COUNT"] = 0
+    M["_OLLAMA_JSON_SUPPRESSED"] = 0
+
+    class LocalClassifierSuppressed(RuntimeError):
+        pass
+    M["LocalClassifierSuppressed"] = LocalClassifierSuppressed
+    # 横断呼出台帳(cmd_519)は本スモークの検分対象ではない。呼出をそのまま通す薄い身代わりを据える
+    # (据えねば NameError が握り潰されて None になり、模型を呼ばぬまま『不正解』と数える)。
+    _calls = {"n": 0}
+
+    def _rec(site, model, fn):
+        _calls["n"] += 1
+        return fn()
+    M["_llm_call_record"] = _rec
     exec(compile(ast.Module(body=picked, type_ignores=[]), SRC, "exec"), M)
     _wants = M["_wants_aurora_save"]
 
@@ -92,6 +112,13 @@ def main():
     for q in ["Auroraに載せた資料の体裁を整えて", "Auroraへ記録した議事録の日付を修正して",
               "Auroraにアップされてるやつ全部リストアップして", "前回Auroraに上げたやつ、もう一度出して"]:
         chk(f"実z8a 陰性維持: {q}", _wants(q), lambda v: v is False, "False(is)")
+
+    # ★空試験の禁: 「模型に訊いた」と称して一度も訊いておらぬ試験は、赤も緑も嘘になる。
+    #   実際に推論機を叩いた回数を数え、0なら本スモークそのものを不合格とする
+    #   (2026-08-29: harness が module 変数を欠き NameError→None に化け、
+    #    模型を一度も呼ばぬまま「不正解4件」と数えていた。数えておれば即座に露見した)。
+    chk(f"★実疎通の証跡: 推論機を実際に叩いた回数({_calls['n']}回)",
+        _calls["n"], lambda v: v > 0, "1回以上(0なら空試験)")
 
     n_ok, n = sum(results), len(results)
     print(f"\n{'✅ 全PASS' if n_ok == n else '❌ FAIL あり'}: {n_ok}/{n}")

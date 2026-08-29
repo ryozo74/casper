@@ -38,6 +38,27 @@ if not RO_TOKEN:                                    # env 無ければローカ�
             pass
 CAL = "http://192.168.44.253:8001/api/readonly"
 
+def _calendar_lookup_description():
+    """calendar_lookup の説明文をpack由来の例示語で組む(engineは雛形のみ・M5)。
+    packにexamplesが無ければ一般プレースホルダへfail-closed(別スタジオがpack書き忘れても嘘のPJ名を例示せぬ)。"""
+    try:
+        import pack_config as _pc
+        _ex = _pc.get("examples", {}) or {}
+    except Exception:
+        _ex = {}
+    _pj = (_ex.get("project_names") or ["<PJ名>"])[0]
+    _as = (_ex.get("assignees") or ["<担当者A>", "<担当者B>"])[:2]
+    _as1 = _as[0] if len(_as) > 0 else "<担当者A>"
+    _as2 = _as[1] if len(_as) > 1 else "<担当者B>"
+    return ("左脳Calendarの最新データをライブ照会(プロジェクト/タスク/メンバー)。"
+            f"★PJ名({_pj}等)が質問に出たら必ず query にそのPJ名を渡せ。"
+            f"例: {_pj}の遅延→{{kind:'tasks',query:'{_pj}',status:'delayed'}} / "
+            "今日のタスク→{kind:'tasks',due:'today',active:true} / "
+            f"{_as1}担当の遅延→{{kind:'tasks',query:'{_pj}',status:'delayed',assignee:'{_as1}'}} / "
+            f"{_as2}の担当全部→{{kind:'tasks',query:'{_pj}',assignee:'{_as2}'}}。"
+            "結果に total(全件数)を含む。0件なら本当に0、推測で『無い』と言うな。")
+
+
 TOOLS = [
     {"type": "function", "function": {
         "name": "search_vault",
@@ -47,13 +68,7 @@ TOOLS = [
             "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "calendar_lookup",
-        "description": "左脳Calendarの最新データをライブ照会(プロジェクト/タスク/メンバー)。"
-                       "★PJ名(marukome/FUJI等)が質問に出たら必ず query にそのPJ名を渡せ。"
-                       "例: marukomeの遅延→{kind:'tasks',query:'marukome',status:'delayed'} / "
-                       "今日のタスク→{kind:'tasks',due:'today',active:true} / "
-                       "rui担当の遅延→{kind:'tasks',query:'marukome',status:'delayed',assignee:'rui'} / "
-                       "高井の担当全部→{kind:'tasks',query:'marukome',assignee:'ryoji'}。"
-                       "結果に total(全件数)を含む。0件なら本当に0、推測で『無い』と言うな。",
+        "description": _calendar_lookup_description(),
         "parameters": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["projects", "tasks", "users"], "description": "照会対象"},
             "query": {"type": "string", "description": "PJ名やタスク名で絞り込み。PJ名が質問に在れば必ず渡す"},
@@ -64,6 +79,9 @@ TOOLS = [
             "assignee": {"type": "string", "description": "tasks 担当者で絞り込み(任意)。ユーザー名 例 'rui' 'hori'。日本語名(高井等)はローマ字username 'ryoji' 等で"}},
             "required": ["kind"]}}},
 ]
+# cmd_501: web_search は qwen の tool 呼出には委ねぬ(指示: 発火は機構が判ずる)。
+# ここには載せず、chat_server.py 側で確定的に(_asks_about_casper等と同型の判定で)発火・注入する
+# (casper_web.should_search/build_query/search)。TOOLSに載せぬ=qwenが自発的に呼べる余地自体を持たぬ設計。
 
 
 def _get(path):
