@@ -111,9 +111,43 @@ def gen_model():
     return _get("CASPER_MODEL", "qwen3.6:27b")
 
 
+def vision_backend(purpose="read"):
+    """画像を誰に見せるか。purpose="read"(読み取り) / "judge"(判断)。
+
+    【殿御裁可 2026-08-31】8/24の「甲=据え置き」を、**用途で分けて**改める。再考条件
+    (「.139復電後にVRAM余白を実測」)が満たされ、前提が崩れたゆえ:
+      ・`qwen3.6:27b` **自身が vision を備える**(capabilities に vision)。別模型を積む必要が無く、
+        実測でも画像turnは load_duration=0.00秒(積み直し無し)・VRAM 15.84GiB→15.84GiB(不変)。
+        ★追加GPUは不要——8/24の「押し合い」の前提(vision専用の別模型を同居させる)が消えた。
+      ・実務10枚で捏造ゼロ。報告書PDFの数値(18m/19m/6.8m/24,000個/約3週間/8-21–10-8)は悉く正、
+        UEスクショは「338 actors (1 selected)」まで一字違わず。
+      ・★弱点は**固有名の綴りのみ**(かんなみ→かなみ/墨田→壱田)。これは名簿で機構的に正す。
+
+    ★"judge"(傾向の抽出・高度資料のキャプション注入)は**雲に据え置く**。据え置きの理由①
+      「最も難しい判断は能力ある機構へ寄せ、qwen には"読み取れた事実"を渡す」は**未反証**であり、
+      今回測ったのは「見えるものを列挙する」仕事のみ。測っておらぬ物を降ろさぬ。
+    ★未試験の種類(手書き/低画質写真)も雲のまま(検体が蔵に無く、測れなかった)。
+
+    返り: "local" | "claude_cli" | "off"
+    """
+    master = (_get("CASPER_VISION", "claude_cli") or "").lower()
+    if master == "off":
+        return "off"                                   # 主の栓が閉じておれば用途を問わず閉じる
+    if purpose != "read":
+        return "claude_cli"                            # 判断は雲(据え置き)
+    v = (_get("CASPER_VISION_READ", "claude_cli") or "").lower()
+    if v != "local":
+        return "claude_cli"
+    # ★退避中(雲に着座)は地元の模型が居らぬ。地元を指せば「在らぬ者に見せる」ことになる。
+    if (_get("CASPER_BACKEND", "ollama") or "").lower() in ("claude_cli", "anthropic"):
+        return "claude_cli"
+    return "local"
+
+
 if __name__ == "__main__":
     print(f"生成: {gen_endpoint(strict=False)}  (model={gen_model()})")
     print(f"埋込: {embed_endpoint()}  (model={embed_model()})")
     print(f"禁足席(生成): {sorted(forbidden_seats()) or '(なし)'}")
+    print(f"視認(読み取り): {vision_backend('read')} / (判断): {vision_backend('judge')}")
     g = gen_endpoint(strict=False)
     print(f"★生成の宛先は禁足席か: {'はい(違背)' if is_forbidden_gen(g) else 'いいえ'}")

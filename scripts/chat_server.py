@@ -142,9 +142,10 @@ ap = argparse.ArgumentParser()
 #   本番は supervisor が --endpoint を明示するゆえ此処は素手起動の保険だが、
 #   保険こそ禁足席を指してはならぬ(cron/gate の一発物が悉く既定へ落ちた前例がある)。
 try:
-    import casper_endpoint as _ep0
-    _DEFAULT_ENDPOINT = _ep0.gen_endpoint(strict=False)
+    import casper_endpoint                            # 宛先(生成/埋込/視認)を決める唯一の関
+    _DEFAULT_ENDPOINT = casper_endpoint.gen_endpoint(strict=False)
 except Exception:
+    casper_endpoint = None
     _DEFAULT_ENDPOINT = "http://127.0.0.1:11434"      # 台帳が読めぬ時は手元へ(他人の機を叩かぬ)
 ap.add_argument("--endpoint", default=_DEFAULT_ENDPOINT)
 ap.add_argument("--model", default="qwen3:14b")
@@ -8273,6 +8274,108 @@ def claude_cli_text(prompt, allow=None):
         return f"[claude-cli error] {e}"
 
 
+def ollama_vision(image_path, prompt, timeout=300):
+    r"""地元の模型に画像を視認させる(**読み取り専用**)。契約は claude_cli_vision と同じ:
+    成功なら本文、失敗なら "[vision ...]" で始まる文字列を返し、呼び手が退避できるようにする。
+
+    【殿御裁可 2026-08-31】読み取りは地元・判断は雲。実測の根拠は casper_endpoint.vision_backend の
+    頭書きに記す。★本番の対話と**同じ形**(num_ctx/keep_alive)で訊く——形を違えれば別ランナーの
+    積み直しを求め、17GB常駐の隣に二つ目は載らず 503 即答になる(2026-08-29/31 に二度実測)。
+    """
+    ap = os.path.abspath(image_path)
+    _t0 = time.time()
+    try:
+        b64 = _b64.b64encode(open(ap, "rb").read()).decode()
+    except Exception as e:
+        return f"[vision error] 画像を読めませなんだ: {str(e)[:120]}"
+    body = {"model": A.model, "stream": False, "think": False, "keep_alive": -1,
+            "options": {"num_ctx": 12288, "num_predict": 700},
+            "messages": [{"role": "user", "content": prompt, "images": [b64]}]}
+    try:
+        req = urllib.request.Request(OLLAMA, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.load(r)
+        out = strip_think((resp.get("message") or {}).get("content", "")).strip()
+        _dur = time.time() - _t0
+        _vision_ledger("local_vision", A.model, prompt, out, _dur, "ok" if out else "empty", ap)
+        if not out:
+            return "[vision] 地元の目が何も返しませなんだ"
+        return out
+    except Exception as e:
+        _dur = time.time() - _t0
+        _code = getattr(e, "code", None)
+        _vision_ledger("local_vision", A.model, prompt, f"[error] {e}", _dur,
+                       "busy" if _code in (429, 503) else "error", ap)
+        # ★雲へ落とさぬ(呼び手が自ら退避先を決める)。何故成らなんだかを名乗る。
+        return f"[vision error] 地元の目が応じませなんだ({'混雑' if _code in (429, 503) else str(e)[:80]})"
+
+
+def _vision_ledger(door, model, prompt, response, dur_sec, outcome, image_path):
+    """視認の一件を帳簿へ。★雲と地元を**同じ形**で刻む——でなければ両者を並べて数えられぬ
+    (「センサーには消費者を同じ便で」)。雲側は _cloud_ledger が同じ door 形式で刻んでおる。"""
+    try:
+        _cloud_ledger(door, model, prompt=prompt, response=response, dur_sec=dur_sec,
+                      outcome=outcome, image_path=image_path)
+    except Exception:
+        pass
+
+
+def vision_read(image_path, prompt):
+    """**読み取り**の視認を、台帳の指す先へ回す唯一の関(地元 or 雲)。
+
+    ★入口は幾つ在ってよいが執行路は一本——読み取りの視認はこの関だけを通す。
+    ★地元が応じなんだ時は**雲へ退く**(読み取りは止めてよい仕事ではない)。退いた事実は帳簿に残る。
+    """
+    where = casper_endpoint.vision_backend("read") if casper_endpoint else "claude_cli"
+    if where == "off":
+        return "[vision] 画像の視認は止めてござる(CASPER_VISION=off)"
+    if where == "local":
+        out = ollama_vision(image_path, prompt)
+        if not out.startswith("[vision"):
+            return vision_fix_names(out)               # ★読み取った名を名簿へ通す(綴りの是正)
+        _vision_ledger("local_vision_fallback", A.model, prompt, out, 0.0, "fallback", 
+                       os.path.abspath(image_path))
+        return claude_cli_vision(image_path, prompt)   # 地元が応じねば雲へ退く
+    return claude_cli_vision(image_path, prompt)
+
+
+_VISION_NAME_FIXED = []          # 直近の是正(観測用・上限つき)
+
+
+def vision_fix_names(text):
+    r"""視認で読み取った**固有名の綴り**を名簿へ通して正す。
+
+    ★実測(2026-08-31): 地元の目は数値・日付・UI文字を正確に読む一方、名前だけを崩す
+      (「かんなみスプリングスCC」→「かなみ…」/「墨田営業所」→「壱田…」)。
+    ★模型に「正しく綴れ」と求めるのではなく、**機構で正す**(この陣の鉄則)。
+      正準スケルトン(_canonical: カタカナ⇄ローマ字・記号除去)で閉集合(online PJ名)と突き合わせ、
+      **ただ一つに定まる時のみ**置き換える(ambiguous/none では触らぬ=過剰な書換をせぬ)。
+    """
+    t = str(text or "")
+    if not t.strip():
+        return t
+    try:
+        idx = _pj_index()["idx"]
+    except Exception:
+        return t
+    for m in sorted(set(re.findall(r"[一-龥ぁ-んァ-ヶーA-Za-z0-9]{4,24}", t)),
+                    key=len, reverse=True)[:60]:
+        can = _canonical(m)
+        if len(can) < 4:
+            continue
+        hits = [nm for c, names in idx.items() if c == can for nm in names]
+        if len(set(hits)) != 1:
+            continue                                   # 定まらぬ時は触らぬ(三値の none/ambiguous)
+        nm = hits[0]
+        if m != nm:
+            t = t.replace(m, nm)
+            _VISION_NAME_FIXED.append({"from": m, "to": nm})
+            if len(_VISION_NAME_FIXED) > 100:
+                del _VISION_NAME_FIXED[:-100]
+    return t
+
+
 def claude_cli_vision(image_path, prompt):
     """claude CLI に画像を Read させて(=vision) 解析。Sonnet のマルチモーダルを活用。"""
     ap = os.path.abspath(image_path)
@@ -8739,18 +8842,18 @@ def feed_ingest(filename, description, data_b64):
            "SUMMARY: <この資料が何で、何が読み取れるか。2〜4文>\n"
            "QUESTIONS: <解像度を上げる確認質問1> | <質問2> | <質問3>")
     is_pdf = ext == ".pdf"
-    if is_image and VISION_BACKEND == "claude_cli":
-        # 画像は chat backend(ollama/qwen 等)に依らず Claude Sonnet の vision で直接解析
+    if is_image and VISION_BACKEND != "off":
+        # 【殿御裁可2026-08-31】**読み取り**の視認は台帳の指す先へ(地元 or 雲)。判断は雲に据え置く。
         vp = (build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。"
               f"\n\n説明(提供者記入): {description}\n\nこの画像資料を視認し、" + fmt)
-        out = claude_cli_vision(path, vp)
+        out = vision_read(path, vp)
         if out.startswith("[vision error]") or out.startswith("[vision]"):   # vision 失敗時はテキスト抽出へ退避
             text = casper_extract.extract(path) if casper_extract else "(抽出器なし)"
             out = llm_text(build_sys() + "\n\nあなたは資料を取り込んで理解する Casper。",
                            f"資料ファイル名: {safe}\n説明: {description}\n抽出内容:\n{text[:8000]}\n\n" + fmt)
         else:
             text = "(画像: Casper vision[Sonnet] で直接解析)"
-    elif is_pdf and VISION_BACKEND == "claude_cli" and \
+    elif is_pdf and VISION_BACKEND != "off" and \
             len((casper_extract.extract(path) if casper_extract else "").strip().replace("(PDF: テキスト無し=画像PDFの可能性)", "")) < 80:
         # 画像PDF(コンテ/絵素材等)=テキストが取れぬ → 各ページを画像化して vision で視認
         imgs = pdf_to_page_images(path, max_pages=5)
@@ -8760,7 +8863,7 @@ def feed_ingest(filename, description, data_b64):
                 vp = (build_sys() + "\n\nあなたは資料を理解する Casper。"
                       f"\n\nこれはPDF資料『{safe}』の{i+1}ページ目の画像(説明:{description})。"
                       "このページの絵柄・文字・構成・意図を簡潔に述べよ(2〜3文)。")
-                d1 = claude_cli_vision(ip, vp)
+                d1 = vision_read(ip, vp)          # 【2026-08-31】PDFページの視認=読み取り(地元 or 雲)
                 descs.append(f"[{i+1}ページ] " + (d1 if not d1.startswith("[vision") else "(視認失敗)"))
             text = "\n".join(descs)
             out = llm_text(build_sys() + "\n\nあなたは資料を理解する Casper。",
@@ -10972,7 +11075,8 @@ class H(BaseHTTPRequestHandler):
                         with open(sp, "wb") as f:
                             f.write(base64.b64decode(b64))
                         if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-                            vdesc = strip_think(claude_cli_vision(
+                            # 【2026-08-31】成果物に何が写っているか=読み取り(地元 or 雲)
+                            vdesc = strip_think(vision_read(
                                 sp, "この成果物に何が写っているか、及び制作工程(レイアウト/アニメ/FX/ライティング/コンポ/モデル等)を1〜2文で。"))
                     out = uploader_resolve(req.get("hint", ""), vdesc, uid)
                     out["recognized"] = vdesc
