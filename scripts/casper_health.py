@@ -292,8 +292,11 @@ def scan_embed_health(state):
         # ★観測路の関を使う(要求路 embed_alive ではない)。此処は背後の健診ゆえ、
         #   冷間の確認probe(長い)を撃ってよい——人の番を止めぬ。
         verdict, reason = casper_embed.embed_health_verdict()
-        # ★cold は吠えぬ。冷間は事故でなく常態である(吠えれば狼少年)。
-        status = {"ok": "ok", "cold": "ok", "down": "down"}.get(verdict, "unknown")
+        # ★cold も busy も吠えぬ。冷間は常態、混雑は死ではない(吠えれば狼少年)。
+        #   実害(2026-08-30〜31): busy を down と数え **145度の偽の赤**を家老まで届けた。
+        #   同じ刻の breaker は emb を緑(oks=12568)と記していた——鳴らす前に、
+        #   ★同じ機構の他の目が何と言うておるかを見よ。
+        status = {"ok": "ok", "cold": "ok", "busy": "ok", "down": "down"}.get(verdict, "unknown")
     except Exception as e:
         status, reason = "unknown", f"casper_embed を読めなんだ: {str(e)[:60]}"
     prev = state.get("embed_status")

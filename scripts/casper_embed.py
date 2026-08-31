@@ -396,6 +396,11 @@ def _probe(timeout=None):
     ★timeout を受けるのは、短probeでは**冷間の健やかな宿を原理的に観測できぬ**ため
       (実測2026-08-30: 短probe(3秒)は三度とも False、直後の本番embedは ok/1024次元を
        5.01秒で返し、温まった後の短probeは0.07秒で True)。"""
+    return _probe_ex(timeout)[0]
+
+
+def _probe_ex(timeout=None):
+    """probe を (成否, 理由) で返す。★理由を捨てぬのが要——捨てれば『混雑』が『死』に化ける。"""
     try:
         req = urllib.request.Request(
             OLLAMA + "/api/embeddings",
@@ -403,9 +408,9 @@ def _probe(timeout=None):
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=(timeout or _EMB_PROBE_TIMEOUT)) as r:
             d = json.load(r)
-        return bool(d.get("embedding"))
-    except Exception:
-        return False
+        return (bool(d.get("embedding")), "ok" if d.get("embedding") else "empty")
+    except Exception as e:
+        return (False, _diagnose_embed_failure(e))
 
 
 _EMB_WARM = {"ts": 0.0, "running": False}
@@ -473,20 +478,31 @@ def embed_health_verdict():
     ★時間のかかる確認probeを撃つゆえ、要求路(embed_alive)から呼んではならぬ。
     返り: (verdict, reason)
     """
-    if _probe():
+    ok, why = _probe_ex()
+    if ok:
         return "ok", "生存(短probeに即答)"
-    stock = None
-    try:
-        stock = model_in_stock()                           # 三値(在る/無い/★訊けなんだ)
-    except Exception as e:
-        return "unknown", f"在庫照会が転んだ: {str(e)[:60]}"
-    if stock is True:
-        if _probe(timeout=_EMB_CONFIRM_TIMEOUT):
-            return "cold", "冷えていたが健やか(確認probeに応答・ついでに温めた)"
-        return "down", "宿は在るが埋込が応じぬ(確認probeも不発)"
-    if stock is False:
+    # ★2026-08-31 是正: 従前ここで理由を捨て、**混雑(503/429)を『断』と名乗っていた**。
+    #   実害: 8/30〜8/31 に 145 度の偽の赤を吐き、家老の inbox まで届いた(狼少年)。
+    #   同じ刻の breaker は emb:.139 を緑(oks=12568)と記し、殿の対話も通っていた——
+    #   ★既に _diagnose_embed_failure が busy を分けていたのに、新しい関がそれを使わなんだ。
+    #   「混雑を不在と名乗るな」(cmd_丁)は**関ごとに繰り返し破られる**。理由は捨てるな。
+    if why == "busy":
+        return "busy", "宿は在るが混んでおる(503/429)——死んではおらぬ"
+    if why == "unreachable":
+        return "unknown", "宿に訊けなんだ——落ちておるとは断ぜぬ"
+    if why == "model_absent":
         return "down", "埋込モデルが在庫に無い"
-    return "unknown", "宿に訊けなんだ——落ちておるとは断ぜぬ"
+    # timeout/error/empty: 冷間の見込みが在るゆえ確認probe(長い)を撃つ
+    ok2, why2 = _probe_ex(timeout=_EMB_CONFIRM_TIMEOUT)
+    if ok2:
+        return "cold", "冷えていたが健やか(確認probeに応答・ついでに温めた)"
+    if why2 == "busy":
+        return "busy", "宿は在るが混んでおる(確認probeも混雑で弾かれた)"
+    if why2 == "unreachable":
+        return "unknown", "宿に訊けなんだ——落ちておるとは断ぜぬ"
+    if why2 == "model_absent":
+        return "down", "埋込モデルが在庫に無い"
+    return "down", f"宿は在るが埋込が応じぬ(確認probeも不発: {why2})"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

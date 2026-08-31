@@ -40,17 +40,28 @@ def chk(name, cond):
     print(("✅" if cond else "❌") + f" {name}")
 
 
-def _stub(short_ok, stock, long_ok=True):
-    """短probe/在庫/確認probeを差し替える(実HTTPを叩かぬ)。"""
+def _stub(short_ok, stock, long_ok=True, why="timeout", why_long="timeout"):
+    """短probe/在庫/確認probeを差し替える(実HTTPを叩かぬ)。
+    why/why_long は probe が返す**理由**——★理由を捨てる造りでは busy が down に化ける。"""
     calls = {"short": 0, "long": 0}
 
-    def probe(timeout=None):
+    def _why(base):
+        # ★身代わりも本物(_diagnose_embed_failure)と同じ筋で理由を決める。
+        #   でなければ「在庫に無いのに timeout と名乗る」検体が生まれ、門が嘘をつく。
+        if stock is False:
+            return "model_absent"
+        if stock is None:
+            return "unreachable"
+        return base
+
+    def probe_ex(timeout=None):
         if timeout and timeout > E._EMB_PROBE_TIMEOUT:
             calls["long"] += 1
-            return long_ok
+            return (long_ok, "ok" if long_ok else _why(why_long))
         calls["short"] += 1
-        return short_ok
-    E._probe = probe
+        return (short_ok, "ok" if short_ok else _why(why))
+    E._probe_ex = probe_ex
+    E._probe = lambda timeout=None: probe_ex(timeout)[0]
     E.model_in_stock = lambda timeout=3: stock
     return calls
 
@@ -59,13 +70,13 @@ _orig_probe, _orig_stock = E._probe, E.model_in_stock
 _orig_health = dict(E._EMB_HEALTH)
 
 
-def _judge(short_ok, stock, long_ok=True, prev_ok=True):
-    """観測路(embed_health_verdict)の四値を採る。要求路(embed_alive)は別に検める。"""
+def _judge(short_ok, stock, long_ok=True, prev_ok=True, why="timeout", why_long="timeout"):
+    """観測路(embed_health_verdict)の名乗りを採る。要求路(embed_alive)は別に検める。"""
     E._EMB_HEALTH.clear()
     E._EMB_HEALTH.update({"ok": prev_ok, "ts": 0.0, "fails": 0})
-    calls = _stub(short_ok, stock, long_ok)
+    calls = _stub(short_ok, stock, long_ok, why, why_long)
     verdict, _reason = E.embed_health_verdict()
-    return (verdict in ("ok", "cold")), verdict, calls
+    return (verdict in ("ok", "cold", "busy")), verdict, calls
 
 
 # ── ① 四値の名乗り ─────────────────────────────────────────────────────
@@ -76,8 +87,22 @@ chk("① ★短probe不発でも在庫在り＋確認probe応答→cold(生存�
 chk("① cold の時は確認probe(長い方)を実際に撃っておる", _c["long"] == 1)
 chk("① 短probe不発＋在庫在り＋確認probeも不発→down", _judge(False, True, long_ok=False)[:2] == (False, "down"))
 chk("① 在庫に無い→down", _judge(False, False)[:2] == (False, "down"))
-_a2, _v2, _ = _judge(False, None, prev_ok=True)
+_a2, _v2, _ = _judge(False, None, prev_ok=True, why="unreachable")
 chk("① ★在庫を訊けなんだ→unknown(断ぜぬ)", _v2 == "unknown")
+
+# ── ★混雑を死と名乗らぬ(2026-08-31 の実害より) ────────────────────────────
+# 本番で 145 度の偽の赤を吐き家老の inbox まで届いた。同じ刻 breaker は emb を緑(oks=12568)と
+# 記し、殿の対話も通っていた。★既に _diagnose_embed_failure が busy を分けていたのに、
+# 新しい関がそれを使わず理由を捨てていた——「混雑を不在と名乗るな」は関ごとに破られる。
+print("── ★混雑(503/429)は死ではない ──")
+_ab, _vb, _cb = _judge(False, True, why="busy")
+chk("★短probeが503→busy(downと名乗らぬ)", _vb == "busy")
+chk("★★混んでおるだけの時に長い確認probeを撃たぬ(行列をさらに詰まらせぬ)", _cb["long"] == 0)
+chk("★busy は『生きておる』側に数える", _ab is True)
+_, _vb2, _ = _judge(False, True, long_ok=False, why="timeout", why_long="busy")
+chk("★確認probeが混雑で弾かれた時も busy(downへ倒さぬ)", _vb2 == "busy")
+chk("★在庫に無い時だけ即 down(混雑と取り違えぬ)",
+    _judge(False, False, why="model_absent")[1] == "down")
 
 # ── ★要求路と観測路を分けておること(人の番を止めぬ) ──────────────────────
 print("── ★要求路は速さ、観測路は正直さ ──")
@@ -109,6 +134,12 @@ def _tick():
     H._alert(a)
     return a
 
+
+_jb = _judge(False, True, why="busy")      # busy
+_a_busy = _tick()
+chk("★混んでおるだけでは吠えぬ(health の窓に載らぬ)",
+    [d["metric"] for d in _a_busy["deviations"]] == [])
+chk("★それでも『混んでおる』と正直に名乗る", "混んでおる" in _a_busy["embed"]["reason"])
 
 _judge(False, True, long_ok=True)          # cold
 _a_cold = _tick()
@@ -157,18 +188,40 @@ chk("⑥ 復旧後は deviations に埋込の欄が無い", [d["metric"] for d i
 # ── ★突然変異 ──────────────────────────────────────────────────────────
 print("\n--- 突然変異検証 ---")
 SRC = io.open(os.path.join(HERE, "casper_embed.py"), encoding="utf-8").read()
-_m1 = '''    if stock is True:
-        if _probe(timeout=_EMB_CONFIRM_TIMEOUT):
-            return "cold", "冷えていたが健やか(確認probeに応答・ついでに温めた)"
-        return "down", "宿は在るが埋込が応じぬ(確認probeも不発)"'''
+# ★根を殺す(枝を一つ殺すだけでは、もう一方の busy の枝が拾って緑のままになる——実地で踏んだ)
+_m1 = '    if code in (429, 503):\n        return "busy"'
 chk("★変異の錨が在る(ゲートの自己点検)", SRC.count(_m1) == 1)
 _ns = {"__file__": os.path.join(HERE, "casper_embed.py"), "__name__": "casper_embed_mutant"}
-exec(compile(SRC.replace(_m1, '''    if stock is True:
-        return "down", "宿は在るが埋込が応じぬ"'''), "casper_embed.py", "exec"), _ns)
-_ns["_probe"] = lambda timeout=None: False
+_mut_src = SRC.replace(_m1, '    if code in (429, 503):\n        return "error"')
+exec(compile(_mut_src, "casper_embed.py", "exec"), _ns)
+
+
+class _E503(Exception):
+    code = 503
+
+
+def _raise503(*a, **k):
+    raise _E503()
+
+
 _ns["model_in_stock"] = lambda timeout=3: True
-chk("★変異(冷間を断と数える旧実装): 健やかな宿を断と誤る(赤化実証)",
+_ns["urllib"].request.urlopen = _raise503
+chk("★変異(混雑を『error』と名づける): 混んでおるだけの宿を『断』と誤り、偽の赤を家老まで届ける(赤化実証)",
     _ns["embed_health_verdict"]()[0] == "down")
+_stub(False, True, why="busy")
+chk("★同じ状態で本物は busy と名乗る(変異の対照)", E.embed_health_verdict()[0] == "busy")
+
+_m1b = '''    ok2, why2 = _probe_ex(timeout=_EMB_CONFIRM_TIMEOUT)
+    if ok2:
+        return "cold", "冷えていたが健やか(確認probeに応答・ついでに温めた)"'''
+chk("★変異の錨が在る(冷間・ゲートの自己点検)", SRC.count(_m1b) == 1)
+_ns2 = {"__file__": os.path.join(HERE, "casper_embed.py"), "__name__": "casper_embed_mutant2"}
+exec(compile(SRC.replace(_m1b, '''    ok2, why2 = (False, "timeout")'''), "casper_embed.py", "exec"), _ns2)
+_ns2["_probe_ex"] = lambda timeout=None: (timeout is not None and timeout > 3.0, "timeout")
+_ns2["_probe"] = lambda timeout=None: False
+_ns2["model_in_stock"] = lambda timeout=3: True
+chk("★変異(冷間の確認を撃たぬ): 健やかな宿を断と誤る(赤化実証)",
+    _ns2["embed_health_verdict"]()[0] == "down")
 chk("★同じ状態で本物は cold と名乗る(変異の対照)",
     (lambda: (_stub(False, True, long_ok=True), E.embed_health_verdict()[0])[1])() == "cold")
 
