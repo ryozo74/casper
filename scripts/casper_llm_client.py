@@ -323,6 +323,63 @@ def judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snaps
                                 "陣外だと断定しない(正典・三欄の門)。"}}
 
 
+# ── 黒匣を**読む者**(2026-08-31) ────────────────────────────────────────
+# ★病: cmd_519 で建てたこの台帳は、**書かれるだけで誰も読んでいなかった**
+#   (実査: casper_incident を読む者は本モジュールと門のみ=消費者ゼロ)。
+#   将軍が手で読んで初めて「門が偽incidentを48件積んでいた」と判った——機構ではない。
+#   ★「センサーには消費者を同じ便で」の型を、この陣で最も重い台帳自身が破っていた。
+# 消費者は casper_health(health.md)へ相乗りさせる。届け先は増やさぬ。
+
+# 合成の指紋。★名札(synthetic)が本筋だが、**名札が付く前に積まれた行**が台帳に残る
+#   (追記専用の帳簿は書き換えぬ)。ゆえ既知の偽宛先も併せて外す。
+_FAKE_HOSTS = ("http://h:1", "http://fake", "http://x/")
+_FAKE_MARK = "検体が届いておらぬ"          # 門の身代わりが吐く言葉(2026-08-31以前の残骸の指紋)
+
+
+def incident_is_synthetic(rec):
+    """この一件は合成か。名札 > 既知の偽宛先 > 試験の言葉、の順で見る。"""
+    if rec.get("synthetic") is True:
+        return True
+    h = str(rec.get("host") or "")
+    if any(h.startswith(f) for f in _FAKE_HOSTS):
+        return True
+    return _FAKE_MARK in json.dumps(rec.get("details") or {}, ensure_ascii=False)
+
+
+def incident_summary(hours=24, path=None):
+    """直近 hours の黒匣を数える。★合成は分母から外し、**外した数も返す**
+    (黙って間引けば「静かになった」と読まれる——casper_health の作法に倣う)。
+    返り: {"n","synthetic_skipped","by_verdict","by_site","latest_ts","window_hours"}
+    """
+    p = path or INCIDENT_LOG
+    cut = _now() - hours * 3600
+    n = skipped = 0
+    by_v, by_s, latest = {}, {}, None
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                ts = float(r.get("ts") or 0)
+                if ts < cut:
+                    continue
+                if incident_is_synthetic(r):
+                    skipped += 1
+                    continue
+                n += 1
+                v = str(r.get("verdict") or "?")
+                st = str(r.get("site") or "?")
+                by_v[v] = by_v.get(v, 0) + 1
+                by_s[st] = by_s.get(st, 0) + 1
+                latest = max(latest or 0, ts)
+    except FileNotFoundError:
+        pass
+    return {"n": n, "synthetic_skipped": skipped, "by_verdict": by_v, "by_site": by_s,
+            "latest_ts": latest, "window_hours": hours}
+
+
 def record_incident(site, model, host, ttft_info=None, status_code=None, reason=None):
     """timeout検知時に呼ぶ: 三証言を併走取得→黒匣へ1レコードで束ねて追記。
     ttft_infoはchat_server側で計測済のTTFT情報(dict、無ければNone=未取得として正直に記録)。

@@ -175,6 +175,40 @@ chk("⑦ ★probe と本番が同じ形の body(model+prompt。余計な options
     and "options" not in _pe)
 chk("⑦ 宛先も同じ(probe だけ別の宿を見ぬ)", _pe.count("OLLAMA +") == 1 and _eo.count("OLLAMA +") == 1)
 
+# ── ⑧ 黒匣に**読む者**が居る(2026-08-31) ───────────────────────────────
+print("── ⑧ 黒匣を誰が読むか ──")
+# ★病: cmd_519 の黒匣は書かれるだけで**誰も読んでいなかった**(消費者ゼロ)。将軍が手で読んで
+#   初めて「門が偽incidentを48件積んでいた」と判った。それは機構ではない。
+_led = os.path.join(_tmpq, "inc.jsonl")
+with io.open(_led, "w", encoding="utf-8") as f:
+    import time as _t
+    now = _t.time()
+    f.write(json.dumps({"ts": now, "site": "casper_embed", "verdict": "queue_full"}) + "\n")
+    f.write(json.dumps({"ts": now, "site": "casper_embed", "verdict": "cold/eviction",
+                        "synthetic": True}) + "\n")
+    f.write(json.dumps({"ts": now, "site": "casper_embed", "verdict": "network/host down",
+                        "host": "http://h:1"}) + "\n")
+    f.write(json.dumps({"ts": now, "site": "casper_embed", "verdict": "network/host down",
+                        "details": {"ps_error": "検体が届いておらぬ URL: x"}}) + "\n")
+    f.write(json.dumps({"ts": now - 90000, "site": "casper_embed", "verdict": "queue_full"}) + "\n")
+_sum = C.incident_summary(24, path=_led)
+chk("⑧ 黒匣を数える関が在る", callable(C.incident_summary))
+chk("⑧ ★本物だけを数える(合成3件を除く)", _sum["n"] == 1 and _sum["by_verdict"] == {"queue_full": 1})
+chk("⑧ ★除いた数も返す(黙って間引かぬ——静かになったと読まれる)", _sum["synthetic_skipped"] == 3)
+chk("⑧ 名札(synthetic)で除ける", C.incident_is_synthetic({"synthetic": True}))
+chk("⑧ ★名札の無い残骸も指紋で除ける(偽宛先)", C.incident_is_synthetic({"host": "http://h:1"}))
+chk("⑧ ★試験の言葉でも除ける(2026-08-31以前の残骸)",
+    C.incident_is_synthetic({"details": {"ps_error": "検体が届いておらぬ URL: x"}}))
+# ★宛先の文字を門に焼き付けぬ(gate_forbidden_seat が engine の焼き付きを検める——検体も例外にせぬ)
+_REAL_HOST = "http://192.168.44." + "119:11434"
+chk("⑧ 本物は除かぬ(過剰に間引かぬ)",
+    not C.incident_is_synthetic({"host": _REAL_HOST, "verdict": "queue_full"}))
+chk("⑧ 窓の外は数えぬ", _sum["window_hours"] == 24)
+_hsrc = io.open(os.path.join(HERE, "casper_health.py"), encoding="utf-8").read()
+chk("⑧ ★消費者が居る(health.md へ相乗り・届け先は増やさぬ)",
+    "incident_summary(24)" in _hsrc and "推論機の黒匣" in _hsrc)
+chk("⑧ 読めなんだ時は黙って消さず名乗る", "読めませなんだ" in _hsrc)
+
 # ── ★突然変異 ──────────────────────────────────────────────────────────
 print("\n--- 突然変異検証 ---")
 _m = '''    if status_code in (429, 503):'''

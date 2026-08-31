@@ -464,6 +464,32 @@ def write_health_md(a):
                 lines.append(f"- **{d['metric']}**: 現在 {d['current']} > 閾値 {d['threshold']}"
                              f"（平常 {d['baseline_median']}・n={d.get('n', cw.get('n', 0))}）")
         lines.append("")
+    # ── 黒匣の digest(2026-08-31) ──────────────────────────────────────
+    # ★病: cmd_519 の黒匣は**書かれるだけで誰も読んでいなかった**。将軍が手で読んで初めて
+    #   「門が偽incidentを48件積んでいた」と判った。届け先は増やさず、この窓へ相乗りさせる。
+    # ★合成は分母から外し、**外した数も書く**(黙って間引けば「静かになった」と読まれる)。
+    try:
+        import casper_llm_client as _LLC
+        _inc = _LLC.incident_summary(24)
+        if _inc["n"] or _inc["synthetic_skipped"]:
+            lines.append("")
+            lines.append("## 推論機の黒匣(直近24時間)")
+            if _inc["n"] == 0:
+                lines.append("- 事故なし" + (f"(合成 {_inc['synthetic_skipped']} 件は分母から除外)"
+                                             if _inc["synthetic_skipped"] else ""))
+            else:
+                _v = "、".join(f"{k} {v}件" for k, v in
+                               sorted(_inc["by_verdict"].items(), key=lambda x: -x[1]))
+                _s = "、".join(f"{k} {v}件" for k, v in
+                               sorted(_inc["by_site"].items(), key=lambda x: -x[1]))
+                lines.append(f"- **{_inc['n']}件**: {_v}")
+                lines.append(f"- 呼び手: {_s}")
+                if _inc["synthetic_skipped"]:
+                    lines.append(f"- (合成 {_inc['synthetic_skipped']} 件は分母から除外)")
+    except Exception as _e:
+        lines.append("")
+        lines.append(f"## 推論機の黒匣\n- 読めませなんだ: {str(_e)[:80]}")   # 黙って消さぬ
+
     open(HEALTH_MD, "w", encoding="utf-8").write("\n".join(lines) + "\n")
     return HEALTH_MD
 
