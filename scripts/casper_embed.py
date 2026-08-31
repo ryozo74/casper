@@ -34,6 +34,32 @@ EMB_META = EMB_INDEX + ".meta.json"                # cmd_498: 件数サイドカ
 import casper_endpoint as _ep
 OLLAMA = _ep.embed_endpoint()
 MODEL = _ep.embed_model()
+
+try:
+    import casper_breaker as _B                # ★2026-08-31: 埋込の**実**成否を台帳へ(Fable 急所5)
+except Exception:
+    _B = None
+
+
+def _breaker_record(ok, ms):
+    """埋込呼出の成否を emb: の欄へ刻む。
+
+    ★病(実測): emb:<host> の緑は `probe-home` が **/api/tags の結果**を書いたもので、
+      「在庫が在る」を「埋込が健やか」と名乗っていた(ema が stock 欄と小数点以下まで同値なのが証拠)。
+      その緑の裏で黒匣には 8/25 以降 **日々39〜68件の埋込失敗**が刻まれ続けていた。
+      ——「未確認をtrueと名乗るな」の再演である。実呼出だけが埋込の健康を語れる。
+    """
+    if not _B:
+        return
+    try:
+        host, _, port = _hostport().partition(":")
+        _B.record(_B.emb_key(host, port), ok=ok, latency_ms=int(ms))
+    except Exception:
+        pass
+
+
+def _hostport():
+    return OLLAMA.rstrip("/").split("://", 1)[-1]
 _VEC = None      # [{src,title,t,v:[float]}]
 
 try:
@@ -59,22 +85,33 @@ def embed_one(text):
             OLLAMA + "/api/embeddings",
             data=json.dumps({"model": MODEL, "prompt": text[:2000]}).encode(),
             headers={"Content-Type": "application/json"})
+        _t0 = time.time()
         with urllib.request.urlopen(req, timeout=30) as r:
             d = json.load(r)
+        _ms = (time.time() - _t0) * 1000
+        v = d.get("embedding")
         if casper_llm_client:
             try:
                 # ttft_sec=None: 非stream・埋め込みAPIはfirst token概念が無い(distill_activityと同型・瑕疵2是正)
-                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d)
+                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d,
+                                                     outcome="ok" if v else "empty")
             except Exception:
                 pass
-        v = d.get("embedding")
+        _breaker_record(bool(v), _ms)                    # ★実呼出の成否を刻む(在庫ではなく)
         return v if v else None
-    except Exception:
+    except Exception as _e1:
+        _why1 = _diagnose_embed_failure(_e1)
+        _code1 = getattr(_e1, "code", None)
         if casper_llm_client:
             try:
-                casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA)
+                casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA,
+                                                  status_code=_code1, reason=_why1)
+                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None,
+                                                     outcome=_why1, status_code=_code1)
             except Exception:
                 pass
+        if _why1 != "busy":                              # 混雑は宿の死ではない(数えるが倒さぬ)
+            _breaker_record(False, 0)
         return None
     finally:
         if casper_llm_client and _inflight_handle:
@@ -149,22 +186,34 @@ def embed_batch_ex(texts):
             OLLAMA + "/api/embed",
             data=json.dumps({"model": MODEL, "input": [t[:2000] for t in texts]}).encode(),
             headers={"Content-Type": "application/json"})
+        _t0 = time.time()
         with urllib.request.urlopen(req, timeout=120) as r:
             d = json.load(r)
+        _ms = (time.time() - _t0) * 1000
+        _vecs = d.get("embeddings")
         if casper_llm_client:
             try:
-                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d)
+                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None, ollama_done=d,
+                                                     outcome="ok" if _vecs else "empty")
             except Exception:
                 pass
-        _vecs = d.get("embeddings")
+        _breaker_record(bool(_vecs), _ms)                    # ★実呼出の成否を刻む(在庫ではなく)
         return (_vecs, "ok") if _vecs else (None, "empty")   # 空返しも失敗——「在るのに0件」と名乗らせぬ
     except Exception as _e:
+        _why = _diagnose_embed_failure(_e)
+        _code = getattr(_e, "code", None)
         if casper_llm_client:
             try:
-                casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA)
+                casper_llm_client.record_incident("casper_embed", MODEL, OLLAMA,
+                                                  status_code=_code, reason=_why)
+                casper_llm_client.record_call_timing("casper_embed", MODEL, OLLAMA, None,
+                                                     outcome=_why, status_code=_code)
             except Exception:
                 pass
-        return None, _diagnose_embed_failure(_e)
+        # ★混雑は宿の死ではない。breaker を赤へ倒せば退避の判断まで狂う——数えるが倒さぬ。
+        if _why != "busy":
+            _breaker_record(False, 0)
+        return None, _why
     finally:
         if casper_llm_client and _inflight_handle:
             try:

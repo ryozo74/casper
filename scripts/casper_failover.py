@@ -322,7 +322,15 @@ def cmd_probe_home(args):
     embed_stock_ok = reach_ok and have.get(embed_model, False)
 
     B.record(sk, ok=stock_ok, latency_ms=ms)               # 在庫は在庫の欄へ(生成の欄と混ぜぬ)
-    emb_state = B.record(ek, ok=embed_stock_ok, latency_ms=ms)
+    # ★2026-08-31(Fable診断 急所5): 従前ここで **在庫の結果を emb: の欄へ**書いていた。
+    #   「在庫が在る」を「埋込が健やか」と名乗る嘘であり、その緑の裏で黒匣には日々39〜68件の
+    #   埋込失敗が刻まれ続けていた(ema が stock 欄と小数点以下まで同値なのが証拠)。
+    #   ★emb: は casper_embed の**実呼出**だけが書く。在庫は embstock: の欄へ分けて残す
+    #     (捨てはせぬ——雲に居る間の唯一の手掛かりゆえ)。
+    #   ★emb: の判定を読んで**決める者は居らぬ**(実査: 印字のみ)。ゆえ固着の危惧は当たらぬ。
+    B.record("embstock:" + hostport, ok=embed_stock_ok, latency_ms=ms)
+    emb_state = {"note": "emb: は実呼出のみが書く(此処は在庫ゆえ embstock: へ)",
+                 "embstock_ok": embed_stock_ok, "emb_state": B.state(ek)}
 
     evacuated = _hostport(env.get("CASPER_OLLAMA", "")) != hostport
     gen_action, gen_probe = "untouched", None

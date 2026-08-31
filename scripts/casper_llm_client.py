@@ -125,7 +125,8 @@ def inflight_end(handle):
         pass
 
 
-def record_call_timing(caller, model, host, ttft_sec, ollama_done=None):
+def record_call_timing(caller, model, host, ttft_sec, ollama_done=None,
+                       outcome=None, status_code=None):
     """★AC5(正典(c)): 毎呼出のTTFTと、成功時はload/prompt_eval/eval_durationを台帳へ記録する。
     inflight閾値(INFLIGHT_MIN_PROMPT_CHARS)に関わらず全呼出が対象(probeの軽い呼出も含む)——
     inflight(占有の証言)とTTFT台帳(時間の解剖の証言)は別の目的ゆえ、同じ閾値で間引かない。
@@ -134,6 +135,13 @@ def record_call_timing(caller, model, host, ttft_sec, ollama_done=None):
     秒への変換はしない(生値保持=丸め誤差回避・cmd_512瑕疵Dの教訓)。"""
     rec = {"ts": round(_now(), 3), "caller": caller, "model": model, "host": host,
            "ttft_sec": ttft_sec}
+    # ★2026-08-31(Fable診断 急所3): 失敗の**自らの証言**(HTTPの番号)をどの台帳も持たなんだ。
+    #   ゆえ「503(行列が溢れた)」と「時間切れ(冷えていた)」が同じ姿で並び、混雑を数えられなんだ。
+    #   outcome/status は取れた時のみ載せる(取れぬ値を埋めれば「未確認をtrueと名乗るな」違反)。
+    if outcome is not None:
+        rec["outcome"] = outcome
+    if status_code is not None:
+        rec["status_code"] = status_code
     if _is_synthetic():
         rec["synthetic"] = True
     if ollama_done:
@@ -259,7 +267,8 @@ def _model_in_ps(ps_data, model):
     return present, names
 
 
-def judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snapshot):
+def judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snapshot,
+                   status_code=None):
     """判定表に沿ってverdictを機構自身に書く(軍師補足①: 人が書き換えない)。
     戻り値はincidentレコードの一部(verdict/observed/unobservable/details)。"""
     observed = []
@@ -279,6 +288,15 @@ def judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snaps
         observed.append("co_probe")
     else:
         unobservable.append("co_probe")
+
+    # ★queue_full(2026-08-31・Fable診断 急所3): 行列が溢れた(503/429)なら**それが答え**である。
+    #   従前は失敗の番号を捨ててから判定に入ったため、混雑が必ず下の cold/eviction へ落ちていた
+    #   (埋込は bge-m3 が常駐せぬゆえ ps に載らず、**構造的に**その先の行へ辿り着けなんだ)。
+    #   ★宿は生きておる。死んでもおらぬし冷えてもおらぬ——「混雑を不在と名乗るな」。
+    if status_code in (429, 503):
+        return {"verdict": "queue_full", "observed": observed, "unobservable": unobservable,
+                "details": {"status_code": status_code, "ps_status": ps_status,
+                            "note": "宿は生・行列が溢れた(この時 ps/inflight は原因を語らぬ)"}}
 
     # host不達: ps自体が到達不能(timeout/error)なら宛先そのものに答えられぬ
     if ps_status != "ok":
@@ -305,9 +323,11 @@ def judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snaps
                                 "陣外だと断定しない(正典・三欄の門)。"}}
 
 
-def record_incident(site, model, host, ttft_info=None):
+def record_incident(site, model, host, ttft_info=None, status_code=None, reason=None):
     """timeout検知時に呼ぶ: 三証言を併走取得→黒匣へ1レコードで束ねて追記。
-    ttft_infoはchat_server側で計測済のTTFT情報(dict、無ければNone=未取得として正直に記録)。"""
+    ttft_infoはchat_server側で計測済のTTFT情報(dict、無ければNone=未取得として正直に記録)。
+    ★status_code/reason(2026-08-31): **失敗した当人の証言**。呼び手は握っておるのに
+      渡しておらず、黒匣は 503 を cold/eviction と誤記していた。証言者に筆を持たせる。"""
     t_incident = _now()
     ps_status, ps_data = probe_ps(host)
     co_status, co_data = probe_generate_1token(host, model)
@@ -318,7 +338,10 @@ def record_incident(site, model, host, ttft_info=None):
         inflight_snapshot = None
         inflight_read_status = "error"
 
-    judged = judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snapshot)
+    judged = judge_incident(ps_status, ps_data, co_status, co_data, model, inflight_snapshot,
+                            status_code=status_code)
+    if reason is not None:
+        judged.setdefault("details", {})["caller_reason"] = reason   # 呼び手の名づけも併記(取り違えを後から検める)
 
     rec = {
         "ts": round(t_incident, 3),

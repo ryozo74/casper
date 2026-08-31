@@ -71,7 +71,17 @@ def _reset_tmp(name):
 
 
 # ─────────────────────────────────────────────────────────────────
-# AC1: probe_generateのbodyにkeep_alive:"10m"が明示されていること
+# AC1: probe_generateが**本番と同じ形**で訊いていること(2026-08-31 是正)
+# ★従前この試験は keep_alive=="10m" を求めていたが、それは cmd_519 当時の姿である。
+#   2026-08-29 の実測が「probeは本番と同じ形で訊け」を機構の掟に据えた:
+#     同じ .139 へ同じ窓で、本番の形(num_ctx=12288/keep_alive=-1)は200・0.1〜0.6秒、
+#     旧probeの形(num_ctxなし/keep_alive="10m")は**503即答が4/4**。唯一の差は num_ctx。
+#     Ollamaは(model, options)ごとにrunnerを持つゆえ、形の違う要求は別ランナーの積み直しを
+#     求め、17.3GB常駐の隣に二つ目は載らず行列が溢れる。
+#   ★"10m" を求め続ければ、本番が-1で釘付けにしたランナーの寿命をprobeが10分へ引き下げる
+#     ——測る者が測られる物を変える。ゆえ試験の側を掟へ合わせる。
+#   ★将軍実測(2026-08-31・同じ宿の同じ瞬間): 形を揃えれば http=200(0.47秒)、
+#     num_ctx を落とせば http=503(0.003秒)。「詰まっておる」と読んだのは誤診であった。
 # ─────────────────────────────────────────────────────────────────
 def test_ac1_keep_alive_explicit():
     import casper_failover as F
@@ -89,8 +99,13 @@ def test_ac1_keep_alive_explicit():
     finally:
         F.urllib.request.urlopen = real_urlopen
 
-    check("AC1: keep_alive=10mがbodyに明示されている",
-          captured.get("body", {}).get("keep_alive") == "10m", str(captured.get("body")))
+    _b = captured.get("body", {})
+    check("AC1-a: keep_alive が明示されている(既定任せにせぬ)",
+          "keep_alive" in _b, str(_b))
+    check("AC1-b: ★本番と同じ keep_alive(-1=常駐。probeが本番の寿命を縮めぬ)",
+          _b.get("keep_alive") == -1, str(_b))
+    check("AC1-c: ★本番と同じ num_ctx(形が違えば別ランナーを求め、503即答を自ら招く)",
+          (_b.get("options") or {}).get("num_ctx") == 12288, str(_b))
 
 
 # ─────────────────────────────────────────────────────────────────
