@@ -27,6 +27,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import gate_synthetic; gate_synthetic.shield(isolate=False)   # ★2026-08-31: 実呼出を合成と名乗る(消費者が分母から外せるように)
 import casper_secrets                                   # noqa: E402
 
 SRC = os.path.join(HERE, "chat_server.py")

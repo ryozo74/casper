@@ -25,6 +25,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "chat_server.py")
 
+import gate_synthetic; gate_synthetic.shield(isolate=False)   # ★2026-08-31: 実呼出を合成と名乗る
 import casper_rag
 import pack_config
 

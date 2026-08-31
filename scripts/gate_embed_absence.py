@@ -65,6 +65,26 @@ def install(tags=None, tags_exc=None, embed=None, embed_exc=None):
     E.urllib.request.urlopen = fake
 
 
+# ★2026-08-31: 本門の合成失敗が**本番の黒匣**(queue/casper_incident.jsonl)へ書き込まれていた。
+#   実測: 本日だけで .119 宛の偽incidentが8件×6回=48件、host `http://h:1` が10件。
+#   ★この陣の掟「合成試験は CASPER_SYNTHETIC=1 を名乗れ」を門自身が破っていた。
+#   ★名乗るだけでは足りぬ——**本番の台帳に一行も書かせぬ**のが正しい(試験は本番に触れぬ)。
+#   ゆえ (a) 合成の名札を立て (b) 台帳の置き場を一時領域へ移す。両方を同じ便で。
+import os as _os
+import tempfile as _tf
+_os.environ["CASPER_SYNTHETIC"] = "1"
+try:
+    import casper_llm_client as _LLC
+    # ★INCIDENT_LOG 等は import 時に確定する定数ゆえ、QUEUE_DIR だけ差し替えても効かぬ
+    #   (「塞いだつもりで塞げておらぬ」を実測で踏んだ——書いた後に必ず数えて確かめよ)。
+    _d = _tf.mkdtemp(prefix="gate_synthetic_ledger_")
+    _LLC.QUEUE_DIR = _d
+    _LLC.INCIDENT_LOG = _os.path.join(_d, "casper_incident.jsonl")
+    _LLC.INFLIGHT_DIR = _os.path.join(_d, "ollama_inflight")
+    _LLC.INFLIGHT_ORPHAN_LOG = _os.path.join(_d, "ollama_inflight_orphan.jsonl")
+except Exception:
+    pass
+
 _REAL_URLOPEN = urllib.request.urlopen
 IN_STOCK = {"models": [{"name": E.MODEL}, {"name": "qwen3.6:27b"}]}
 NO_STOCK = {"models": [{"name": "qwen3.6:27b"}]}
