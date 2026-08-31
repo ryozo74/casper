@@ -3,8 +3,10 @@
 gate_aurora_save.py は _ollama_json をstub差替してネットワーク非依存を保つ設計だが、
 意味判定(_wants_aurora_save_llm)の実際の正答率はz8aへの実疎通なしには確認できない
 (掟: 緑ゲートに嘘は映らぬ・意味判定の正答をgate内で主張しない)。
-本スクリプトは実z8a(192.168.44.119:11434)へ到達し、kiyotomo4発話・未知語のTrue側正答と
-(D)節跨ぎ・題名解決を確認する。z8a未起動/到達不能時はスキップ(exit 0・CIを壊さない)。
+本スクリプトは**台帳の指す生成の宛先**(casper_endpoint.gen_endpoint)へ実疎通し、
+kiyotomo4発話・未知語のTrue側正答と(D)節跨ぎ・題名解決を確認する。到達不能時はスキップ
+(exit 0・CIを壊さない)。★2026-08-31 まで宛先を焼き付けており、全門を走らせるたび
+**禁足席へ 27b の実呼出を9発**撃っていた(将軍実測: 本日だけで四度)。門も台帳に従う。
 実行: python3 gate_aurora_save_smoke.py
 """
 import ast
@@ -20,8 +22,11 @@ SRC = os.path.join(HERE, "chat_server.py")
 # cmd_491 AC3: PJ名は pack から受け取る(gate_*.py を engine_scan exclude から外しても
 # pack_lint が緑のままであるため)。
 _PJ = (pack_config.get("examples", {}).get("project_names") or ["sample-pj"])[0]
-ENDPOINT = "http://192.168.44.119:11434"
-MODEL = "qwen3.6:27b"
+# ★2026-08-31: 宛先を焼き付けていたため、全門を走らせるたび**禁足席へ 27b の実呼出を9発**
+#   撃っていた(将軍実測: 本日だけで四度)。門も台帳に従う。
+import casper_endpoint as _ep
+ENDPOINT = _ep.gen_endpoint()
+MODEL = _ep.gen_model()
 
 WANT = ["_AURORA_WORD_RE", "_AURORA_READ_RE", "_AURORA_SAVED_REF_RE", "_BENEFIT_COMPLETION_NEG_RE",
         "_AURORA_EDIT_READ_VERB_RE", "_AURORA_IMMEDIATE_TAIL_VERB_BOUNDARY_NEG",

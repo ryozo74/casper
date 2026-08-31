@@ -14,8 +14,15 @@ HERE = os.path.dirname(__file__)
 
 ap = argparse.ArgumentParser()
 # 宛先 endpoint をコマンドに露出させる(分類器の宛先審査・殿の明示 allow 用)
-ap.add_argument("--endpoint", default="http://192.168.44.119:11434",
-                help="Ollama base URL (z8a)")
+# ★2026-08-31: 既定を禁足席に焼き付けておらぬ(台帳=casper_endpoint から引く)。
+#   cron や手動の一発物は env を source せぬゆえ、焼き付き既定は必ずいつか実運用へ漏れる。
+try:
+    import casper_endpoint as _ep0
+    _DEF_EP = _ep0.gen_endpoint(strict=False)
+except Exception:
+    _DEF_EP = "http://127.0.0.1:11434"          # 台帳が読めぬ時は手元へ(他人の機を叩かぬ)
+ap.add_argument("--endpoint", default=_DEF_EP,
+                help="Ollama base URL (既定は casper_endpoints.env の台帳)")
 # --full: 実データ(PII含む)を送出。既定は PII を除く schema-only。
 ap.add_argument("--full", action="store_true",
                 help="send real rows incl. PII (requires 殿's egress grant)")

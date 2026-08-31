@@ -30,7 +30,12 @@ SCOREDB = os.path.join(HERE, "..", "..", "..", "score_be", "score.db")
 
 CLAUDE_BIN = os.environ.get("CASPER_CLAUDE_BIN", "claude")
 MODEL = os.environ.get("CASPER_ACT_MODEL", "opus")          # 既定=Opus(深)。qwen3.6:27b で軽量
-OLLAMA = os.environ.get("CASPER_ENDPOINT", "http://192.168.44.119:11434").rstrip("/") + "/api/chat"
+# ★2026-08-31(Fable診断 急所1): 従前は `CASPER_ENDPOINT`——**env台帳に存在せぬ鍵名**を読み、
+#   既定が禁足席(.119)に焼き付いていた。ゆえ日次の distill は必ず殿の機へ 27b を撃っていた
+#   (実測 08-31 13:36: .119 へ88.5秒の呼出／同刻 .119 に 27b が17.1GiB在席)。
+#   宛先の決定は casper_endpoint 一箇所に集める。禁足席なら黙って迂回せず名乗って止まる。
+import casper_endpoint as _ep
+OLLAMA = _ep.gen_endpoint() + "/api/chat"
 MIN_EVENTS = 4                                              # これ未満の活動しかないuidはskip
 
 try:

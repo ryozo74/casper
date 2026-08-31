@@ -457,7 +457,10 @@ def cmd_decide(args):
 
 def _rewrite_env(target_hostport, is_embed_too):
     """casper_endpoints.envのCASPER_OLLAMA(と必要ならCASPER_EMBED_ENDPOINT)行を書き換える。
-    ★CASPER_HOME_OLLAMAは触らない(固定台帳)。機構が書く際は必ずログへ刻む(人手書換との衝突を可視化)。"""
+    ★CASPER_HOME_OLLAMA・CASPER_EMBED_HOMEは触らない(固定台帳)。
+    ★is_embed_too は既定で False にせよ(2026-08-31)。埋込は生成の席とは別の裁可で動く。
+      True を渡してよいのは「埋込の家そのものを移す」と人が判じた時だけである。
+    機構が書く際は必ずログへ刻む(人手書換との衝突を可視化)。"""
     if not os.path.exists(ENV_FILE):
         raise FileNotFoundError(ENV_FILE)
     with open(ENV_FILE, encoding="utf-8") as f:
@@ -536,7 +539,12 @@ def cmd_switch(args):
         return 3
     env = _read_env()
     old = env.get("CASPER_OLLAMA", "")
-    _rewrite_env(args.to, is_embed_too=True)
+    # ★2026-08-31: 埋込を生成の退避に**追随させぬ**(Fable診断 急所2)。
+    #   実害: 08-24 21:07 の復帰 switch が埋込を .139 へ引きずり、その直前に下された
+    #   殿の裁可(「埋込は z8a を借り続ける・禁足は生成の席の話」)を無言で上書きした。
+    #   ★生成と埋込は資源要件(0.66GB/19GB)も禁足条件も裁可も別物である。束ねてはならぬ。
+    #   埋込の家は CASPER_EMBED_HOME(固定台帳)が持ち、機構は書き換えぬ。
+    _rewrite_env(args.to, is_embed_too=False)
     state = _load_state()
     state.setdefault("switches", []).append({"ts": time.time(), "from": old, "to": f"http://{args.to}",
                                               "reason": args.reason or ""})

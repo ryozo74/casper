@@ -5,7 +5,7 @@
 CORS 不要・ブラウザから外部IPへ直接出ない。
 
 Usage:
-  python3 chat_server.py --endpoint http://192.168.44.119:11434 --model qwen3:14b --port 8770
+  python3 chat_server.py --endpoint http://192.168.44.139:11434 --model qwen3.6:27b --port 8770
 """
 import argparse, datetime, http.cookies, json, os, re, shutil, subprocess, sys, threading, time, urllib.request, urllib.error, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -138,7 +138,15 @@ ASSET_DIR = os.path.join(pack_paths.VAULT, "50_asset_shadows")
 VAULT = os.path.join(pack_paths.VAULT)
 ASSET_FILES = os.path.join(ASSET_DIR, "files")
 ap = argparse.ArgumentParser()
-ap.add_argument("--endpoint", default="http://192.168.44.119:11434")
+# ★2026-08-31: 既定を禁足席に焼き付けておらぬ(台帳=casper_endpoint から引く)。
+#   本番は supervisor が --endpoint を明示するゆえ此処は素手起動の保険だが、
+#   保険こそ禁足席を指してはならぬ(cron/gate の一発物が悉く既定へ落ちた前例がある)。
+try:
+    import casper_endpoint as _ep0
+    _DEFAULT_ENDPOINT = _ep0.gen_endpoint(strict=False)
+except Exception:
+    _DEFAULT_ENDPOINT = "http://127.0.0.1:11434"      # 台帳が読めぬ時は手元へ(他人の機を叩かぬ)
+ap.add_argument("--endpoint", default=_DEFAULT_ENDPOINT)
 ap.add_argument("--model", default="qwen3:14b")
 ap.add_argument("--port", type=int, default=8770)
 A = ap.parse_args()

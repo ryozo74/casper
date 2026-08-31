@@ -4,7 +4,8 @@ import json, os, re, subprocess, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIGEST = open(os.path.join(HERE, "casper_context.md"), encoding="utf-8").read()[:3500]
-OLLAMA = "http://192.168.44.119:11434/api/chat"
+import casper_endpoint as _ep                       # ★2026-08-31: 焼き付き既定を殺す(禁足席)
+OLLAMA = _ep.gen_endpoint() + "/api/chat"
 SCHED = ("メンバーA スケジュール 2026/6\n6/1 プロジェクトP MTG\n6/2-6/5 プロジェクトP 作業(確定)\n"
          "6/8 プロジェクトQ 打合せ(仮)\n6/10-6/20 プロジェクトQ レイアウト\n6/21以降 未定")
 

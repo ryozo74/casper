@@ -28,9 +28,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 EMB_INDEX = os.path.join(HERE, "casper_embed_index.json")
 EMB_DB = os.path.join(HERE, "casper_embed.db")     # Fable M2: 411MB JSON→sqlite(候補だけ引く・26s全読込を消す)
 EMB_META = EMB_INDEX + ".meta.json"                # cmd_498: 件数サイドカー(422MB本体を数え直さぬための台帳)
-OLLAMA = os.environ.get("CASPER_EMBED_ENDPOINT",
-                        os.environ.get("CASPER_OLLAMA", "http://192.168.44.119:11434")).rstrip("/")
-MODEL = os.environ.get("CASPER_EMBED_MODEL", "bge-m3")
+# ★2026-08-31: 宛先は casper_endpoint(唯一の関)から引く。焼き付きの既定を持たぬ
+#   ——cron や gate は env を source せぬゆえ、焼き付き既定は必ずいつか実運用へ漏れる。
+#   ★埋込の家は生成とは**別の裁可**で決まる(殿御裁可2026-08-24: 埋込は z8a を借り続ける)。
+import casper_endpoint as _ep
+OLLAMA = _ep.embed_endpoint()
+MODEL = _ep.embed_model()
 _VEC = None      # [{src,title,t,v:[float]}]
 
 try:
