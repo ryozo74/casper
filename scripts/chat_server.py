@@ -4392,13 +4392,21 @@ _CALENDAR_Q_RE = re.compile(
     re.I)
 
 
+def _calendar_has_match(q):
+    """calendarが発火してよいか(=①casper_toolsが在り②_CALENDAR_Q_REに一致するか)の門。
+    calendar_digest本体の離脱口(casper_tools不在／正規表現不一致)を両方含める
+    (gunshi裁定・risk_6是正・image_asset/_image_asset_has_matchと同じ設計原則)。
+    digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(写すな・共有せよ)。"""
+    if not casper_tools:
+        return False
+    return bool(_CALENDAR_Q_RE.search(q or ""))
+
+
 def calendar_digest(query):
     """Calendar 左脳の最新ライブデータを必要時に取得し digest 文字列で返す。
     claude_cli backend は tool を呼べぬため、ここで先読みしてプロンプトに注入する(search_vault=RAG と同様)。"""
-    if not casper_tools:
-        return ""
     q = query or ""
-    if not _CALENDAR_Q_RE.search(q):
+    if not _calendar_has_match(q):
         return ""
     today = datetime.date.today().isoformat()
     parts = []
@@ -5113,20 +5121,35 @@ def dm_messages(who, thread_id):
         return {"available": False, "messages": [], "error": str(e)[:120]}
 
 
+def _user_profile_has_match(who):
+    """user_profileが発火してよいか(=①認証済②プロファイルfile在り③『## Casper の理解』見出しを含む)の門。
+    digest本体の離脱口(見出し無しのプロファイルfile=旧形式/空)も含める
+    (gunshi裁定・risk_6是正の横展開・calendarと同型の穴)。
+    digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(写すな・共有せよ)。"""
+    who = who or {}
+    try:
+        if not who.get("authed"):
+            return False
+        p = os.path.join(VAULT, "20_people", f"profile_{_user_key(who)}.md")
+        if not os.path.exists(p):
+            return False
+        t = open(p, encoding="utf-8").read()
+        return "## Casper の理解" in t
+    except Exception:
+        return False
+
+
 def user_profile_digest(who):
     """ログイン中ユーザーの蓄積プロファイル(profile_<ukey>.md)を先読み注入。
     会話学習で深まったユーザー理解を毎回の応対に反映する。"""
     try:
-        if not who.get("authed"):
+        if not _user_profile_has_match(who):
             return ""
         p = os.path.join(VAULT, "20_people", f"profile_{_user_key(who)}.md")
-        if not os.path.exists(p):
-            return ""
         t = open(p, encoding="utf-8").read()
-        if "## Casper の理解" in t:
-            u = t.split("## Casper の理解", 1)[1].strip()[:1200]
-            return "\n\n## 話し相手(ログイン中ユーザー)についての理解\n" + u + \
-                   "\nこの理解を踏まえ、相手に合わせて応対せよ(押し付けず・自然に)。"
+        u = t.split("## Casper の理解", 1)[1].strip()[:1200]
+        return "\n\n## 話し相手(ログイン中ユーザー)についての理解\n" + u + \
+               "\nこの理解を踏まえ、相手に合わせて応対せよ(押し付けず・自然に)。"
     except Exception:
         pass
     return ""
@@ -5543,6 +5566,20 @@ def existence_digest(who, query):
 # 人名は必ず_resolve_person経由(roster→_person_alias_index()の順で閉集合から引く・綴りを直書きしない)。
 # rosterに無い名は経路1として解決させず経路2相当へ落ちる(cmd_508 AC2の出口検問=_guard_unrostered_person_claim
 # に人物主語化を委ねる・既存機構の再利用)。
+def _dm_threads_has_match(who, q):
+    """dm_threadsが発火してよいか(=①DM語②読取意図③認証/token/casper_mcpの在)の門。
+    dm_threads_digest本体の離脱口(語彙不一致／who未認証・WRITE_TOKEN不在・casper_mcp不在)を
+    全て含める(gunshi裁定・risk_6是正の横展開・calendar/_calendar_has_matchと同型の穴)。
+    digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(写すな・共有せよ)。"""
+    q = q or ""
+    if not q or not _DM_WORD_RE.search(q) or not _EXIST_Q_RE.search(q):
+        return False
+    who = who or {}
+    if not (who.get("authed") and who.get("uid") and WRITE_TOKEN and casper_mcp):
+        return False
+    return True
+
+
 def dm_threads_digest(who, query):
     """【DM読取=retrieve-then-render】dm_threadsの決定的取得結果をDM読取turnへ注入。
     ★母集合ヘッダを機構が書く: 「DMスレッド全N件を照会。うち貴殿宛の1:1はM件。本日分はK件。」
@@ -5552,9 +5589,7 @@ def dm_threads_digest(who, query):
     除外へ切り替える場合の構造(EXCLUDE_MULTIPARTY)を先に用意しておく。"""
     try:
         q = query or ""
-        if not q or not _DM_WORD_RE.search(q) or not _EXIST_Q_RE.search(q):
-            return ""
-        if not (who.get("authed") and who.get("uid") and WRITE_TOKEN and casper_mcp):
+        if not _dm_threads_has_match(who, q):
             return ""
         uid = who.get("uid")
         # 経路1判定(参考記録のみ・母集合の絞り込みには使わない=1:1一覧はどの経路でも同じ全件を見せる)。
@@ -5630,22 +5665,34 @@ _PROJ_Q_RE = re.compile(
     r"納期|締切|〆|遅れ|遅延|上記.{0,5}(リスト|一覧|PJ|プロジェクト|案件|の))", re.I)
 
 
+def _projects_has_match(query):
+    """projectsが発火してよいか(=①語彙/PJ名一致②online PJが1件以上在る)の門。
+    digest本体の離脱口(cal_projects.json読取失敗／online 0件)も含める
+    (gunshi裁定・risk_6是正の横展開・calendarと同型の穴)。
+    digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(写すな・共有せよ)。"""
+    q = query or ""
+    if not q:
+        return False
+    try:
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+    except Exception:
+        return False
+    online = [p for p in items if str(p.get("display_status") or "online") == "online"]
+    if not online:
+        return False
+    _name_hit = bool(_match_online_pj(q))             # 表記ゆれ耐性(カタカナ⇄ローマ字)でPJ名照合
+    return bool(_PROJ_Q_RE.search(q) or _name_hit)
+
+
 def projects_digest(query):
     """【進行中PJ一覧=retrieve-then-render】『動いているPJは?』『上記リストの納期遅れ』等には Calendar
     (cal_projects.json)から online PJ を本日日付＋納期超過印つきで注入し、ツールを呼ばず一覧から答えさせる
     (qwenのツール呼び失敗＋"上記"=直前回答を参照できぬ文脈欠落 の両方を機構で回避)。"""
     try:
-        if not query:
+        if not _projects_has_match(query):
             return ""
         items = json.load(open("/tmp/cal_projects.json")).get("items", [])
         online = [p for p in items if str(p.get("display_status") or "online") == "online"]
-        # 発火: 一般PJ語(_PROJ_Q_RE) or online PJ名を直接含む問い(『<PJ名>は今どうなってる?』等の個別PJ照会=
-        # ツール呼びの漏れを防ぐ・データを注入して一覧から答えさせる)
-        _name_hit = bool(_match_online_pj(query))        # 表記ゆれ耐性(カタカナ⇄ローマ字)でPJ名照合
-        if not (_PROJ_Q_RE.search(query) or _name_hit):
-            return ""
-        if not online:
-            return ""
         today = datetime.date.today().isoformat()
         overdue = []
         lines = []
@@ -5668,18 +5715,35 @@ def projects_digest(query):
         return ""
 
 
+def _entity_resolve_record(query):
+    """entityが発火してよいか(=①_pj_resolveがunique②cal_projects.json中に同名レコードが実在)の門。
+    digest本体の離脱口(_pj_resolveとcal_projects.jsonの索引が食い違いレコード不在になる場合)も含める
+    (gunshi裁定・risk_6是正の横展開・calendarと同型の穴)。戻り値はレコード自身(無ければNone)——
+    digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(写すな・共有せよ・二重読取を避ける)。"""
+    q = query or ""
+    if not q:
+        return None
+    st, names, _ = _pj_resolve(q)
+    if st != "unique":
+        return None
+    try:
+        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
+    except Exception:
+        return None
+    return next((x for x in items if str(x.get("name")) == names[0]), None)
+
+
+def _entity_has_match(query):
+    return _entity_resolve_record(query) is not None
+
+
 def entity_digest(query):
     """【実体アイデンティティ=unique解決の出口に中身を配線(Fable処方3-B)】名前解決器が unique に解けたPJの
     Calendar実レコード(正規名/期間/状態/概要)を『このPJの正体』として注入。名前から社名/意味を推測する真空を埋め、
     PJ名→無関係な同音語 の幻覚展開を断つ。閉集合(解決済み実体のみ)ゆえ軽い。unique でなければ空。"""
     try:
-        if not query:
-            return ""
-        st, names, _ = _pj_resolve(query)
-        if st != "unique":
-            return ""
-        items = json.load(open("/tmp/cal_projects.json")).get("items", [])
-        p = next((x for x in items if str(x.get("name")) == names[0]), None)
+        st, names, _ = _pj_resolve(query or "")
+        p = _entity_resolve_record(query)
         if not p:
             return ""
         desc = (p.get("description") or "").replace("\n", " ").strip()[:220]
@@ -6010,12 +6074,24 @@ _ACTIVE_TASK_Q_RE = re.compile(
     r"(今日|本日|今).{0,8}(何|どんな|どの).{0,6}(タスク|作業|案件)|何.{0,6}(作業|タスク).{0,6}(され|進行|中))", re.I)
 
 
+def _active_tasks_has_match(query):
+    """active_tasksが発火してよいか(=①casper_toolsが在り②語彙一致するか)の門。
+    digest本体の離脱口(casper_tools不在=_all_tasks()が[]を返す)も含める
+    (gunshi裁定・risk_6是正の横展開・calendarと同型の穴)。_all_tasks()自体(API呼出を伴う)は
+    ここでは呼ばない——casper_toolsの在否のみで判じ、二重API呼出を避ける。
+    digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(写すな・共有せよ)。"""
+    q = query or ""
+    if not q or not casper_tools:
+        return False
+    return bool(_ACTIVE_TASK_Q_RE.search(q))
+
+
 def active_tasks_digest(query):
     """【進行中タスク一覧=retrieve-then-render】『現在動いているタスクは?』に、全PJの進行中(wip/工程)タスクを
     プロジェクト別に注入する。get_today_tasks(本日締切のみ)に狭めるのを防ぐ——殿指摘『遅延PJが"動いているタスク"に
     出ず"動いていない"と誤解する』の恒久策(2026-07-08)。"""
     try:
-        if not query or not _ACTIVE_TASK_Q_RE.search(query):
+        if not _active_tasks_has_match(query):
             return ""
         tasks = _all_tasks()
         if not tasks:
@@ -7413,11 +7489,9 @@ def fewshot_digest(query):
     global _FEWSHOT_USED
     _FEWSHOT_USED = []
     try:
-        if not query or not os.path.exists(_FEWSHOT_BANK):
+        if not _fewshot_has_match(query):
             return ""
         rules = _fewshot_load_rules()
-        if not rules:
-            return ""
         qset = _fewshot_bigrams(query)
         scored = []
         for r in rules:

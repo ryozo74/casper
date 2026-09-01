@@ -61,25 +61,36 @@ _REPLAY_WHO = {"uid": 28, "authed": True}
 # 条件判定(正規表現/解決関数)をそのまま呼ぶ(新語彙表・新判定は作らない)。
 # 条件が未知の機構(ここに列挙のない名)は判定対象外とする(false unexpectedを出さない=fail-safe)。
 _EXPECTATION_CHECKS = {
-    "dm_threads": lambda q: bool(C._DM_WORD_RE.search(q or "") and C._EXIST_Q_RE.search(q or "")),
+    # cmd_520第5便(risk_6横展開・同型穴の是正): dm_threadsもcalendarと同じく認証/token/casper_mcpの
+    # 離脱口を持つが旧checkは語彙一致のみだった。_dm_threads_has_matchを単一ソースとして呼ぶ
+    # (replayのwhoは_REPLAY_WHOで固定=authed:Trueだが、uid/WRITE_TOKEN/casper_mcpの状態次第で
+    # 本番同様に離脱しうる形を保つ)。
+    "dm_threads": lambda q: bool(C._dm_threads_has_match(_REPLAY_WHO, q or "")),
     "existence": lambda q: bool(C._EXIST_Q_RE.search(q or "")),
     # cmd_512第6便是正: active_tasks_digestの実ゲートは_ACTIVE_TASK_Q_RE(chat_server.py
     # L4595-4599・L4607)であり、_PJ_TASK_REは別機構(projectsのPJ別タスク一覧・L5577)の
     # ゲートで別の語彙。旧マッピングは別機構の条件を誤って流用しており、turn9/10の
     # 「不発火」は実際には正しい不発火(母集合の取り違えによる誤検知)だった。
-    "active_tasks": lambda q: bool(C._ACTIVE_TASK_Q_RE.search(q or "")),
+    # cmd_520第5便(risk_6横展開): casper_tools不在の離脱口(_all_tasks()が[]を返す)も含める
+    # _active_tasks_has_matchを単一ソースとして呼ぶ(正規表現のみでは同型の穴になる)。
+    "active_tasks": lambda q: bool(C._active_tasks_has_match(q or "")),
     # cmd_520第2便-a(gunshi裁定answer_a・即日流用可能な7機構): 本番の門と同一の式を
     # そのまま呼ぶ(新語彙は書かない)。各機構ごとにAC7突然変異試験(missing側赤化)を課す。
-    "projects": lambda q: bool(C._PROJ_Q_RE.search(q or "") or C._match_online_pj(q or "")),
-    "entity": lambda q: bool(C._pj_resolve(q or "")[0] == "unique"),
+    # cmd_520第5便(risk_6横展開): online PJ 0件/cal_projects.json読取失敗の離脱口も含める
+    # _projects_has_matchを単一ソースとして呼ぶ。
+    "projects": lambda q: bool(C._projects_has_match(q or "")),
+    # cmd_520第5便(risk_6横展開): _pj_resolveがunique判定でもcal_projects.json中に
+    # 同名レコードが実在しなければdigestは不発火(索引とjsonの食い違い)。
+    # _entity_has_matchを単一ソースとして呼ぶ。
+    "entity": lambda q: bool(C._entity_has_match(q or "")),
     "context_sections": lambda q: any(
         any(k in (q or "").lower() for k in C._section_kws(s)) for s in C._load_context()["sections"]),
     # user_profile_digestはqueryを見ずwhoのみで判ずる(L5095-5100)。replayのwhoは
     # run()で{"uid":28,"authed":True}固定(全turn同一)ゆえ、その同じ値をここでも使う
     # (新しいwhoの表現を作らず、run()の単一ソースをそのまま再利用する)。
-    "user_profile": lambda q: bool(
-        _REPLAY_WHO.get("authed")
-        and os.path.exists(os.path.join(C.VAULT, "20_people", f"profile_{C._user_key(_REPLAY_WHO)}.md"))),
+    # cmd_520第5便(risk_6横展開): 『## Casper の理解』見出し不在の離脱口(旧形式/空プロファイル)も
+    # 含める_user_profile_has_matchを単一ソースとして呼ぶ(file存在のみでは同型の穴になる)。
+    "user_profile": lambda q: bool(C._user_profile_has_match(_REPLAY_WHO)),
     # verify/aurora_list/casper_howtoは門(gate)だけを流用する(本体のCalendar/Aurora照会は不要)。
     "verify": lambda q: bool(C._STATE_Q_RE.search(q or "")),
     # ★brief記載の`is not True`はaurora_list_digest内部の早期return(否定ゲート)の形であり、
@@ -90,7 +101,9 @@ _EXPECTATION_CHECKS = {
     "casper_howto": lambda q: bool(_replay_asks_about_casper(q or "")),
     # cmd_520最終便-担当A: calendar(単純な正規表現の門)・fewshot(learn_bankへの照合結果ゆえ
     # 関数として切出し)。3機構とも本番の門をそのまま呼ぶ(新語彙は書かない・gunshi裁定)。
-    "calendar": lambda q: bool(C._CALENDAR_Q_RE.search(q or "")),
+    # cmd_520 risk_6是正: casper_tools不在の離脱口も含む_calendar_has_matchを単一ソースとして呼ぶ
+    # (正規表現のみでは離脱口の片方を落とし偽りの赤を出す・image_asset/_image_asset_has_matchと同型)。
+    "calendar": lambda q: bool(C._calendar_has_match(q or "")),
     # ★実装中に判明(gunshi裁定「実装して分かったことを優先せよ」に従い案Aから切替):
     # image_assetは正規表現一本では実発火(fired)を再現できない——入口正規表現を満たしても
     # vault実ファイルにクエリ語が1件も一致しなければ不発火(実測turn10で乖離を検出・是正)。
