@@ -53,6 +53,10 @@ import chat_server as C
 # ★実ログの実体はqueue/evidence/配下(=リポジトリ外・symlink先)。ここでしかopenしない。
 _EVIDENCE_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "..", "queue", "evidence"))
 
+# replay全体を通じて固定のwho(殿=uid28+盲点3対策のauthed付与)。run()とuser_profile検査の
+# 双方がこの単一値を参照する(新しいwho表現を作らない・cmd_520第2便-a)。
+_REPLAY_WHO = {"uid": 28, "authed": True}
+
 # 機構名→「この機構が発火してよい最小条件」を検査する関数。既存のdigest内部で使っている
 # 条件判定(正規表現/解決関数)をそのまま呼ぶ(新語彙表・新判定は作らない)。
 # 条件が未知の機構(ここに列挙のない名)は判定対象外とする(false unexpectedを出さない=fail-safe)。
@@ -64,6 +68,35 @@ _EXPECTATION_CHECKS = {
     # ゲートで別の語彙。旧マッピングは別機構の条件を誤って流用しており、turn9/10の
     # 「不発火」は実際には正しい不発火(母集合の取り違えによる誤検知)だった。
     "active_tasks": lambda q: bool(C._ACTIVE_TASK_Q_RE.search(q or "")),
+    # cmd_520第2便-a(gunshi裁定answer_a・即日流用可能な7機構): 本番の門と同一の式を
+    # そのまま呼ぶ(新語彙は書かない)。各機構ごとにAC7突然変異試験(missing側赤化)を課す。
+    "projects": lambda q: bool(C._PROJ_Q_RE.search(q or "") or C._match_online_pj(q or "")),
+    "entity": lambda q: bool(C._pj_resolve(q or "")[0] == "unique"),
+    "context_sections": lambda q: any(
+        any(k in (q or "").lower() for k in C._section_kws(s)) for s in C._load_context()["sections"]),
+    # user_profile_digestはqueryを見ずwhoのみで判ずる(L5095-5100)。replayのwhoは
+    # run()で{"uid":28,"authed":True}固定(全turn同一)ゆえ、その同じ値をここでも使う
+    # (新しいwhoの表現を作らず、run()の単一ソースをそのまま再利用する)。
+    "user_profile": lambda q: bool(
+        _REPLAY_WHO.get("authed")
+        and os.path.exists(os.path.join(C.VAULT, "20_people", f"profile_{C._user_key(_REPLAY_WHO)}.md"))),
+    # verify/aurora_list/casper_howtoは門(gate)だけを流用する(本体のCalendar/Aurora照会は不要)。
+    "verify": lambda q: bool(C._STATE_Q_RE.search(q or "")),
+    # ★brief記載の`is not True`はaurora_list_digest内部の早期return(否定ゲート)の形であり、
+    # _EXPECTATION_CHECKS(「発火してよいか」の肯定判定)としてそのまま使うと符号が逆転する
+    # (実走で全turn「不発火」赤化=符号バグを検出・是正)。他の全機構と同じ「肯定ゲート」の
+    # 形に揃え、_aurora_list_turnの戻り値(True/False)をそのまま使う。
+    "aurora_list": lambda q: bool(C._aurora_list_turn(q or "")),
+    "casper_howto": lambda q: bool(_replay_asks_about_casper(q or "")),
+    # cmd_520最終便-担当A: calendar(単純な正規表現の門)・fewshot(learn_bankへの照合結果ゆえ
+    # 関数として切出し)。3機構とも本番の門をそのまま呼ぶ(新語彙は書かない・gunshi裁定)。
+    "calendar": lambda q: bool(C._CALENDAR_Q_RE.search(q or "")),
+    # ★実装中に判明(gunshi裁定「実装して分かったことを優先せよ」に従い案Aから切替):
+    # image_assetは正規表現一本では実発火(fired)を再現できない——入口正規表現を満たしても
+    # vault実ファイルにクエリ語が1件も一致しなければ不発火(実測turn10で乖離を検出・是正)。
+    # ゆえ本番と同一のスコア付きヒット判定を行う_image_asset_has_matchを単一ソースとして呼ぶ。
+    "image_asset": lambda q: bool(C._image_asset_has_match(q or "")),
+    "fewshot": lambda q: bool(C._fewshot_has_match(q or "")),
 }
 
 # ★point_b(2): dm_threads_digestはauthed付与で casper_mcp.call_tool("get_messages", ...) を
@@ -179,7 +212,7 @@ def run(use_live_mcp=False, live_llm=False):
     一切呼ばない。live_llm=True(週1回の --live-llm 専用)の時のみ本物のLLM判定へ戻し、
     規則側の判定との食い違いを台帳へ記録する(赤にはしない・記録のみ・陳腐化検知用)。"""
     turns = load()
-    who = {"uid": 28, "authed": True}   # 殿(uid28)固定+盲点3対策のauthed付与(必ずスタブ注入と同時)
+    who = _REPLAY_WHO   # 殿(uid28)固定+盲点3対策のauthed付与(必ずスタブ注入と同時・単一ソース)
 
     _orig_mcp = C.casper_mcp
     if not use_live_mcp:
@@ -282,15 +315,45 @@ def run(use_live_mcp=False, live_llm=False):
         C._asks_about_casper = _orig_asks
 
 
+def _discriminating_power():
+    """cmd_520第3便-c: _EXPECTATION_CHECKSの各checkを、コーパスの全user turnへ照合し直し、
+    True/False両方を返すか(判別力あり)・片方のみか(判別力ゼロ=常に真 or 常に偽)を判定する。
+    新語彙は使わず既存の_EXPECTATION_CHECKSとload()のturn集合だけで計算する(replay_corpus.py内で完結)。
+    戻り値: (discriminating, always_true, always_false) の3つのname集合。
+    ★偽になれない検査(常に真)は分子を、常に偽の検査は「登録済機構数」を水増しするため、
+    被覆率の分子には判別力ある検査のみを数える(gunshi裁定)。"""
+    contents = [t.get("content") or "" for t in load() if t.get("role") == "user"]
+    discriminating, always_true, always_false = set(), set(), set()
+    for name, check in _EXPECTATION_CHECKS.items():
+        vals = {bool(check(c)) for c in contents}
+        if len(vals) >= 2:
+            discriminating.add(name)
+        elif vals == {True}:
+            always_true.add(name)
+        else:
+            always_false.add(name)
+    return discriminating, always_true, always_false
+
+
 def print_report(result):
     """機構名/turn番号/赤緑のみを出力する(本文を出さない・守秘の機械的担保)。
-    ★軍師qc3_correction具申: 未評価数と被覆率を併記する。"""
+    ★軍師qc3_correction具申: 未評価数と被覆率を併記する。
+    ★cmd_520第3便-c(将軍新下知): 被覆率を三分表示する(①判別力ある評価/②常に真偽の評価/
+    ③未評価)。④として発火0件の登録機構も明示する。①のみの比を「真の被覆」として併記する
+    (現行の被覆率は判別力ゼロの検査を含んだ甘い数字のため、主要な数値として押し出さない)。"""
     print(f"replay corpus: turns={result.get('n_turns')} user_turns={result.get('n_user_turns')}")
     n_red = 0
     n_red_digest = 0     # ★軍師補足(1): digest由来(unexpected/missing)とexit_layer由来を分けて集計
     n_red_exit = 0
     n_fired_total = 0
     n_evaluated_total = 0
+
+    discriminating, always_true, always_false = _discriminating_power()
+    fired_counts = {}
+    n_disc_fired = 0
+    n_always_fired = 0
+    n_unreg_fired = 0
+
     for row in result.get("fired", []):
         mark = "🔴" if row["verdict"] == "red" else "🟢"
         exl = row.get("exit_layer") or {}
@@ -308,16 +371,42 @@ def print_report(result):
             n_red_exit += 1
         n_fired_total += len(row["mechanisms"])
         n_evaluated_total += row.get("evaluated", 0)
+        for m in row["mechanisms"]:
+            fired_counts[m] = fired_counts.get(m, 0) + 1
+            if m in discriminating:
+                n_disc_fired += 1
+            elif m in always_true or m in always_false:
+                n_always_fired += 1
+            else:
+                n_unreg_fired += 1
+
     n_unevaluated_total = n_fired_total - n_evaluated_total
     coverage = (n_evaluated_total / n_fired_total * 100) if n_fired_total else 0.0
+    true_coverage_denom = n_disc_fired + n_unreg_fired
+    true_coverage = (n_disc_fired / true_coverage_denom * 100) if true_coverage_denom else 0.0
+
     print(f"合計: {len(result.get('fired', []))}turn中 意図外発火 {n_red}件"
           f"（内訳: digest由来 {n_red_digest}件・出口層由来 {n_red_exit}件）")
-    print(f"被覆率: {n_evaluated_total}/{n_fired_total}件発火中評価済み ({coverage:.1f}%)  未評価: {n_unevaluated_total}件")
+    print(f"被覆率(現行・甘い数字): {n_evaluated_total}/{n_fired_total}件発火中評価済み ({coverage:.1f}%)  未評価: {n_unevaluated_total}件")
+    print("--- 被覆率 三分表示(cmd_520第3便-c) ---")
+    print(f"① 判別力ある評価: {n_disc_fired}/{n_fired_total} = {n_disc_fired / n_fired_total * 100 if n_fired_total else 0.0:.1f}%"
+          f"  {sorted(discriminating)}")
+    print(f"② 常に真/偽の評価(判別力ゼロ): {n_always_fired}/{n_fired_total} = {n_always_fired / n_fired_total * 100 if n_fired_total else 0.0:.1f}%"
+          f"  常に真={sorted(always_true)} 常に偽={sorted(always_false)}")
+    print(f"③ 未評価(未登録): {n_unreg_fired}/{n_fired_total} = {n_unreg_fired / n_fired_total * 100 if n_fired_total else 0.0:.1f}%")
+    print(f"★真の被覆(①のみ) = {n_disc_fired}/{true_coverage_denom} = {true_coverage:.1f}%"
+          "  ←判別力ゼロの評価を分子から除いた実質的な被覆率")
+    zero_fire = [name for name in _EXPECTATION_CHECKS if fired_counts.get(name, 0) == 0]
+    print(f"④ 発火0件の登録機構: {zero_fire or '(なし)'}"
+          + ("  ※瑕疵と断定はしない(cmd_512第6便経緯あり・本コーパスに該当turnが無いだけの可能性・仮説として記録)"
+             if zero_fire else ""))
     print(f"LLM呼出回数: {result.get('llm_calls')}件"
           + ("(手当6: 規則側のみで判定=0件のはず)" if result.get("llm_calls") == 0 else "★想定外(0件でない)"))
     # ★機械可読サマリ行(呼出元スクリプトのparse用・人向け行の文言変更に影響されない安定した形)。
     print(f"MACHINE_SUMMARY n_red={n_red} llm_calls={result.get('llm_calls')} "
-          f"n_user_turns={result.get('n_user_turns')}")
+          f"n_user_turns={result.get('n_user_turns')} "
+          f"n_disc_fired={n_disc_fired} n_always_fired={n_always_fired} n_unreg_fired={n_unreg_fired} "
+          f"true_coverage={true_coverage:.1f}")
 
 
 _DIVERGENCE_LEDGER = os.path.join(HERE, "reports", "casper_howto_llm_divergence.jsonl")

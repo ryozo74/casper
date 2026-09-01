@@ -227,6 +227,84 @@ def test_cmd511_ac9_topic_only_re_全語がsend_intent_trueになる():
               got is True, f"q={q!r} got={got}")
 
 
+def test_cmd520_ac6_ambiguous_verb_only_re_全語がsend_intent_trueになる():
+    """AC6(対称化・subtask_520_impl2b): _DM_AMBIGUOUS_VERB_ONLY_RE(報告/納品/校了/連絡/送信/共有)
+    についても、_DM_TOPIC_ONLY_RE側(test_cmd511_ac9_topic_only_re_全語がsend_intent_trueになる)
+    と同型の単一ソース抽出による全数検査を課す(gunshi裁定の対称化是正・手書き複製を避け
+    パターン自身から語を機械抽出する)。一語でもFalseなら赤。"""
+    import re as _re_local
+    _amb_pattern = C._DM_AMBIGUOUS_VERB_ONLY_RE.pattern
+    m = _re_local.search(r"\(([^)]+)\)", _amb_pattern)
+    check("AC6-0: _DM_AMBIGUOUS_VERB_ONLY_RE から語群を抽出できる", m is not None, _amb_pattern)
+    words = m.group(1).split("|") if m else []
+    check("AC6-0b: 抽出語数が1以上", len(words) > 0, f"words={words}")
+    for w in words:
+        q = f"kiyotomoに{w}して"
+        got = C._turn_is_send_intent(q)
+        check(f"AC6: 両義語「{w}」を含む依頼文「{q}」はsend_intent=True(閉集合全数検査)",
+              got is True, f"q={q!r} got={got}")
+
+
+def test_cmd520_ac7_ambiguous_verb_only_re_旧版へ戻す変異で赤化する():
+    """AC7(対称化・subtask_520_impl2b): _DM_AMBIGUOUS_VERB_ONLY_REを旧版(語彙表を戻す=
+    空集合)へ機械的に差し替えた変異モジュールで、test_cmd520_ac6の全数検査対象語(kiyotomoに
+    <語>して)がFalseへ落ちる(赤化する)ことを示す。★本番chat_server.py(稼働中プロセス)は
+    絶対に書き換えない——一時ディレクトリへコピーした別名モジュールに対してのみ変異する
+    (AC9/AC-S7と同型の安全手順・変異前確認→赤化→復元→md5一致の四点)。"""
+    import hashlib
+    import importlib
+    import shutil
+    import tempfile
+
+    src_path = os.path.join(HERE, "chat_server.py")
+    with open(src_path, "rb") as f:
+        original_bytes = f.read()
+    original_md5 = hashlib.md5(original_bytes).hexdigest()
+
+    marker = '_DM_AMBIGUOUS_VERB_ONLY_RE = re.compile(r"(報告|納品|校了|連絡|送信|共有)", re.I)'
+    check("AC7-0: 変異対象行(_DM_AMBIGUOUS_VERB_ONLY_RE定義)が実装中に存在する(本番ファイルを検査のみ・書換えなし)",
+          marker.encode("utf-8") in original_bytes, marker)
+    if marker.encode("utf-8") not in original_bytes:
+        return
+
+    text = original_bytes.decode("utf-8")
+    # 変異: 語彙表を旧版(空集合=何にもマッチしない)へ機械的に差し替える(cmd520 AC6相当の変異)。
+    mutated_text = text.replace(
+        marker,
+        '_DM_AMBIGUOUS_VERB_ONLY_RE = re.compile(r"(?!x)x", re.I)  # AC7 mutation: vocab reverted to empty',
+    )
+    check("AC7-1: 変異置換が実際にテキストを変更した", mutated_text != text)
+
+    tmpdir = tempfile.mkdtemp(prefix="cmd520_ac7_")
+    try:
+        mutated_copy_path = os.path.join(tmpdir, "chat_server_ac7_mutant.py")
+        with open(mutated_copy_path, "w", encoding="utf-8") as f:
+            f.write(mutated_text)
+        old_syspath = list(sys.path)
+        sys.path.insert(0, tmpdir)
+        sys.path.insert(0, HERE)
+        try:
+            if "chat_server_ac7_mutant" in sys.modules:
+                del sys.modules["chat_server_ac7_mutant"]
+            import chat_server_ac7_mutant as C_mut
+            m = re.search(r"\(([^)]+)\)", C.__dict__["_DM_AMBIGUOUS_VERB_ONLY_RE"].pattern)
+            words = m.group(1).split("|") if m else []
+            for w in words:
+                q = f"kiyotomoに{w}して"
+                got = C_mut._turn_is_send_intent(q)
+                check(f"AC7-2: 変異後(語彙表を旧版へ戻す)は両義語「{w}」の依頼文「{q}」がFalseへ戻る"
+                      "(是正が効いていることの赤の証明)", got is False, f"q={q!r} got={got}")
+        finally:
+            sys.path[:] = old_syspath
+            if "chat_server_ac7_mutant" in sys.modules:
+                del sys.modules["chat_server_ac7_mutant"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        restored_md5 = hashlib.md5(open(src_path, "rb").read()).hexdigest()
+        check("AC7-3: 本番chat_server.pyは変異テスト中も一切書き換えられていない(md5不変)",
+              restored_md5 == original_md5, f"before={original_md5} after={restored_md5}")
+
+
 def test_cmd511_ac9_行為語除去後の実害再現クエリがtrueになる():
     """AC9裏取り: 軍師が実測した実害3例(是正前はいずれもFalse=誤判定)が、是正後は
     いずれもTrue(送信turn)と判定されること。"""
@@ -720,6 +798,8 @@ def main():
         test_gate_defaults_true_when_ambiguous,
         test_ac9_mutation_kills_gate_incomplete_message_returns,
         test_cmd511_ac9_topic_only_re_全語がsend_intent_trueになる,
+        test_cmd520_ac6_ambiguous_verb_only_re_全語がsend_intent_trueになる,
+        test_cmd520_ac7_ambiguous_verb_only_re_旧版へ戻す変異で赤化する,
         test_cmd511_ac9_行為語除去後の実害再現クエリがtrueになる,
         test_cmd511_ac_risk_読取turnの回帰試験,
         test_cmd511_ac_risk2_報告納品校了の裸名詞形は読取turnのまま,

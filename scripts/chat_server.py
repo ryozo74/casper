@@ -4387,13 +4387,18 @@ def identify(handler):
             "actor_origin": (actor_origin or "anon"), "synthetic": bool(_host_ok)}
 
 
+_CALENDAR_Q_RE = re.compile(
+    r"タスク|task|予定|今日|本日|スケジュール|schedule|プロジェクト|PJ|案件|担当|進捗|締切|納期|誰|稼働|アサイン|assign",
+    re.I)
+
+
 def calendar_digest(query):
     """Calendar 左脳の最新ライブデータを必要時に取得し digest 文字列で返す。
     claude_cli backend は tool を呼べぬため、ここで先読みしてプロンプトに注入する(search_vault=RAG と同様)。"""
     if not casper_tools:
         return ""
     q = query or ""
-    if not re.search(r"タスク|task|予定|今日|本日|スケジュール|schedule|プロジェクト|PJ|案件|担当|進捗|締切|納期|誰|稼働|アサイン|assign", q, re.I):
+    if not _CALENDAR_Q_RE.search(q):
         return ""
     today = datetime.date.today().isoformat()
     parts = []
@@ -4863,17 +4868,24 @@ def portfolio_digest(query):
     return ""
 
 
-def image_asset_digest(query):
-    """画像/静止画/カット系クエリ時、該当する asset_shadow の【実在する】画像URLを機械的に集めて注入。
-    ファイル名は実ファイル(vault/50_asset_shadows/files)から取るため捏造不能。RAGの取りこぼし/qwenの名前改変を断つ。"""
-    if not re.search(r"画像|静止画|イメージ|カット|サムネ|絵コンテ|ビジュアル|見せ|表示|一覧|image|cut|still", query or "", re.I):
-        return ""
+_IMAGE_ASSET_Q_RE = re.compile(
+    r"画像|静止画|イメージ|カット|サムネ|絵コンテ|ビジュアル|見せ|表示|一覧|image|cut|still", re.I)
+
+
+def _image_asset_scored_hits(query):
+    """image_assetの実発火条件(gunshi裁定・cmd_520最終便で実装中に判明): 入口の正規表現だけでは
+    「fired」を再現できない——実ファイル(vault/50_asset_shadows)にクエリ語が1件も一致しない場合、
+    正規表現は通っても実際には注入ゼロで不発火となる(実測: turn10『各タスクのステータスを見せて』は
+    正規表現True・実発火Falseの乖離を確認)。ゆえ「正規表現一本」ではなく判定を関数として切り出し、
+    image_asset_digest本体とreplay_corpus.pyの両方がこの単一ソースを呼ぶ(★重要な検証で乖離が
+    再発しないことをAC-integrityで担保)。戻り値: 実在確認済のスコア付きヒットのリスト(空=不発火)。"""
+    if not _IMAGE_ASSET_Q_RE.search(query or ""):
+        return []
     try:
         import glob
         files_dir = os.path.join(ASSET_DIR, "files")
         if not os.path.isdir(files_dir):
-            return ""
-        IMG = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+            return []
         # クエリの語(2文字以上の英数 + 日本語固有語)を抽出
         ql = (query or "").lower()
         qtok = set(re.findall(r"[a-z0-9]{2,}", ql)) | set(re.findall(r"[ぁ-んァ-ヶ一-龠]{2,}", query or ""))
@@ -4895,20 +4907,30 @@ def image_asset_digest(query):
             dm = re.search(r"##\s*説明.*?\n(.*?)(?=\n##|\Z)", t, re.S)
             desc = re.sub(r"\s+", " ", (dm.group(1) if dm else "")).strip()[:80]
             rows.append((fname, desc, score))
-        if not rows:
-            return ""
-        hits = [r for r in rows if r[2] > 0]
-        if not hits:
-            return ""
-        hits.sort(key=lambda r: -r[2])
-        hits = hits[:30]
-        lines = [f"- `![]( /asset/{fn} )` — {desc}".replace("( /asset/", "(/asset/").replace(" )", ")")
-                 for fn, desc, _ in hits]
-        return ("\n\n## 該当する画像アセット（実在確認済・URLは下記を一字一句そのまま使え／改変・接頭辞付与・拡張子変更を一切するな）\n"
-                + "\n".join(lines)
-                + "\n※ここに無いファイル名の画像URLを書くな（存在しない＝表示されない）。全件出すよう求められたら上記を省略せず全て出せ。")
+        return [r for r in rows if r[2] > 0]
     except Exception:
+        return []
+
+
+def _image_asset_has_match(query):
+    """image_assetが実際に発火するか(=入口正規表現を満たしvault実ファイルへのスコア付き一致が1件
+    以上あるか)の門。正規表現一本には落とせない(実測で判明・上記_image_asset_scored_hits参照)。"""
+    return bool(_image_asset_scored_hits(query))
+
+
+def image_asset_digest(query):
+    """画像/静止画/カット系クエリ時、該当する asset_shadow の【実在する】画像URLを機械的に集めて注入。
+    ファイル名は実ファイル(vault/50_asset_shadows/files)から取るため捏造不能。RAGの取りこぼし/qwenの名前改変を断つ。"""
+    hits = _image_asset_scored_hits(query)
+    if not hits:
         return ""
+    hits.sort(key=lambda r: -r[2])
+    hits = hits[:30]
+    lines = [f"- `![]( /asset/{fn} )` — {desc}".replace("( /asset/", "(/asset/").replace(" )", ")")
+             for fn, desc, _ in hits]
+    return ("\n\n## 該当する画像アセット（実在確認済・URLは下記を一字一句そのまま使え／改変・接頭辞付与・拡張子変更を一切するな）\n"
+            + "\n".join(lines)
+            + "\n※ここに無いファイル名の画像URLを書くな（存在しない＝表示されない）。全件出すよう求められたら上記を省略せず全て出せ。")
 
 
 def _thread_is_new(uid, msgs):
@@ -7348,6 +7370,42 @@ def _dg(name, text):
     return cut.rstrip() + "\n…(予算により以下省略)"
 
 
+def _fewshot_bigrams(s):
+    """文字bigram化(日本語は空白無しゆえ語分割でなくn-gram)。fewshot_digest・門判定の双方で共用する単一ソース。"""
+    s = re.sub(r"[\s、。・！？]", "", str(s))
+    return set(s[i:i + 2] for i in range(len(s) - 1))
+
+
+def _fewshot_load_rules():
+    if not os.path.exists(_FEWSHOT_BANK):
+        return []
+    rules = []
+    for ln in open(_FEWSHOT_BANK, encoding="utf-8"):
+        if ln.strip():
+            try:
+                rules.append(json.loads(ln))
+            except Exception:
+                pass
+    return rules
+
+
+def _fewshot_has_match(query):
+    """fewshotが発火してよいか(=bigram重なり3個以上の規則が1件以上あるか)の門。
+    正規表現一本には落とせない(外部データlearn_bankへの照合結果)ため関数として切り出す
+    (gunshi裁定・cmd_520)。fewshot_digest本体とreplay_corpus.pyの両方がこれを単一ソースとして呼ぶ。"""
+    if not query:
+        return False
+    rules = _fewshot_load_rules()
+    if not rules:
+        return False
+    qset = _fewshot_bigrams(query)
+    for r in rules:
+        rset = _fewshot_bigrams(str(r.get("situation", "")) + str(r.get("lesson", "")))
+        if len(qset & rset) >= 3:                   # 閾値: bigram3個以上一致(無関係な規則を注入せぬ)
+            return True
+    return False
+
+
 def fewshot_digest(query):
     """【教訓の注入=flywheel柱1の出口(Fable5)】learn_bank の規則から、この問いに関連する上位3-5則を
     プロンプト末尾に注入し qwenの型を矯正する。全50則は入れず類似上位のみ(合計~400トークン上限)。
@@ -7357,23 +7415,13 @@ def fewshot_digest(query):
     try:
         if not query or not os.path.exists(_FEWSHOT_BANK):
             return ""
-        rules = []
-        for ln in open(_FEWSHOT_BANK, encoding="utf-8"):
-            if ln.strip():
-                try:
-                    rules.append(json.loads(ln))
-                except Exception:
-                    pass
+        rules = _fewshot_load_rules()
         if not rules:
             return ""
-        # 簡易関連度: 問いと規則(situation)の文字bigram重なり(日本語は空白無しゆえ語分割でなくn-gram)。閾値未満は注入ゼロ。
-        def _bg(s):
-            s = re.sub(r"[\s、。・！？]", "", str(s))
-            return set(s[i:i + 2] for i in range(len(s) - 1))
-        qset = _bg(query)
+        qset = _fewshot_bigrams(query)
         scored = []
         for r in rules:
-            rset = _bg(str(r.get("situation", "")) + str(r.get("lesson", "")))
+            rset = _fewshot_bigrams(str(r.get("situation", "")) + str(r.get("lesson", "")))
             ov = len(qset & rset)
             if ov >= 3:                              # 閾値: bigram3個以上一致(無関係な規則を注入せぬ)
                 scored.append((ov, r))
